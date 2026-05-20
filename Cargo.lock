@@ -22,6 +22,7 @@ dependencies = [
  "axum",
  "clap",
  "http-body-util",
+ "serde",
  "serde_json",
  "tokio",
  "tower",

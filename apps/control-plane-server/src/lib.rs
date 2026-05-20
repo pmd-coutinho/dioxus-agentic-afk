@@ -14,6 +14,8 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Deserialize;
+use std::process::Command;
 use tower_http::services::{ServeDir, ServeFile};
 use utoipa::OpenApi;
 
@@ -22,6 +24,7 @@ pub struct ControlPlaneConfig {
     pub bind_address: SocketAddr,
     pub dashboard_asset_dir: PathBuf,
     pub database_url: String,
+    pub gh_binary_path: PathBuf,
 }
 
 impl ControlPlaneConfig {
@@ -34,11 +37,15 @@ impl ControlPlaneConfig {
             .into();
         let database_url = std::env::var("AGENTIC_AFK_DATABASE_URL")
             .unwrap_or_else(|_| "sqlite://agentic-afk.db".to_string());
+        let gh_binary_path = std::env::var("AGENTIC_AFK_GH_BIN")
+            .unwrap_or_else(|_| "gh".to_string())
+            .into();
 
         Ok(Self {
             bind_address,
             dashboard_asset_dir,
             database_url,
+            gh_binary_path,
         })
     }
 
@@ -296,21 +303,16 @@ async fn sync_issue_source(State(state): State<Arc<AppState>>, Path(id): Path<St
         );
     };
 
-    if source.kind != "local_markdown" {
-        let detail = format!(
+    let sync_result = match source.kind.as_str() {
+        "local_markdown" => read_local_markdown_issues(&project.path, &source.locator),
+        "github" => read_github_issues(&state.config.gh_binary_path, &source.locator),
+        _ => Err(format!(
             "manual sync is not supported for {} Issue Sources yet",
             source.kind
-        );
-        let _ = persistence::record_sync_failure(&state.db, &id, &source, &detail).await;
-        return sync_problem_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "urn:agentic-afk:unsupported-issue-source",
-            "Unprocessable Entity",
-            detail,
-        );
-    }
+        )),
+    };
 
-    match read_local_markdown_issues(&project.path, &source.locator) {
+    match sync_result {
         Ok(issues) => {
             let synced_at = current_sync_timestamp();
             match persistence::replace_planning_snapshot(
@@ -391,6 +393,106 @@ fn read_local_markdown_issues(
     }
 
     Ok(issues)
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubIssue {
+    number: i64,
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    labels: Vec<GitHubLabel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubLabel {
+    name: String,
+}
+
+fn read_github_issues(
+    gh_binary_path: &std::path::Path,
+    locator: &str,
+) -> Result<Vec<SourceIssueSnapshot>, String> {
+    let auth = Command::new(gh_binary_path)
+        .args(["auth", "status"])
+        .output()
+        .map_err(|error| format!("failed to run gh auth status: {error}"))?;
+    if !auth.status.success() {
+        return Err(format!(
+            "gh is not authenticated: {}",
+            command_output(&auth)
+        ));
+    }
+
+    let output = Command::new(gh_binary_path)
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            locator,
+            "--state",
+            "open",
+            "--limit",
+            "1000",
+            "--json",
+            "number,title,body,labels",
+        ])
+        .output()
+        .map_err(|error| format!("failed to run gh issue list: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to sync GitHub Issue Source: {}",
+            command_output(&output)
+        ));
+    }
+
+    let mut issues = serde_json::from_slice::<Vec<GitHubIssue>>(&output.stdout)
+        .map_err(|error| format!("failed to parse gh issue list output: {error}"))?
+        .into_iter()
+        .map(parse_github_issue)
+        .collect::<Vec<_>>();
+    issues.sort_by(|left, right| {
+        left.source_order
+            .cmp(&right.source_order)
+            .then_with(|| left.source_id.cmp(&right.source_id))
+    });
+    Ok(issues)
+}
+
+fn command_output(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        format!("gh exited with status {}", output.status)
+    } else {
+        stdout
+    }
+}
+
+fn parse_github_issue(issue: GitHubIssue) -> SourceIssueSnapshot {
+    let source_id = issue.number.to_string();
+    let raw_text = issue.body.unwrap_or_default();
+    let mut snapshot = parse_local_markdown_issue(source_id, raw_text, issue.number);
+    snapshot.title = if issue.title.trim().is_empty() {
+        snapshot.source_id.clone()
+    } else {
+        issue.title
+    };
+    snapshot.readiness = if issue
+        .labels
+        .iter()
+        .any(|label| label.name == "ready-for-agent")
+    {
+        "ready".to_string()
+    } else {
+        "not-ready".to_string()
+    };
+    snapshot
 }
 
 fn parse_local_markdown_issue(

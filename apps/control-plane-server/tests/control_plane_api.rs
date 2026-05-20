@@ -8,6 +8,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::Value;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tower::ServiceExt;
 
@@ -22,6 +24,7 @@ async fn test_router() -> axum::Router {
         bind_address: "127.0.0.1:0".parse().unwrap(),
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
     };
     router(config, db)
 }
@@ -33,8 +36,33 @@ async fn test_router_with_db() -> (axum::Router, persistence::Db) {
         bind_address: "127.0.0.1:0".parse().unwrap(),
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
     };
     (router(config, db.clone()), db)
+}
+
+async fn test_router_with_gh(gh_binary_path: PathBuf) -> (axum::Router, persistence::Db) {
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let config = ControlPlaneConfig {
+        bind_address: "127.0.0.1:0".parse().unwrap(),
+        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        database_url: "sqlite::memory:".into(),
+        gh_binary_path,
+    };
+    (router(config, db.clone()), db)
+}
+
+fn write_fake_gh(name: &str, body: &str) -> PathBuf {
+    let path = temp_project_path(name);
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
+    path
 }
 
 #[tokio::test]
@@ -101,6 +129,7 @@ async fn dashboard_shell_loads_from_the_local_control_plane() {
         bind_address: "127.0.0.1:0".parse().unwrap(),
         dashboard_asset_dir,
         database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
     };
 
     let response = router(config, db)
@@ -128,6 +157,7 @@ async fn dashboard_browser_routes_fallback_without_claiming_api_paths() {
         bind_address: "127.0.0.1:0".parse().unwrap(),
         dashboard_asset_dir,
         database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
     };
     let app = router(config, db);
 
@@ -392,6 +422,7 @@ async fn enabled_issue_source_is_persisted_and_can_be_switched() {
         bind_address: "127.0.0.1:0".parse().unwrap(),
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
     };
     let restarted_app = router(restarted_config, db.clone());
     let switch_response = restarted_app
@@ -520,6 +551,363 @@ async fn local_markdown_issue_source_can_be_synced_into_a_planning_snapshot() {
         snapshot.eligible[0].parent_issue.as_deref(),
         Some("001-parent")
     );
+}
+
+#[tokio::test]
+async fn github_issue_source_can_be_synced_into_a_planning_snapshot() {
+    let gh = write_fake_gh(
+        "fake-gh-github-sync",
+        r#"#!/bin/sh
+case "$1 $2" in
+  "auth status")
+    exit 0
+    ;;
+  "issue list")
+    cat <<'JSON'
+[
+  {
+    "number": 8,
+    "title": "Parent GitHub issue",
+    "body": "Readiness: not-ready\nSource Order: 1\n\n## Body\nKeep this GitHub raw text.",
+    "labels": []
+  },
+  {
+    "number": 9,
+    "title": "Dependency ready issue",
+    "body": "Parent Issue: #8\nSource Order: 2",
+    "labels": [{"name": "ready-for-agent"}]
+  },
+  {
+    "number": 11,
+    "title": "Blocked GitHub ready issue",
+    "body": "Parent Issue: #8\nIssue Dependencies: #9, #10\nSource Order: 3",
+    "labels": [{"name": "ready-for-agent"}]
+  }
+]
+JSON
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+    );
+    let (app, db) = test_router_with_gh(gh.clone()).await;
+    let project = persistence::create_project(
+        &db,
+        &CreateProjectRequest {
+            path: "/tmp".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    persistence::enable_issue_source(
+        &db,
+        &project.id.0,
+        &EnableIssueSourceRequest {
+            kind: "github".to_string(),
+            locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let sync_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_response.status(), StatusCode::OK);
+
+    let snapshot_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/planning-snapshot", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let _ = std::fs::remove_file(&gh);
+    assert_eq!(snapshot_response.status(), StatusCode::OK);
+    let body = snapshot_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(snapshot.source.kind, "github");
+    assert_eq!(snapshot.source.locator, "pmd-coutinho/dioxus-agentic-afk");
+    assert!(snapshot.last_successful_sync_at.is_some());
+    assert_eq!(snapshot.last_failure, None);
+    assert_eq!(snapshot.non_ready.len(), 1);
+    assert_eq!(snapshot.blocked.len(), 1);
+    assert_eq!(snapshot.eligible.len(), 1);
+    assert_eq!(snapshot.non_ready[0].source_id, "8");
+    assert_eq!(snapshot.non_ready[0].title, "Parent GitHub issue");
+    assert!(
+        snapshot.non_ready[0]
+            .raw_text
+            .contains("Keep this GitHub raw text.")
+    );
+    assert_eq!(snapshot.eligible[0].source_id, "9");
+    assert_eq!(snapshot.blocked[0].source_id, "11");
+    assert_eq!(snapshot.blocked[0].parent_issue.as_deref(), Some("8"));
+    assert_eq!(snapshot.blocked[0].issue_dependencies, vec!["9", "10"]);
+}
+
+#[tokio::test]
+async fn github_auth_failure_preserves_last_successful_snapshot() {
+    let gh = write_fake_gh(
+        "fake-gh-github-auth-failure",
+        r#"#!/bin/sh
+case "$1 $2" in
+  "auth status")
+    exit 0
+    ;;
+  "issue list")
+    cat <<'JSON'
+[
+  {
+    "number": 11,
+    "title": "Still visible GitHub issue",
+    "body": "Source Order: 1",
+    "labels": [{"name": "ready-for-agent"}]
+  }
+]
+JSON
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+    );
+    let (app, db) = test_router_with_gh(gh.clone()).await;
+    let project = persistence::create_project(
+        &db,
+        &CreateProjectRequest {
+            path: "/tmp".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    persistence::enable_issue_source(
+        &db,
+        &project.id.0,
+        &EnableIssueSourceRequest {
+            kind: "github".to_string(),
+            locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let first_sync = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_sync.status(), StatusCode::OK);
+
+    std::fs::write(
+        &gh,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "auth status")
+    echo "not logged in" >&2
+    exit 1
+    ;;
+esac
+exit 1
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = std::fs::metadata(&gh).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).unwrap();
+    }
+
+    let failed_sync = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed_sync.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        failed_sync.headers().get("content-type").unwrap(),
+        "application/problem+json"
+    );
+    let failed_body = failed_sync.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&failed_body).unwrap();
+    assert!(problem.detail.contains("gh is not authenticated"));
+
+    let snapshot_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/planning-snapshot", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let _ = std::fs::remove_file(&gh);
+    assert_eq!(snapshot_response.status(), StatusCode::OK);
+    let body = snapshot_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(snapshot.eligible.len(), 1);
+    assert_eq!(snapshot.eligible[0].title, "Still visible GitHub issue");
+    assert!(
+        snapshot
+            .last_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("gh is not authenticated"))
+    );
+}
+
+#[tokio::test]
+async fn github_sync_reports_missing_and_unavailable_gh() {
+    let (missing_app, missing_db) =
+        test_router_with_gh(temp_project_path("missing-gh-binary")).await;
+    let missing_project = persistence::create_project(
+        &missing_db,
+        &CreateProjectRequest {
+            path: "/tmp".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    persistence::enable_issue_source(
+        &missing_db,
+        &missing_project.id.0,
+        &EnableIssueSourceRequest {
+            kind: "github".to_string(),
+            locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let missing_response = missing_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/{}/issue-source/sync",
+                    missing_project.id.0
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let missing_body = missing_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let missing_problem: ProblemDetail = serde_json::from_slice(&missing_body).unwrap();
+    assert!(
+        missing_problem
+            .detail
+            .contains("failed to run gh auth status")
+    );
+
+    let gh = write_fake_gh(
+        "fake-gh-github-unavailable",
+        r#"#!/bin/sh
+case "$1 $2" in
+  "auth status")
+    exit 0
+    ;;
+  "issue list")
+    echo "network unavailable" >&2
+    exit 1
+    ;;
+esac
+exit 1
+"#,
+    );
+    let (unavailable_app, unavailable_db) = test_router_with_gh(gh.clone()).await;
+    let unavailable_project = persistence::create_project(
+        &unavailable_db,
+        &CreateProjectRequest {
+            path: "/tmp".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    persistence::enable_issue_source(
+        &unavailable_db,
+        &unavailable_project.id.0,
+        &EnableIssueSourceRequest {
+            kind: "github".to_string(),
+            locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let unavailable_response = unavailable_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/{}/issue-source/sync",
+                    unavailable_project.id.0
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let _ = std::fs::remove_file(&gh);
+    assert_eq!(
+        unavailable_response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let unavailable_body = unavailable_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let unavailable_problem: ProblemDetail = serde_json::from_slice(&unavailable_body).unwrap();
+    assert!(
+        unavailable_problem
+            .detail
+            .contains("failed to sync GitHub Issue Source")
+    );
+    assert!(unavailable_problem.detail.contains("network unavailable"));
 }
 
 #[tokio::test]
