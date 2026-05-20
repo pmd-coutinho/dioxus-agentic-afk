@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 agentic-afk-contracts.workspace = true
+agentic-afk-persistence.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
