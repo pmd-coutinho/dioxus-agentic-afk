@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use agentic_afk_contracts::{
     AppInfoResponse, CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest,
-    HealthResponse, IssueSource, IssueSourceCandidate, ProblemDetail, ProjectResponse,
+    HealthResponse, IssueSource, IssueSourceCandidate, IssueSourceSyncResponse,
+    PlanningSnapshotResponse, ProblemDetail, ProjectResponse, SourceIssueSnapshot,
 };
 use agentic_afk_git_summary::summarize_project_path;
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
@@ -65,7 +66,9 @@ struct AppState {
         list_projects,
         get_project,
         list_issue_source_candidates,
-        enable_issue_source
+        enable_issue_source,
+        sync_issue_source,
+        get_planning_snapshot
     ),
     components(schemas(
         HealthResponse,
@@ -76,6 +79,9 @@ struct AppState {
         ProjectResponse,
         IssueSource,
         IssueSourceCandidate,
+        IssueSourceSyncResponse,
+        PlanningSnapshotResponse,
+        SourceIssueSnapshot,
         ProblemDetail
     )),
     tags((name = "Local Control Plane", description = "Local Control Plane API"))
@@ -101,6 +107,14 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route(
             "/api/projects/{id}/issue-source",
             axum::routing::put(enable_issue_source),
+        )
+        .route(
+            "/api/projects/{id}/issue-source/sync",
+            post(sync_issue_source),
+        )
+        .route(
+            "/api/projects/{id}/planning-snapshot",
+            get(get_planning_snapshot),
         )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
@@ -256,6 +270,211 @@ async fn enable_issue_source(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/projects/{id}/issue-source/sync",
+    params(("id" = String, Path, description = "Project ID")),
+    responses(
+        (status = OK, body = IssueSourceSyncResponse),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn sync_issue_source(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let project = match persistence::get_project(&state.db, &id).await {
+        Ok(project) => project,
+        Err(e) => return persistence_error_to_response(e),
+    };
+
+    let Some(source) = project.enabled_issue_source.clone() else {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:issue-source-not-enabled",
+            "Unprocessable Entity",
+            "Project has no enabled Issue Source".to_string(),
+        );
+    };
+
+    if source.kind != "local_markdown" {
+        let detail = format!(
+            "manual sync is not supported for {} Issue Sources yet",
+            source.kind
+        );
+        let _ = persistence::record_sync_failure(&state.db, &id, &source, &detail).await;
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:unsupported-issue-source",
+            "Unprocessable Entity",
+            detail,
+        );
+    }
+
+    match read_local_markdown_issues(&project.path, &source.locator) {
+        Ok(issues) => {
+            let synced_at = current_sync_timestamp();
+            match persistence::replace_planning_snapshot(
+                &state.db, &id, &source, &issues, &synced_at,
+            )
+            .await
+            {
+                Ok(response) => Json(response).into_response(),
+                Err(e) => persistence_error_to_response(e),
+            }
+        }
+        Err(detail) => {
+            let _ = persistence::record_sync_failure(&state.db, &id, &source, &detail).await;
+            sync_problem_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "urn:agentic-afk:issue-source-sync-failed",
+                "Unprocessable Entity",
+                detail,
+            )
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/projects/{id}/planning-snapshot",
+    params(("id" = String, Path, description = "Project ID")),
+    responses(
+        (status = OK, body = PlanningSnapshotResponse),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn get_planning_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match persistence::get_planning_snapshot(&state.db, &id).await {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(e) => persistence_error_to_response(e),
+    }
+}
+
+fn read_local_markdown_issues(
+    project_path: &str,
+    locator: &str,
+) -> Result<Vec<SourceIssueSnapshot>, String> {
+    let project_root = std::fs::canonicalize(project_path)
+        .map_err(|error| format!("failed to resolve Project path: {error}"))?;
+    let source_dir = std::fs::canonicalize(project_root.join(locator))
+        .map_err(|error| format!("failed to read local markdown Issue Source: {error}"))?;
+    if !source_dir.starts_with(&project_root) {
+        return Err("local markdown Issue Source must be inside the Project path".to_string());
+    }
+
+    let entries = std::fs::read_dir(&source_dir)
+        .map_err(|error| format!("failed to read local markdown Issue Source: {error}"))?;
+    let mut paths = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    let mut issues = Vec::new();
+    for (index, path) in paths.into_iter().enumerate() {
+        let raw_text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read Source Issue {}: {error}", path.display()))?;
+        let source_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| format!("invalid Source Issue file name: {}", path.display()))?
+            .to_string();
+        issues.push(parse_local_markdown_issue(
+            source_id,
+            raw_text,
+            i64::try_from(index + 1).unwrap_or(i64::MAX),
+        ));
+    }
+
+    Ok(issues)
+}
+
+fn parse_local_markdown_issue(
+    source_id: String,
+    raw_text: String,
+    fallback_order: i64,
+) -> SourceIssueSnapshot {
+    let title = raw_text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# ").map(str::trim))
+        .filter(|title| !title.is_empty())
+        .unwrap_or(&source_id)
+        .to_string();
+
+    let mut readiness = "not-ready".to_string();
+    let mut parent_issue = None;
+    let mut issue_dependencies = Vec::new();
+    let mut source_order = fallback_order;
+
+    for line in raw_text.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match key.as_str() {
+            "readiness" | "ready" => {
+                let normalized = value.to_ascii_lowercase();
+                readiness = if matches!(normalized.as_str(), "ready" | "true" | "yes") {
+                    "ready".to_string()
+                } else {
+                    "not-ready".to_string()
+                };
+            }
+            "parent issue" | "parent" => {
+                parent_issue = normalize_issue_ref(value);
+            }
+            "issue dependencies" | "dependencies" => {
+                issue_dependencies = value
+                    .split([',', ' ', '\t'])
+                    .filter_map(normalize_issue_ref)
+                    .collect();
+            }
+            "source order" => {
+                if let Ok(parsed) = value.parse::<i64>() {
+                    source_order = parsed;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    SourceIssueSnapshot {
+        source_id,
+        title,
+        readiness,
+        parent_issue,
+        issue_dependencies,
+        source_order,
+        raw_text,
+    }
+}
+
+fn normalize_issue_ref(value: &str) -> Option<String> {
+    let trimmed = value
+        .trim()
+        .trim_matches(|c: char| matches!(c, '-' | '*' | '[' | ']' | '(' | ')' | '`'))
+        .trim_start_matches('#')
+        .trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn current_sync_timestamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("unix:{seconds}")
+}
+
 fn with_git_summary(mut project: ProjectResponse) -> ProjectResponse {
     project.git_summary = summarize_project_path(&project.path);
     project
@@ -343,6 +562,11 @@ fn persistence_error_to_response(err: PersistenceError) -> Response {
             "urn:agentic-afk:invalid-issue-source",
             "Unprocessable Entity",
         ),
+        PersistenceError::SnapshotNotFound(_) => (
+            StatusCode::NOT_FOUND,
+            "urn:agentic-afk:planning-snapshot-not-found",
+            "Not Found",
+        ),
         PersistenceError::Database(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "urn:agentic-afk:internal-error",
@@ -361,6 +585,25 @@ fn persistence_error_to_response(err: PersistenceError) -> Response {
         status,
         [("content-type", "application/problem+json")],
         Json(problem),
+    )
+        .into_response()
+}
+
+fn sync_problem_response(
+    status: StatusCode,
+    problem_type: &str,
+    title: &str,
+    detail: String,
+) -> Response {
+    (
+        status,
+        [("content-type", "application/problem+json")],
+        Json(ProblemDetail {
+            problem_type: problem_type.to_string(),
+            title: title.to_string(),
+            status: status.as_u16(),
+            detail,
+        }),
     )
         .into_response()
 }
@@ -419,5 +662,42 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_markdown_parser_normalizes_scheduling_metadata_only() {
+        let issue = parse_local_markdown_issue(
+            "issue-10".to_string(),
+            "# Sync local issues\n\nReadiness: READY\nParent Issue: #8\nIssue Dependencies: #9, local-3\nSource Order: 10\n\n## Acceptance criteria\n- preserve this raw text\n".to_string(),
+            99,
+        );
+
+        assert_eq!(issue.source_id, "issue-10");
+        assert_eq!(issue.title, "Sync local issues");
+        assert_eq!(issue.readiness, "ready");
+        assert_eq!(issue.parent_issue.as_deref(), Some("8"));
+        assert_eq!(issue.issue_dependencies, vec!["9", "local-3"]);
+        assert_eq!(issue.source_order, 10);
+        assert!(issue.raw_text.contains("preserve this raw text"));
+    }
+
+    #[test]
+    fn local_markdown_parser_uses_file_order_and_not_ready_defaults() {
+        let issue = parse_local_markdown_issue(
+            "fallback-id".to_string(),
+            "Body without metadata".to_string(),
+            4,
+        );
+
+        assert_eq!(issue.title, "fallback-id");
+        assert_eq!(issue.readiness, "not-ready");
+        assert_eq!(issue.parent_issue, None);
+        assert!(issue.issue_dependencies.is_empty());
+        assert_eq!(issue.source_order, 4);
     }
 }

@@ -57,6 +57,7 @@ name = "agentic-afk-persistence"
 version = "0.1.0"
 dependencies = [
  "agentic-afk-contracts",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",

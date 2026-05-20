@@ -1,6 +1,6 @@
 use agentic_afk_contracts::{
     CreateProjectRequest, EnableIssueSourceRequest, HealthResponse, IssueSource,
-    IssueSourceCandidate, ProblemDetail, ProjectResponse,
+    IssueSourceCandidate, PlanningSnapshotResponse, ProblemDetail, ProjectResponse,
 };
 use agentic_afk_control_plane_server::{ControlPlaneConfig, router};
 use agentic_afk_persistence::{self as persistence};
@@ -185,10 +185,15 @@ async fn openapi_document_describes_project_api_and_problem_responses() {
     assert!(openapi["paths"]["/api/projects/{id}"]["get"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/issue-source-candidates"]["get"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/issue-source"]["put"].is_object());
+    assert!(openapi["paths"]["/api/projects/{id}/issue-source/sync"]["post"].is_object());
+    assert!(openapi["paths"]["/api/projects/{id}/planning-snapshot"]["get"].is_object());
     assert!(openapi["components"]["schemas"]["CreateProjectRequest"].is_object());
     assert!(openapi["components"]["schemas"]["EnableIssueSourceRequest"].is_object());
     assert!(openapi["components"]["schemas"]["IssueSource"].is_object());
     assert!(openapi["components"]["schemas"]["IssueSourceCandidate"].is_object());
+    assert!(openapi["components"]["schemas"]["IssueSourceSyncResponse"].is_object());
+    assert!(openapi["components"]["schemas"]["PlanningSnapshotResponse"].is_object());
+    assert!(openapi["components"]["schemas"]["SourceIssueSnapshot"].is_object());
     assert!(openapi["components"]["schemas"]["ProjectResponse"].is_object());
     assert!(openapi["components"]["schemas"]["ProblemDetail"].is_object());
     assert!(
@@ -204,6 +209,11 @@ async fn openapi_document_describes_project_api_and_problem_responses() {
     assert!(
         openapi["paths"]["/api/projects/{id}/issue-source"]["put"]["responses"]["422"]["content"]
             ["application/problem+json"]
+            .is_object()
+    );
+    assert!(
+        openapi["paths"]["/api/projects/{id}/issue-source/sync"]["post"]["responses"]["422"]
+            ["content"]["application/problem+json"]
             .is_object()
     );
 }
@@ -415,6 +425,191 @@ async fn enabled_issue_source_is_persisted_and_can_be_switched() {
             kind: "local_markdown".to_string(),
             locator: ".scratch/issues".to_string(),
         })
+    );
+}
+
+#[tokio::test]
+async fn local_markdown_issue_source_can_be_synced_into_a_planning_snapshot() {
+    let (app, db) = test_router_with_db().await;
+    let project_path = temp_project_path("local-markdown-sync");
+    let issues_path = project_path.join(".scratch/issues");
+    std::fs::create_dir_all(&issues_path).unwrap();
+    std::fs::write(
+        issues_path.join("001-parent.md"),
+        "# Parent planning issue\n\nReadiness: not-ready\nSource Order: 1\n\n## Body\nKeep this raw text.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        issues_path.join("002-blocked.md"),
+        "# Blocked ready issue\n\nReadiness: ready\nParent Issue: 001-parent\nIssue Dependencies: 003-eligible\nSource Order: 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        issues_path.join("003-eligible.md"),
+        "# Eligible ready issue\n\nReadiness: ready\nParent Issue: 001-parent\nSource Order: 3\n",
+    )
+    .unwrap();
+
+    let project = persistence::create_project(
+        &db,
+        &CreateProjectRequest {
+            path: project_path.display().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    persistence::enable_issue_source(
+        &db,
+        &project.id.0,
+        &EnableIssueSourceRequest {
+            kind: "local_markdown".to_string(),
+            locator: ".scratch/issues".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let sync_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_response.status(), StatusCode::OK);
+
+    let snapshot_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/planning-snapshot", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    std::fs::remove_dir_all(&project_path).unwrap();
+    assert_eq!(snapshot_response.status(), StatusCode::OK);
+    let body = snapshot_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(snapshot.source.kind, "local_markdown");
+    assert!(snapshot.last_successful_sync_at.is_some());
+    assert_eq!(snapshot.last_failure, None);
+    assert_eq!(snapshot.non_ready.len(), 1);
+    assert_eq!(snapshot.blocked.len(), 1);
+    assert_eq!(snapshot.eligible.len(), 1);
+    assert_eq!(snapshot.non_ready[0].source_id, "001-parent");
+    assert_eq!(snapshot.non_ready[0].title, "Parent planning issue");
+    assert_eq!(snapshot.non_ready[0].source_order, 1);
+    assert!(
+        snapshot.non_ready[0]
+            .raw_text
+            .contains("Keep this raw text.")
+    );
+    assert_eq!(snapshot.blocked[0].issue_dependencies, vec!["003-eligible"]);
+    assert_eq!(
+        snapshot.eligible[0].parent_issue.as_deref(),
+        Some("001-parent")
+    );
+}
+
+#[tokio::test]
+async fn failed_local_markdown_sync_preserves_last_successful_snapshot() {
+    let (app, db) = test_router_with_db().await;
+    let project_path = temp_project_path("local-markdown-sync-failure");
+    let issues_path = project_path.join(".scratch/issues");
+    std::fs::create_dir_all(&issues_path).unwrap();
+    std::fs::write(
+        issues_path.join("001-ready.md"),
+        "# Still visible\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let project = persistence::create_project(
+        &db,
+        &CreateProjectRequest {
+            path: project_path.display().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    persistence::enable_issue_source(
+        &db,
+        &project.id.0,
+        &EnableIssueSourceRequest {
+            kind: "local_markdown".to_string(),
+            locator: ".scratch/issues".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let first_sync = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_sync.status(), StatusCode::OK);
+
+    std::fs::remove_dir_all(&issues_path).unwrap();
+    let failed_sync = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed_sync.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        failed_sync.headers().get("content-type").unwrap(),
+        "application/problem+json"
+    );
+
+    let snapshot_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/planning-snapshot", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    std::fs::remove_dir_all(&project_path).unwrap();
+    assert_eq!(snapshot_response.status(), StatusCode::OK);
+    let body = snapshot_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(snapshot.eligible.len(), 1);
+    assert_eq!(snapshot.eligible[0].title, "Still visible");
+    assert!(snapshot.last_successful_sync_at.is_some());
+    assert!(
+        snapshot
+            .last_failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("failed to read local markdown Issue Source"))
     );
 }
 

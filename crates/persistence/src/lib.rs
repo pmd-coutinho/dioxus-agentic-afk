@@ -3,7 +3,8 @@
 //! Provides SQLite-backed storage for Projects.
 
 use agentic_afk_contracts::{
-    CreateProjectRequest, EnableIssueSourceRequest, IssueSource, ProjectId, ProjectResponse,
+    CreateProjectRequest, EnableIssueSourceRequest, IssueSource, IssueSourceSyncResponse,
+    PlanningSnapshotResponse, ProjectId, ProjectResponse, SourceIssueSnapshot,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
@@ -21,6 +22,8 @@ pub enum PersistenceError {
     InvalidPath(String),
     #[error("invalid issue source: {0}")]
     InvalidIssueSource(String),
+    #[error("planning snapshot not found: {0}")]
+    SnapshotNotFound(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -185,6 +188,218 @@ pub async fn enable_issue_source(
     .await?;
 
     get_project(db, project_id).await
+}
+
+pub async fn replace_planning_snapshot(
+    db: &Db,
+    project_id: &str,
+    source: &IssueSource,
+    issues: &[SourceIssueSnapshot],
+    synced_at: &str,
+) -> Result<IssueSourceSyncResponse, PersistenceError> {
+    let mut tx = db.begin().await?;
+
+    sqlx::query("DELETE FROM planning_snapshot_issues WHERE project_id = ?")
+        .bind(project_id)
+        .execute(&mut *tx)
+        .await?;
+
+    for issue in issues {
+        let dependencies_json = serde_json::to_string(&issue.issue_dependencies)
+            .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
+        sqlx::query(
+            r#"
+            INSERT INTO planning_snapshot_issues (
+                project_id,
+                source_id,
+                title,
+                readiness,
+                parent_issue,
+                issue_dependencies_json,
+                source_order,
+                raw_text
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(project_id)
+        .bind(&issue.source_id)
+        .bind(&issue.title)
+        .bind(&issue.readiness)
+        .bind(&issue.parent_issue)
+        .bind(dependencies_json)
+        .bind(issue.source_order)
+        .bind(&issue.raw_text)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO issue_source_sync_status (
+            project_id,
+            source_kind,
+            source_locator,
+            last_successful_sync_at,
+            last_failure
+        )
+        VALUES (?, ?, ?, ?, NULL)
+        ON CONFLICT(project_id) DO UPDATE SET
+            source_kind = excluded.source_kind,
+            source_locator = excluded.source_locator,
+            last_successful_sync_at = excluded.last_successful_sync_at,
+            last_failure = NULL
+        "#,
+    )
+    .bind(project_id)
+    .bind(&source.kind)
+    .bind(&source.locator)
+    .bind(synced_at)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(IssueSourceSyncResponse {
+        source: source.clone(),
+        last_successful_sync_at: Some(synced_at.to_string()),
+        last_failure: None,
+    })
+}
+
+pub async fn record_sync_failure(
+    db: &Db,
+    project_id: &str,
+    source: &IssueSource,
+    failure: &str,
+) -> Result<IssueSourceSyncResponse, PersistenceError> {
+    sqlx::query(
+        r#"
+        INSERT INTO issue_source_sync_status (
+            project_id,
+            source_kind,
+            source_locator,
+            last_successful_sync_at,
+            last_failure
+        )
+        VALUES (?, ?, ?, NULL, ?)
+        ON CONFLICT(project_id) DO UPDATE SET
+            source_kind = excluded.source_kind,
+            source_locator = excluded.source_locator,
+            last_failure = excluded.last_failure
+        "#,
+    )
+    .bind(project_id)
+    .bind(&source.kind)
+    .bind(&source.locator)
+    .bind(failure)
+    .execute(db)
+    .await?;
+
+    let last_successful_sync_at = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT last_successful_sync_at FROM issue_source_sync_status WHERE project_id = ?",
+    )
+    .bind(project_id)
+    .fetch_optional(db)
+    .await?
+    .and_then(|row| row.0);
+
+    Ok(IssueSourceSyncResponse {
+        source: source.clone(),
+        last_successful_sync_at,
+        last_failure: Some(failure.to_string()),
+    })
+}
+
+pub async fn get_planning_snapshot(
+    db: &Db,
+    project_id: &str,
+) -> Result<PlanningSnapshotResponse, PersistenceError> {
+    let status = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+        r#"
+        SELECT source_kind, source_locator, last_successful_sync_at, last_failure
+        FROM issue_source_sync_status
+        WHERE project_id = ?
+        "#,
+    )
+    .bind(project_id)
+    .fetch_optional(db)
+    .await?;
+
+    let Some((kind, locator, last_successful_sync_at, last_failure)) = status else {
+        get_project(db, project_id).await?;
+        return Err(PersistenceError::SnapshotNotFound(project_id.to_string()));
+    };
+
+    let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String, i64, String)>(
+        r#"
+        SELECT source_id, title, readiness, parent_issue, issue_dependencies_json, source_order, raw_text
+        FROM planning_snapshot_issues
+        WHERE project_id = ?
+        ORDER BY source_order, source_id
+        "#,
+    )
+    .bind(project_id)
+    .fetch_all(db)
+    .await?;
+
+    let issues = rows
+        .into_iter()
+        .map(
+            |(
+                source_id,
+                title,
+                readiness,
+                parent_issue,
+                dependencies_json,
+                source_order,
+                raw_text,
+            )| {
+                let issue_dependencies =
+                    serde_json::from_str(&dependencies_json).unwrap_or_default();
+                SourceIssueSnapshot {
+                    source_id,
+                    title,
+                    readiness,
+                    parent_issue,
+                    issue_dependencies,
+                    source_order,
+                    raw_text,
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let ready_ids = issues
+        .iter()
+        .filter(|issue| issue.readiness == "ready")
+        .map(|issue| issue.source_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut non_ready = Vec::new();
+    let mut blocked = Vec::new();
+    let mut eligible = Vec::new();
+
+    for issue in issues {
+        if issue.readiness != "ready" {
+            non_ready.push(issue);
+        } else if issue
+            .issue_dependencies
+            .iter()
+            .any(|dependency| ready_ids.contains(dependency))
+        {
+            blocked.push(issue);
+        } else {
+            eligible.push(issue);
+        }
+    }
+
+    Ok(PlanningSnapshotResponse {
+        source: IssueSource { kind, locator },
+        last_successful_sync_at,
+        last_failure,
+        non_ready,
+        blocked,
+        eligible,
+    })
 }
 
 fn validate_issue_source(request: &EnableIssueSourceRequest) -> Result<(), PersistenceError> {

@@ -1,4 +1,6 @@
-use agentic_afk_contracts::{AppInfoResponse, GitSummary, ProjectResponse};
+use agentic_afk_contracts::{
+    AppInfoResponse, GitSummary, PlanningSnapshotResponse, ProjectResponse, SourceIssueSnapshot,
+};
 use dioxus::prelude::*;
 
 fn main() {
@@ -188,36 +190,141 @@ fn ProjectRow(project: ProjectResponse) -> Element {
 
 #[component]
 fn ProjectDetail(project: ProjectResponse) -> Element {
+    let project_id = project.id.0.clone();
+    let planning_snapshot = use_resource(move || fetch_planning_snapshot(project_id.clone()));
+
+    rsx! {
+        div { class: "grid gap-4",
+            section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
+                a { class: "text-sm text-emerald-200 hover:text-emerald-100", href: "/projects", "Projects" }
+                h2 { class: "mt-4 text-base font-semibold", "Project detail" }
+                dl { class: "mt-4 grid gap-3 text-sm",
+                    SettingRow { label: "Project path".to_string(), value: project.path.clone() }
+                    SettingRow { label: "Project ID".to_string(), value: project.id.0.clone() }
+                    match project.enabled_issue_source {
+                        Some(source) => rsx! {
+                            SettingRow {
+                                label: "Issue Source".to_string(),
+                                value: format!("{} {}", source.kind, source.locator),
+                            }
+                        },
+                        None => rsx! {
+                            SettingRow {
+                                label: "Issue Source".to_string(),
+                                value: "Not enabled".to_string(),
+                            }
+                        },
+                    }
+                }
+                div { class: "mt-4",
+                    match project.git_summary {
+                        Some(summary) => rsx! { GitSummaryRow { summary } },
+                        None => rsx! {
+                            p { class: "text-sm text-zinc-500", "No Git Summary" }
+                        },
+                    }
+                }
+            }
+            match &*planning_snapshot.read_unchecked() {
+                Some(Ok(snapshot)) => rsx! { PlanningSnapshot { snapshot: snapshot.clone() } },
+                Some(Err(error)) => rsx! {
+                    StatusPanel {
+                        title: "Planning snapshot unavailable".to_string(),
+                        detail: error.clone(),
+                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                    }
+                },
+                None => rsx! {
+                    StatusPanel {
+                        title: "Loading planning snapshot".to_string(),
+                        detail: project.id.0.clone(),
+                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                    }
+                },
+            }
+        }
+    }
+}
+
+#[component]
+fn PlanningSnapshot(snapshot: PlanningSnapshotResponse) -> Element {
+    let last_sync = snapshot
+        .last_successful_sync_at
+        .clone()
+        .unwrap_or_else(|| "Never synced".to_string());
+
     rsx! {
         section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-            a { class: "text-sm text-emerald-200 hover:text-emerald-100", href: "/projects", "Projects" }
-            h2 { class: "mt-4 text-base font-semibold", "Project detail" }
-            dl { class: "mt-4 grid gap-3 text-sm",
-                SettingRow { label: "Project path".to_string(), value: project.path.clone() }
-                SettingRow { label: "Project ID".to_string(), value: project.id.0.clone() }
-                match project.enabled_issue_source {
-                    Some(source) => rsx! {
-                        SettingRow {
-                            label: "Issue Source".to_string(),
-                            value: format!("{} {}", source.kind, source.locator),
-                        }
-                    },
-                    None => rsx! {
-                        SettingRow {
-                            label: "Issue Source".to_string(),
-                            value: "Not enabled".to_string(),
-                        }
-                    },
+            div { class: "flex flex-col gap-2 border-b border-zinc-800 pb-4 md:flex-row md:items-start md:justify-between",
+                div {
+                    h2 { class: "text-base font-semibold", "Planning snapshot" }
+                    p { class: "mt-1 font-mono text-xs text-zinc-500", "{snapshot.source.kind} {snapshot.source.locator}" }
+                }
+                p { class: "font-mono text-xs text-zinc-400", "{last_sync}" }
+            }
+            match snapshot.last_failure {
+                Some(failure) => rsx! {
+                    p { class: "mt-4 rounded border border-red-800 bg-red-950/35 px-3 py-2 text-sm text-red-100", "{failure}" }
+                },
+                None => rsx! {},
+            }
+            div { class: "mt-4 grid gap-4 lg:grid-cols-3",
+                PlanningGroup {
+                    title: "Eligible Ready Issues".to_string(),
+                    issues: snapshot.eligible,
+                }
+                PlanningGroup {
+                    title: "Blocked Ready Issues".to_string(),
+                    issues: snapshot.blocked,
+                }
+                PlanningGroup {
+                    title: "Non-ready Source Issues".to_string(),
+                    issues: snapshot.non_ready,
                 }
             }
-            div { class: "mt-4",
-                match project.git_summary {
-                    Some(summary) => rsx! { GitSummaryRow { summary } },
-                    None => rsx! {
-                        p { class: "text-sm text-zinc-500", "No Git Summary" }
-                    },
+        }
+    }
+}
+
+#[component]
+fn PlanningGroup(title: String, issues: Vec<SourceIssueSnapshot>) -> Element {
+    rsx! {
+        section { class: "min-w-0 rounded border border-zinc-800 bg-zinc-950/40 p-4",
+            h3 { class: "text-sm font-semibold text-zinc-100", "{title}" }
+            if issues.is_empty() {
+                p { class: "mt-3 text-sm text-zinc-500", "None" }
+            } else {
+                ul { class: "mt-3 grid gap-3",
+                    for issue in issues {
+                        PlanningIssue { issue }
+                    }
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn PlanningIssue(issue: SourceIssueSnapshot) -> Element {
+    let dependencies = if issue.issue_dependencies.is_empty() {
+        "No dependencies".to_string()
+    } else {
+        issue.issue_dependencies.join(", ")
+    };
+    let parent = issue
+        .parent_issue
+        .clone()
+        .unwrap_or_else(|| "No parent".to_string());
+
+    rsx! {
+        li { class: "grid gap-1 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
+            div { class: "flex items-baseline justify-between gap-3",
+                p { class: "min-w-0 break-words text-sm font-medium text-zinc-100", "{issue.title}" }
+                p { class: "shrink-0 font-mono text-xs text-zinc-500", "#{issue.source_order}" }
+            }
+            p { class: "break-words font-mono text-xs text-zinc-500", "{issue.source_id}" }
+            p { class: "text-xs text-zinc-400", "Parent {parent}" }
+            p { class: "text-xs text-zinc-400", "{dependencies}" }
         }
     }
 }
@@ -262,6 +369,16 @@ async fn fetch_app_info() -> Result<AppInfoResponse, String> {
 
 async fn fetch_projects() -> Result<Vec<ProjectResponse>, String> {
     gloo_net::http::Request::get("/api/projects")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .json()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn fetch_planning_snapshot(project_id: String) -> Result<PlanningSnapshotResponse, String> {
+    gloo_net::http::Request::get(&format!("/api/projects/{project_id}/planning-snapshot"))
         .send()
         .await
         .map_err(|error| error.to_string())?

@@ -72,6 +72,37 @@ pub struct IssueSourceCandidate {
     pub enabled: bool,
 }
 
+/// Manual sync result for the enabled Issue Source.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct IssueSourceSyncResponse {
+    pub source: IssueSource,
+    pub last_successful_sync_at: Option<String>,
+    pub last_failure: Option<String>,
+}
+
+/// Persisted cache of normalized Source Issues from an Issue Source.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct PlanningSnapshotResponse {
+    pub source: IssueSource,
+    pub last_successful_sync_at: Option<String>,
+    pub last_failure: Option<String>,
+    pub non_ready: Vec<SourceIssueSnapshot>,
+    pub blocked: Vec<SourceIssueSnapshot>,
+    pub eligible: Vec<SourceIssueSnapshot>,
+}
+
+/// Normalized scheduling metadata plus preserved raw Source Issue text.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct SourceIssueSnapshot {
+    pub source_id: String,
+    pub title: String,
+    pub readiness: String,
+    pub parent_issue: Option<String>,
+    pub issue_dependencies: Vec<String>,
+    pub source_order: i64,
+    pub raw_text: String,
+}
+
 /// RFC 7807 problem+json error response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct ProblemDetail {
