@@ -55,34 +55,50 @@ pub async fn migrate(db: &Db) -> Result<(), PersistenceError> {
     Ok(())
 }
 
+fn normalize_project_path(path: &str) -> Result<String, PersistenceError> {
+    let path = Path::new(path);
+    if !path.exists() || !path.is_dir() {
+        return Err(PersistenceError::InvalidPath(
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+
+    let canonical_path = std::fs::canonicalize(path)
+        .map_err(|_| PersistenceError::InvalidPath(path.to_string_lossy().into_owned()))?;
+
+    if !canonical_path.is_dir() {
+        return Err(PersistenceError::InvalidPath(
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+
+    Ok(canonical_path.to_string_lossy().into_owned())
+}
+
 /// Create a new Project. Validates that the path exists and is a directory.
 pub async fn create_project(
     db: &Db,
     request: &CreateProjectRequest,
 ) -> Result<ProjectResponse, PersistenceError> {
-    // Validate path exists and is a directory
-    let path = Path::new(&request.path);
-    if !path.exists() || !path.is_dir() {
-        return Err(PersistenceError::InvalidPath(request.path.clone()));
-    }
+    let normalized_path = normalize_project_path(&request.path)?;
 
     let id = Uuid::new_v4().to_string();
 
     sqlx::query("INSERT INTO projects (id, path) VALUES (?, ?)")
         .bind(&id)
-        .bind(&request.path)
+        .bind(&normalized_path)
         .execute(db)
         .await
         .map_err(|e| match e {
             sqlx::Error::Database(ref db_err) if db_err.message().contains("UNIQUE") => {
-                PersistenceError::Duplicate(request.path.clone())
+                PersistenceError::Duplicate(normalized_path.clone())
             }
             other => PersistenceError::Database(other),
         })?;
 
     Ok(ProjectResponse {
         id: ProjectId(id),
-        path: request.path.clone(),
+        path: normalized_path,
     })
 }
 
