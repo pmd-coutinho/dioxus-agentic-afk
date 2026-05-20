@@ -195,6 +195,20 @@ fn ProjectDetail(project: ProjectResponse) -> Element {
             dl { class: "mt-4 grid gap-3 text-sm",
                 SettingRow { label: "Project path".to_string(), value: project.path.clone() }
                 SettingRow { label: "Project ID".to_string(), value: project.id.0.clone() }
+                match project.enabled_issue_source {
+                    Some(source) => rsx! {
+                        SettingRow {
+                            label: "Issue Source".to_string(),
+                            value: format!("{} {}", source.kind, source.locator),
+                        }
+                    },
+                    None => rsx! {
+                        SettingRow {
+                            label: "Issue Source".to_string(),
+                            value: "Not enabled".to_string(),
+                        }
+                    },
+                }
             }
             div { class: "mt-4",
                 match project.git_summary {

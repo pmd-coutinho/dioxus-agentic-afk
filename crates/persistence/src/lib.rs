@@ -2,7 +2,9 @@
 //!
 //! Provides SQLite-backed storage for Projects.
 
-use agentic_afk_contracts::{CreateProjectRequest, ProjectId, ProjectResponse};
+use agentic_afk_contracts::{
+    CreateProjectRequest, EnableIssueSourceRequest, IssueSource, ProjectId, ProjectResponse,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
 use std::path::Path;
@@ -17,6 +19,8 @@ pub enum PersistenceError {
     Duplicate(String),
     #[error("path does not exist or is not a directory: {0}")]
     InvalidPath(String),
+    #[error("invalid issue source: {0}")]
+    InvalidIssueSource(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -103,40 +107,103 @@ pub async fn create_project(
         id: ProjectId(id),
         path: normalized_path,
         git_summary: None,
+        enabled_issue_source: None,
     })
 }
 
 /// List all Projects.
 pub async fn list_projects(db: &Db) -> Result<Vec<ProjectResponse>, PersistenceError> {
-    let rows = sqlx::query_as::<_, (String, String)>("SELECT id, path FROM projects ORDER BY path")
-        .fetch_all(db)
-        .await?;
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+        r#"
+        SELECT projects.id, projects.path, project_issue_sources.kind, project_issue_sources.locator
+        FROM projects
+        LEFT JOIN project_issue_sources ON project_issue_sources.project_id = projects.id
+        ORDER BY projects.path
+        "#,
+    )
+    .fetch_all(db)
+    .await?;
 
     Ok(rows
         .into_iter()
-        .map(|(id, path)| ProjectResponse {
+        .map(|(id, path, kind, locator)| ProjectResponse {
             id: ProjectId(id),
             path,
             git_summary: None,
+            enabled_issue_source: issue_source_from_row(kind, locator),
         })
         .collect())
 }
 
 /// Get a single Project by ID.
 pub async fn get_project(db: &Db, id: &str) -> Result<ProjectResponse, PersistenceError> {
-    let row = sqlx::query_as::<_, (String, String)>("SELECT id, path FROM projects WHERE id = ?")
-        .bind(id)
-        .fetch_optional(db)
-        .await?;
+    let row = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+        r#"
+        SELECT projects.id, projects.path, project_issue_sources.kind, project_issue_sources.locator
+        FROM projects
+        LEFT JOIN project_issue_sources ON project_issue_sources.project_id = projects.id
+        WHERE projects.id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
 
     match row {
-        Some((id, path)) => Ok(ProjectResponse {
+        Some((id, path, kind, locator)) => Ok(ProjectResponse {
             id: ProjectId(id),
             path,
             git_summary: None,
+            enabled_issue_source: issue_source_from_row(kind, locator),
         }),
         None => Err(PersistenceError::NotFound(id.to_string())),
     }
+}
+
+/// Deliberately enable or switch the single Issue Source for a Project.
+pub async fn enable_issue_source(
+    db: &Db,
+    project_id: &str,
+    request: &EnableIssueSourceRequest,
+) -> Result<ProjectResponse, PersistenceError> {
+    validate_issue_source(request)?;
+    get_project(db, project_id).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO project_issue_sources (project_id, kind, locator)
+        VALUES (?, ?, ?)
+        ON CONFLICT(project_id) DO UPDATE SET
+            kind = excluded.kind,
+            locator = excluded.locator
+        "#,
+    )
+    .bind(project_id)
+    .bind(&request.kind)
+    .bind(&request.locator)
+    .execute(db)
+    .await?;
+
+    get_project(db, project_id).await
+}
+
+fn validate_issue_source(request: &EnableIssueSourceRequest) -> Result<(), PersistenceError> {
+    let supported_kind = matches!(request.kind.as_str(), "github" | "local_markdown");
+    if !supported_kind || request.locator.trim().is_empty() {
+        return Err(PersistenceError::InvalidIssueSource(format!(
+            "{}:{}",
+            request.kind, request.locator
+        )));
+    }
+
+    Ok(())
+}
+
+fn issue_source_from_row(kind: Option<String>, locator: Option<String>) -> Option<IssueSource> {
+    Some(IssueSource {
+        kind: kind?,
+        locator: locator?,
+    })
 }
 
 /// Idempotently seed a development Project at the given path.
@@ -158,6 +225,7 @@ pub async fn seed_dev_project(
             id: ProjectId(id),
             path,
             git_summary: None,
+            enabled_issue_source: None,
         });
     }
 
@@ -172,6 +240,7 @@ pub async fn seed_dev_project(
         id: ProjectId(id),
         path: normalized_path,
         git_summary: None,
+        enabled_issue_source: None,
     })
 }
 

@@ -39,6 +39,7 @@ pub struct ProjectResponse {
     pub id: ProjectId,
     pub path: String,
     pub git_summary: Option<GitSummary>,
+    pub enabled_issue_source: Option<IssueSource>,
 }
 
 /// Read-only Git metadata derived from a Project path.
@@ -47,6 +48,28 @@ pub struct GitSummary {
     pub branch: Option<String>,
     pub head: Option<String>,
     pub dirty: bool,
+}
+
+/// Persisted Issue Source selected for a Project.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct IssueSource {
+    pub kind: String,
+    pub locator: String,
+}
+
+/// Request body for deliberately enabling or switching a Project Issue Source.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct EnableIssueSourceRequest {
+    pub kind: String,
+    pub locator: String,
+}
+
+/// Advisory Issue Source candidate discovered from Project evidence.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct IssueSourceCandidate {
+    pub kind: String,
+    pub locator: String,
+    pub enabled: bool,
 }
 
 /// RFC 7807 problem+json error response.
@@ -88,6 +111,7 @@ mod tests {
             id: ProjectId("550e8400-e29b-41d4-a716-446655440000".to_string()),
             path: "/home/user/my-project".to_string(),
             git_summary: None,
+            enabled_issue_source: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: ProjectResponse = serde_json::from_str(&json).unwrap();

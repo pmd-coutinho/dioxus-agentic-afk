@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentic_afk_contracts::{
-    AppInfoResponse, CreateProjectRequest, EffectiveConfig, HealthResponse, ProblemDetail,
-    ProjectResponse,
+    AppInfoResponse, CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest,
+    HealthResponse, IssueSource, IssueSourceCandidate, ProblemDetail, ProjectResponse,
 };
 use agentic_afk_git_summary::summarize_project_path;
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
@@ -58,13 +58,24 @@ struct AppState {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, app_info, create_project, list_projects, get_project),
+    paths(
+        health,
+        app_info,
+        create_project,
+        list_projects,
+        get_project,
+        list_issue_source_candidates,
+        enable_issue_source
+    ),
     components(schemas(
         HealthResponse,
         AppInfoResponse,
         EffectiveConfig,
         CreateProjectRequest,
+        EnableIssueSourceRequest,
         ProjectResponse,
+        IssueSource,
+        IssueSourceCandidate,
         ProblemDetail
     )),
     tags((name = "Local Control Plane", description = "Local Control Plane API"))
@@ -83,6 +94,14 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route("/api/docs", get(api_docs))
         .route("/api/projects", post(create_project).get(list_projects))
         .route("/api/projects/{id}", get(get_project))
+        .route(
+            "/api/projects/{id}/issue-source-candidates",
+            get(list_issue_source_candidates),
+        )
+        .route(
+            "/api/projects/{id}/issue-source",
+            axum::routing::put(enable_issue_source),
+        )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
         .with_state(state)
@@ -194,9 +213,112 @@ async fn get_project(State(state): State<Arc<AppState>>, Path(id): Path<String>)
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/projects/{id}/issue-source-candidates",
+    params(("id" = String, Path, description = "Project ID")),
+    responses(
+        (status = OK, body = [IssueSourceCandidate]),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn list_issue_source_candidates(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match persistence::get_project(&state.db, &id).await {
+        Ok(project) => Json(discover_issue_source_candidates(&project)).into_response(),
+        Err(e) => persistence_error_to_response(e),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/projects/{id}/issue-source",
+    params(("id" = String, Path, description = "Project ID")),
+    request_body = EnableIssueSourceRequest,
+    responses(
+        (status = OK, body = ProjectResponse),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn enable_issue_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<EnableIssueSourceRequest>,
+) -> Response {
+    match persistence::enable_issue_source(&state.db, &id, &request).await {
+        Ok(project) => Json(with_git_summary(project)).into_response(),
+        Err(e) => persistence_error_to_response(e),
+    }
+}
+
 fn with_git_summary(mut project: ProjectResponse) -> ProjectResponse {
     project.git_summary = summarize_project_path(&project.path);
     project
+}
+
+fn discover_issue_source_candidates(project: &ProjectResponse) -> Vec<IssueSourceCandidate> {
+    let mut candidates = Vec::new();
+    let project_path = PathBuf::from(&project.path);
+
+    if let Some(locator) = discover_github_locator(&project_path) {
+        candidates.push(candidate(project, "github", &locator));
+    }
+
+    for relative_path in [".scratch/issues", "issues", "docs/issues"] {
+        if project_path.join(relative_path).is_dir() {
+            candidates.push(candidate(project, "local_markdown", relative_path));
+        }
+    }
+
+    candidates
+}
+
+fn candidate(project: &ProjectResponse, kind: &str, locator: &str) -> IssueSourceCandidate {
+    let enabled = project
+        .enabled_issue_source
+        .as_ref()
+        .is_some_and(|source| source.kind == kind && source.locator == locator);
+
+    IssueSourceCandidate {
+        kind: kind.to_string(),
+        locator: locator.to_string(),
+        enabled,
+    }
+}
+
+fn discover_github_locator(project_path: &std::path::Path) -> Option<String> {
+    let config = std::fs::read_to_string(project_path.join(".git/config")).ok()?;
+    config.lines().find_map(|line| {
+        let (_, url) = line.split_once('=')?;
+        github_locator_from_url(url.trim())
+    })
+}
+
+fn github_locator_from_url(url: &str) -> Option<String> {
+    let path = if let Some(path) = url.strip_prefix("git@github.com:") {
+        path
+    } else if let Some(path) = url.strip_prefix("https://github.com/") {
+        path
+    } else if let Some(path) = url.strip_prefix("ssh://git@github.com/") {
+        path
+    } else {
+        return None;
+    };
+
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+
+    Some(format!("{owner}/{repo}"))
 }
 
 fn persistence_error_to_response(err: PersistenceError) -> Response {
@@ -214,6 +336,11 @@ fn persistence_error_to_response(err: PersistenceError) -> Response {
         PersistenceError::InvalidPath(_) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             "urn:agentic-afk:invalid-path",
+            "Unprocessable Entity",
+        ),
+        PersistenceError::InvalidIssueSource(_) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:invalid-issue-source",
             "Unprocessable Entity",
         ),
         PersistenceError::Database(_) => (

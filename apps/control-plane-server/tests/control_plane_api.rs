@@ -1,4 +1,7 @@
-use agentic_afk_contracts::{CreateProjectRequest, HealthResponse, ProblemDetail, ProjectResponse};
+use agentic_afk_contracts::{
+    CreateProjectRequest, EnableIssueSourceRequest, HealthResponse, IssueSource,
+    IssueSourceCandidate, ProblemDetail, ProjectResponse,
+};
 use agentic_afk_control_plane_server::{ControlPlaneConfig, router};
 use agentic_afk_persistence::{self as persistence};
 use axum::body::Body;
@@ -7,6 +10,10 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use std::path::PathBuf;
 use tower::ServiceExt;
+
+fn temp_project_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("agentic-afk-{name}-{}", std::process::id()))
+}
 
 async fn test_router() -> axum::Router {
     let db = persistence::connect_in_memory().await.unwrap();
@@ -176,7 +183,12 @@ async fn openapi_document_describes_project_api_and_problem_responses() {
     assert!(openapi["paths"]["/api/projects"]["post"].is_object());
     assert!(openapi["paths"]["/api/projects"]["get"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}"]["get"].is_object());
+    assert!(openapi["paths"]["/api/projects/{id}/issue-source-candidates"]["get"].is_object());
+    assert!(openapi["paths"]["/api/projects/{id}/issue-source"]["put"].is_object());
     assert!(openapi["components"]["schemas"]["CreateProjectRequest"].is_object());
+    assert!(openapi["components"]["schemas"]["EnableIssueSourceRequest"].is_object());
+    assert!(openapi["components"]["schemas"]["IssueSource"].is_object());
+    assert!(openapi["components"]["schemas"]["IssueSourceCandidate"].is_object());
     assert!(openapi["components"]["schemas"]["ProjectResponse"].is_object());
     assert!(openapi["components"]["schemas"]["ProblemDetail"].is_object());
     assert!(
@@ -186,6 +198,11 @@ async fn openapi_document_describes_project_api_and_problem_responses() {
     );
     assert!(
         openapi["paths"]["/api/projects/{id}"]["get"]["responses"]["404"]["content"]
+            ["application/problem+json"]
+            .is_object()
+    );
+    assert!(
+        openapi["paths"]["/api/projects/{id}/issue-source"]["put"]["responses"]["422"]["content"]
             ["application/problem+json"]
             .is_object()
     );
@@ -239,6 +256,207 @@ async fn create_project_via_api() {
     assert_eq!(project.path, "/tmp");
     assert!(!project.id.0.is_empty());
     assert_eq!(project.git_summary, None);
+    assert_eq!(project.enabled_issue_source, None);
+}
+
+#[tokio::test]
+async fn issue_source_candidates_are_discovered_but_not_enabled() {
+    let (app, _db) = test_router_with_db().await;
+    let project_path = temp_project_path("issue-source-candidates");
+    std::fs::create_dir_all(project_path.join(".git")).unwrap();
+    std::fs::write(
+        project_path.join(".git/config"),
+        "[remote \"origin\"]\n    url = git@github.com:pmd-coutinho/dioxus-agentic-afk.git\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project_path.join(".scratch/issues")).unwrap();
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&CreateProjectRequest {
+                        path: project_path.display().to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_body = create_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let project: ProjectResponse = serde_json::from_slice(&create_body).unwrap();
+    assert_eq!(project.enabled_issue_source, None);
+
+    let candidates_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/projects/{}/issue-source-candidates",
+                    project.id.0
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    std::fs::remove_dir_all(&project_path).unwrap();
+    assert_eq!(candidates_response.status(), StatusCode::OK);
+    let candidates_body = candidates_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let candidates: Vec<IssueSourceCandidate> = serde_json::from_slice(&candidates_body).unwrap();
+    assert!(candidates.iter().any(|candidate| {
+        candidate.kind == "github"
+            && candidate.locator == "pmd-coutinho/dioxus-agentic-afk"
+            && !candidate.enabled
+    }));
+    assert!(candidates.iter().any(|candidate| {
+        candidate.kind == "local_markdown"
+            && candidate.locator == ".scratch/issues"
+            && !candidate.enabled
+    }));
+}
+
+#[tokio::test]
+async fn enabled_issue_source_is_persisted_and_can_be_switched() {
+    let (app, db) = test_router_with_db().await;
+    let project = persistence::create_project(
+        &db,
+        &CreateProjectRequest {
+            path: "/tmp".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let enable_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/issue-source", project.id.0))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&EnableIssueSourceRequest {
+                        kind: "github".to_string(),
+                        locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(enable_response.status(), StatusCode::OK);
+    let enable_body = enable_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let enabled_project: ProjectResponse = serde_json::from_slice(&enable_body).unwrap();
+    assert_eq!(
+        enabled_project.enabled_issue_source,
+        Some(IssueSource {
+            kind: "github".to_string(),
+            locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
+        })
+    );
+
+    let restarted_config = ControlPlaneConfig {
+        bind_address: "127.0.0.1:0".parse().unwrap(),
+        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        database_url: "sqlite::memory:".into(),
+    };
+    let restarted_app = router(restarted_config, db.clone());
+    let switch_response = restarted_app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/issue-source", project.id.0))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&EnableIssueSourceRequest {
+                        kind: "local_markdown".to_string(),
+                        locator: ".scratch/issues".to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(switch_response.status(), StatusCode::OK);
+    let switch_body = switch_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let switched_project: ProjectResponse = serde_json::from_slice(&switch_body).unwrap();
+    assert_eq!(
+        switched_project.enabled_issue_source,
+        Some(IssueSource {
+            kind: "local_markdown".to_string(),
+            locator: ".scratch/issues".to_string(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn enable_issue_source_rejects_unknown_kind_with_problem_json() {
+    let (app, db) = test_router_with_db().await;
+    let project = persistence::create_project(
+        &db,
+        &CreateProjectRequest {
+            path: "/tmp".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/issue-source", project.id.0))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&EnableIssueSourceRequest {
+                        kind: "spreadsheet".to_string(),
+                        locator: "backlog".to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/problem+json"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem.status, 422);
+    assert_eq!(problem.problem_type, "urn:agentic-afk:invalid-issue-source");
 }
 
 #[tokio::test]
