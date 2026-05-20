@@ -4,7 +4,8 @@
 
 use agentic_afk_contracts::{
     CreateProjectRequest, EnableIssueSourceRequest, IssueSource, IssueSourceSyncResponse,
-    PlanningSnapshotResponse, ProjectId, ProjectResponse, SourceIssueSnapshot,
+    IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProjectId, ProjectResponse,
+    SourceIssueSnapshot,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
@@ -307,6 +308,37 @@ pub async fn record_sync_failure(
         source: source.clone(),
         last_successful_sync_at,
         last_failure: Some(failure.to_string()),
+    })
+}
+
+pub async fn get_issue_source_sync_status(
+    db: &Db,
+    project_id: &str,
+) -> Result<IssueSourceSyncStatusResponse, PersistenceError> {
+    let project = get_project(db, project_id).await?;
+    let Some(source) = project.enabled_issue_source else {
+        return Err(PersistenceError::InvalidIssueSource(
+            "Project has no enabled Issue Source".to_string(),
+        ));
+    };
+
+    let status = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        r#"
+        SELECT last_successful_sync_at, last_failure
+        FROM issue_source_sync_status
+        WHERE project_id = ?
+        "#,
+    )
+    .bind(project_id)
+    .fetch_optional(db)
+    .await?;
+
+    let (last_successful_sync_at, last_failure) = status.unwrap_or((None, None));
+
+    Ok(IssueSourceSyncStatusResponse {
+        source,
+        last_successful_sync_at,
+        last_failure,
     })
 }
 

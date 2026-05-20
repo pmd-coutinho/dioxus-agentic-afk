@@ -80,6 +80,14 @@ pub struct IssueSourceSyncResponse {
     pub last_failure: Option<String>,
 }
 
+/// Current sync status for the enabled Issue Source.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct IssueSourceSyncStatusResponse {
+    pub source: IssueSource,
+    pub last_successful_sync_at: Option<String>,
+    pub last_failure: Option<String>,
+}
+
 /// Persisted cache of normalized Source Issues from an Issue Source.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct PlanningSnapshotResponse {

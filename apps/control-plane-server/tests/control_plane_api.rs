@@ -1,6 +1,7 @@
 use agentic_afk_contracts::{
     CreateProjectRequest, EnableIssueSourceRequest, HealthResponse, IssueSource,
-    IssueSourceCandidate, PlanningSnapshotResponse, ProblemDetail, ProjectResponse,
+    IssueSourceCandidate, IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProblemDetail,
+    ProjectResponse,
 };
 use agentic_afk_control_plane_server::{ControlPlaneConfig, router};
 use agentic_afk_persistence::{self as persistence};
@@ -216,12 +217,14 @@ async fn openapi_document_describes_project_api_and_problem_responses() {
     assert!(openapi["paths"]["/api/projects/{id}/issue-source-candidates"]["get"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/issue-source"]["put"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/issue-source/sync"]["post"].is_object());
+    assert!(openapi["paths"]["/api/projects/{id}/issue-source/sync-status"]["get"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/planning-snapshot"]["get"].is_object());
     assert!(openapi["components"]["schemas"]["CreateProjectRequest"].is_object());
     assert!(openapi["components"]["schemas"]["EnableIssueSourceRequest"].is_object());
     assert!(openapi["components"]["schemas"]["IssueSource"].is_object());
     assert!(openapi["components"]["schemas"]["IssueSourceCandidate"].is_object());
     assert!(openapi["components"]["schemas"]["IssueSourceSyncResponse"].is_object());
+    assert!(openapi["components"]["schemas"]["IssueSourceSyncStatusResponse"].is_object());
     assert!(openapi["components"]["schemas"]["PlanningSnapshotResponse"].is_object());
     assert!(openapi["components"]["schemas"]["SourceIssueSnapshot"].is_object());
     assert!(openapi["components"]["schemas"]["ProjectResponse"].is_object());
@@ -243,6 +246,11 @@ async fn openapi_document_describes_project_api_and_problem_responses() {
     );
     assert!(
         openapi["paths"]["/api/projects/{id}/issue-source/sync"]["post"]["responses"]["422"]
+            ["content"]["application/problem+json"]
+            .is_object()
+    );
+    assert!(
+        openapi["paths"]["/api/projects/{id}/issue-source/sync-status"]["get"]["responses"]["422"]
             ["content"]["application/problem+json"]
             .is_object()
     );
@@ -457,6 +465,55 @@ async fn enabled_issue_source_is_persisted_and_can_be_switched() {
             locator: ".scratch/issues".to_string(),
         })
     );
+}
+
+#[tokio::test]
+async fn issue_source_sync_status_can_be_read_before_a_snapshot_exists() {
+    let (app, db) = test_router_with_db().await;
+    let project = persistence::create_project(
+        &db,
+        &CreateProjectRequest {
+            path: "/tmp".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    persistence::enable_issue_source(
+        &db,
+        &project.id.0,
+        &EnableIssueSourceRequest {
+            kind: "local_markdown".to_string(),
+            locator: ".scratch/issues".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/projects/{}/issue-source/sync-status",
+                    project.id.0
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let status: IssueSourceSyncStatusResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        status.source,
+        IssueSource {
+            kind: "local_markdown".to_string(),
+            locator: ".scratch/issues".to_string(),
+        }
+    );
+    assert_eq!(status.last_successful_sync_at, None);
+    assert_eq!(status.last_failure, None);
 }
 
 #[tokio::test]

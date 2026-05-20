@@ -5,7 +5,8 @@ use std::sync::Arc;
 use agentic_afk_contracts::{
     AppInfoResponse, CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest,
     HealthResponse, IssueSource, IssueSourceCandidate, IssueSourceSyncResponse,
-    PlanningSnapshotResponse, ProblemDetail, ProjectResponse, SourceIssueSnapshot,
+    IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProblemDetail, ProjectResponse,
+    SourceIssueSnapshot,
 };
 use agentic_afk_git_summary::summarize_project_path;
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
@@ -74,6 +75,7 @@ struct AppState {
         get_project,
         list_issue_source_candidates,
         enable_issue_source,
+        get_issue_source_sync_status,
         sync_issue_source,
         get_planning_snapshot
     ),
@@ -87,6 +89,7 @@ struct AppState {
         IssueSource,
         IssueSourceCandidate,
         IssueSourceSyncResponse,
+        IssueSourceSyncStatusResponse,
         PlanningSnapshotResponse,
         SourceIssueSnapshot,
         ProblemDetail
@@ -118,6 +121,10 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route(
             "/api/projects/{id}/issue-source/sync",
             post(sync_issue_source),
+        )
+        .route(
+            "/api/projects/{id}/issue-source/sync-status",
+            get(get_issue_source_sync_status),
         )
         .route(
             "/api/projects/{id}/planning-snapshot",
@@ -333,6 +340,27 @@ async fn sync_issue_source(State(state): State<Arc<AppState>>, Path(id): Path<St
                 detail,
             )
         }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/projects/{id}/issue-source/sync-status",
+    params(("id" = String, Path, description = "Project ID")),
+    responses(
+        (status = OK, body = IssueSourceSyncStatusResponse),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn get_issue_source_sync_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match persistence::get_issue_source_sync_status(&state.db, &id).await {
+        Ok(status) => Json(status).into_response(),
+        Err(e) => persistence_error_to_response(e),
     }
 }
 
