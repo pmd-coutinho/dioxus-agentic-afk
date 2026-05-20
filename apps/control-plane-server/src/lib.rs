@@ -6,6 +6,7 @@ use agentic_afk_contracts::{
     AppInfoResponse, CreateProjectRequest, EffectiveConfig, HealthResponse, ProblemDetail,
     ProjectResponse,
 };
+use agentic_afk_git_summary::summarize_project_path;
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -139,9 +140,9 @@ async fn app_info(State(state): State<Arc<AppState>>) -> Json<AppInfoResponse> {
     request_body = CreateProjectRequest,
     responses(
         (status = CREATED, body = ProjectResponse),
-        (status = CONFLICT, body = ProblemDetail),
-        (status = UNPROCESSABLE_ENTITY, body = ProblemDetail),
-        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail)
+        (status = CONFLICT, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
     )
 )]
 async fn create_project(
@@ -149,7 +150,7 @@ async fn create_project(
     Json(request): Json<CreateProjectRequest>,
 ) -> Response {
     match persistence::create_project(&state.db, &request).await {
-        Ok(project) => (StatusCode::CREATED, Json(project)).into_response(),
+        Ok(project) => (StatusCode::CREATED, Json(with_git_summary(project))).into_response(),
         Err(e) => persistence_error_to_response(e),
     }
 }
@@ -159,12 +160,18 @@ async fn create_project(
     path = "/api/projects",
     responses(
         (status = OK, body = [ProjectResponse]),
-        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail)
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
     )
 )]
 async fn list_projects(State(state): State<Arc<AppState>>) -> Response {
     match persistence::list_projects(&state.db).await {
-        Ok(projects) => Json(projects).into_response(),
+        Ok(projects) => Json(
+            projects
+                .into_iter()
+                .map(with_git_summary)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => persistence_error_to_response(e),
     }
 }
@@ -175,15 +182,20 @@ async fn list_projects(State(state): State<Arc<AppState>>) -> Response {
     params(("id" = String, Path, description = "Project ID")),
     responses(
         (status = OK, body = ProjectResponse),
-        (status = NOT_FOUND, body = ProblemDetail),
-        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail)
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
     )
 )]
 async fn get_project(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match persistence::get_project(&state.db, &id).await {
-        Ok(project) => Json(project).into_response(),
+        Ok(project) => Json(with_git_summary(project)).into_response(),
         Err(e) => persistence_error_to_response(e),
     }
+}
+
+fn with_git_summary(mut project: ProjectResponse) -> ProjectResponse {
+    project.git_summary = summarize_project_path(&project.path);
+    project
 }
 
 fn persistence_error_to_response(err: PersistenceError) -> Response {

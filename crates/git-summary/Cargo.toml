@@ -6,4 +6,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-
+agentic-afk-contracts.workspace = true
+gix.workspace = true

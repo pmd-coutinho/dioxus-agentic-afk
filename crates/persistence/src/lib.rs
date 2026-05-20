@@ -102,6 +102,7 @@ pub async fn create_project(
     Ok(ProjectResponse {
         id: ProjectId(id),
         path: normalized_path,
+        git_summary: None,
     })
 }
 
@@ -116,6 +117,7 @@ pub async fn list_projects(db: &Db) -> Result<Vec<ProjectResponse>, PersistenceE
         .map(|(id, path)| ProjectResponse {
             id: ProjectId(id),
             path,
+            git_summary: None,
         })
         .collect())
 }
@@ -131,6 +133,7 @@ pub async fn get_project(db: &Db, id: &str) -> Result<ProjectResponse, Persisten
         Some((id, path)) => Ok(ProjectResponse {
             id: ProjectId(id),
             path,
+            git_summary: None,
         }),
         None => Err(PersistenceError::NotFound(id.to_string())),
     }
@@ -154,6 +157,7 @@ pub async fn seed_dev_project(
         return Ok(ProjectResponse {
             id: ProjectId(id),
             path,
+            git_summary: None,
         });
     }
 
@@ -167,6 +171,7 @@ pub async fn seed_dev_project(
     Ok(ProjectResponse {
         id: ProjectId(id),
         path: normalized_path,
+        git_summary: None,
     })
 }
 

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 agentic-afk-contracts.workspace = true
+agentic-afk-git-summary.workspace = true
 agentic-afk-persistence.workspace = true
 anyhow.workspace = true
 axum.workspace = true
@@ -24,4 +25,3 @@ utoipa.workspace = true
 [dev-dependencies]
 http-body-util.workspace = true
 tower.workspace = true
-

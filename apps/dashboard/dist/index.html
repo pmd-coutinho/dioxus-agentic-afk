@@ -16,6 +16,14 @@
     .grid { display: grid; gap: 16px; grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr); }
     .panel { border: 1px solid #3f3f46; border-radius: 8px; background: #18181b; padding: 20px; }
     .connected { border-color: #047857; background: #022c22; }
+    .stack { display: grid; gap: 16px; }
+    .project-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .project { display: grid; gap: 8px; border-bottom: 1px solid #27272a; padding-bottom: 12px; }
+    .project:last-child { border-bottom: 0; padding-bottom: 0; }
+    .project-path { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
+    .project-id { color: #71717a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .git-summary { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+    .muted { color: #71717a; font-size: 14px; }
     dl { display: grid; gap: 12px; margin: 0; }
     dt { color: #a1a1aa; font-size: 14px; }
     dd { margin: 4px 0 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
@@ -28,24 +36,36 @@
       <p class="eyebrow">Local Control Plane</p>
       <h1>agentic-afk</h1>
     </header>
-    <div class="grid">
-      <section id="connection" class="panel">
-        <h2>Checking API connection</h2>
-        <p>Waiting for /api/app-info</p>
-      </section>
+    <div class="stack">
+      <div class="grid">
+        <section id="connection" class="panel">
+          <h2>Checking API connection</h2>
+          <p>Waiting for /api/app-info</p>
+        </section>
+        <section class="panel">
+          <h2>Settings</h2>
+          <dl>
+            <div><dt>Bind address</dt><dd id="bind-address">-</dd></div>
+            <div><dt>Dashboard assets</dt><dd id="dashboard-assets">-</dd></div>
+            <div><dt>Database</dt><dd id="database-url">-</dd></div>
+          </dl>
+        </section>
+      </div>
       <section class="panel">
-        <h2>Settings</h2>
-        <dl>
-          <div><dt>Bind address</dt><dd id="bind-address">-</dd></div>
-          <div><dt>Dashboard assets</dt><dd id="dashboard-assets">-</dd></div>
-          <div><dt>Database</dt><dd id="database-url">-</dd></div>
-        </dl>
+        <h2>Projects</h2>
+        <div id="projects" class="muted">Loading Projects</div>
       </section>
     </div>
   </main>
   <script type="module">
     const connection = document.querySelector("#connection");
+    const projects = document.querySelector("#projects");
     const setText = (selector, value) => document.querySelector(selector).textContent = value;
+    const escapeHtml = (value) => String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
 
     fetch("/api/app-info")
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
@@ -58,6 +78,35 @@
       })
       .catch((error) => {
         connection.innerHTML = `<h2>API disconnected</h2><p>${error.message}</p>`;
+      });
+
+    fetch("/api/projects")
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((items) => {
+        if (items.length === 0) {
+          projects.textContent = "No Projects";
+          return;
+        }
+        projects.classList.remove("muted");
+        projects.innerHTML = `<ul class="project-list">${items.map((project) => {
+          const summary = project.git_summary
+            ? `<dl class="git-summary">
+                <div><dt>Branch</dt><dd>${escapeHtml(project.git_summary.branch ?? "detached")}</dd></div>
+                <div><dt>Head</dt><dd>${escapeHtml((project.git_summary.head ?? "unknown").slice(0, 12))}</dd></div>
+                <div><dt>State</dt><dd>${project.git_summary.dirty ? "dirty" : "clean"}</dd></div>
+              </dl>`
+            : `<p class="muted">No Git Summary</p>`;
+          return `<li class="project">
+            <div>
+              <div class="project-path">${escapeHtml(project.path)}</div>
+              <div class="project-id">${escapeHtml(project.id)}</div>
+            </div>
+            ${summary}
+          </li>`;
+        }).join("")}</ul>`;
+      })
+      .catch((error) => {
+        projects.textContent = error.message;
       });
   </script>
 </body>

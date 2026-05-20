@@ -38,6 +38,15 @@ pub struct CreateProjectRequest {
 pub struct ProjectResponse {
     pub id: ProjectId,
     pub path: String,
+    pub git_summary: Option<GitSummary>,
+}
+
+/// Read-only Git metadata derived from a Project path.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct GitSummary {
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub dirty: bool,
 }
 
 /// RFC 7807 problem+json error response.
@@ -78,6 +87,7 @@ mod tests {
         let resp = ProjectResponse {
             id: ProjectId("550e8400-e29b-41d4-a716-446655440000".to_string()),
             path: "/home/user/my-project".to_string(),
+            git_summary: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: ProjectResponse = serde_json::from_str(&json).unwrap();
@@ -100,4 +110,3 @@ mod tests {
         assert_eq!(deserialized, problem);
     }
 }
-

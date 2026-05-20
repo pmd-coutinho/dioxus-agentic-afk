@@ -33,11 +33,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => serve(config).await,
         Command::Migrate => run_migrate(&config.database_url).await,
         Command::SeedDev => {
-            let dev_path = std::env::current_dir()?
-                .to_string_lossy()
-                .to_string();
+            let dev_path = std::env::current_dir()?.to_string_lossy().to_string();
             run_seed_dev(&config.database_url, &dev_path).await
         }
     }
 }
-
