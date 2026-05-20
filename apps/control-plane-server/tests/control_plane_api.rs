@@ -104,10 +104,54 @@ async fn dashboard_shell_loads_from_the_local_control_plane() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains(r#"<div id="main">"#));
     assert!(body.contains("agentic-afk-dashboard"));
-    assert!(body.contains("/api/app-info"));
-    assert!(body.contains("/api/projects"));
-    assert!(body.contains("Git Summary"));
+    assert!(body.contains("/assets/"));
+}
+
+#[tokio::test]
+async fn dashboard_browser_routes_fallback_without_claiming_api_paths() {
+    let dashboard_asset_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/dashboard/dist")
+        .canonicalize()
+        .unwrap();
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let config = ControlPlaneConfig {
+        bind_address: "127.0.0.1:0".parse().unwrap(),
+        dashboard_asset_dir,
+        database_url: "sqlite::memory:".into(),
+    };
+    let app = router(config, db);
+
+    for uri in ["/projects", "/projects/example-project-id", "/settings"] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("agentic-afk-dashboard"), "{uri}");
+    }
+
+    let api_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/not-a-dashboard-route")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(api_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        api_response.headers().get("content-type").unwrap(),
+        "application/problem+json"
+    );
 }
 
 #[tokio::test]

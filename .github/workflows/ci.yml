@@ -11,7 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
-      - run: mise run check
-      - run: mise run test
-      - run: mise run build
-
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: mise run ci

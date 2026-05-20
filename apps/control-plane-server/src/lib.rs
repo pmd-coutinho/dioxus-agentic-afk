@@ -83,6 +83,7 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route("/api/docs", get(api_docs))
         .route("/api/projects", post(create_project).get(list_projects))
         .route("/api/projects/{id}", get(get_project))
+        .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
         .with_state(state)
 }
@@ -254,6 +255,20 @@ async fn api_docs() -> impl IntoResponse {
 <body></body>
 </html>"#,
     )
+}
+
+async fn api_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [("content-type", "application/problem+json")],
+        Json(ProblemDetail {
+            problem_type: "urn:agentic-afk:not-found".to_string(),
+            title: "Not Found".to_string(),
+            status: 404,
+            detail: "API route not found".to_string(),
+        }),
+    )
+        .into_response()
 }
 
 async fn shutdown_signal() {

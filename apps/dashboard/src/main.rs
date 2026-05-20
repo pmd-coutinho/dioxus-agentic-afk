@@ -9,6 +9,7 @@ fn main() {
 fn App() -> Element {
     let app_info = use_resource(fetch_app_info);
     let projects = use_resource(fetch_projects);
+    let current_path = browser_pathname();
 
     rsx! {
         main { class: "min-h-screen bg-zinc-950 text-zinc-100",
@@ -23,6 +24,7 @@ fn App() -> Element {
                         Dashboard {
                             info: info.clone(),
                             projects: projects.read_unchecked().clone(),
+                            current_path,
                         }
                     },
                     Some(Err(error)) => rsx! {
@@ -49,7 +51,51 @@ fn App() -> Element {
 fn Dashboard(
     info: AppInfoResponse,
     projects: Option<Result<Vec<ProjectResponse>, String>>,
+    current_path: String,
 ) -> Element {
+    if current_path == "/settings" {
+        return rsx! {
+            div { class: "flex flex-col gap-4",
+                SettingsPanel { info }
+            }
+        };
+    }
+
+    if let Some(project_id) = current_path.strip_prefix("/projects/") {
+        return rsx! {
+            div { class: "flex flex-col gap-4",
+                match projects {
+                    Some(Ok(projects)) => {
+                        match projects.into_iter().find(|project| project.id.0 == project_id) {
+                            Some(project) => rsx! { ProjectDetail { project } },
+                            None => rsx! {
+                                StatusPanel {
+                                    title: "Project not found".to_string(),
+                                    detail: project_id.to_string(),
+                                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                                }
+                            },
+                        }
+                    },
+                    Some(Err(error)) => rsx! {
+                        StatusPanel {
+                            title: "Projects unavailable".to_string(),
+                            detail: error,
+                            tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
+                        }
+                    },
+                    None => rsx! {
+                        StatusPanel {
+                            title: "Loading Project".to_string(),
+                            detail: project_id.to_string(),
+                            tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                        }
+                    },
+                }
+            }
+        };
+    }
+
     rsx! {
         div { class: "flex flex-col gap-4",
             div { class: "grid gap-4 md:grid-cols-[1.2fr_0.8fr]",
@@ -58,14 +104,7 @@ fn Dashboard(
                     detail: format!("{} {}", info.app_name, info.version),
                     tone: "border-emerald-700 bg-emerald-950/35 text-emerald-50".to_string(),
                 }
-                section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-                    h2 { class: "mb-4 text-base font-semibold", "Settings" }
-                    dl { class: "grid gap-3 text-sm",
-                        SettingRow { label: "Bind address".to_string(), value: info.config.bind_address }
-                        SettingRow { label: "Dashboard assets".to_string(), value: info.config.dashboard_asset_dir }
-                        SettingRow { label: "Database".to_string(), value: info.config.database_url }
-                    }
-                }
+                SettingsPanel { info }
             }
 
             section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
@@ -94,6 +133,20 @@ fn Dashboard(
 }
 
 #[component]
+fn SettingsPanel(info: AppInfoResponse) -> Element {
+    rsx! {
+        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
+            h2 { class: "mb-4 text-base font-semibold", "Settings" }
+            dl { class: "grid gap-3 text-sm",
+                SettingRow { label: "Bind address".to_string(), value: info.config.bind_address }
+                SettingRow { label: "Dashboard assets".to_string(), value: info.config.dashboard_asset_dir }
+                SettingRow { label: "Database".to_string(), value: info.config.database_url }
+            }
+        }
+    }
+}
+
+#[component]
 fn StatusPanel(title: String, detail: String, tone: String) -> Element {
     rsx! {
         section { class: "rounded-lg border p-5 {tone}",
@@ -115,10 +168,12 @@ fn SettingRow(label: String, value: String) -> Element {
 
 #[component]
 fn ProjectRow(project: ProjectResponse) -> Element {
+    let detail_href = format!("/projects/{}", project.id.0);
+
     rsx! {
         li { class: "grid gap-2 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
             div { class: "flex flex-col gap-1 md:flex-row md:items-baseline md:justify-between",
-                p { class: "break-words font-mono text-sm text-zinc-100", "{project.path}" }
+                a { class: "break-words font-mono text-sm text-emerald-200 hover:text-emerald-100", href: "{detail_href}", "{project.path}" }
                 p { class: "font-mono text-xs text-zinc-500", "{project.id.0}" }
             }
             match project.git_summary {
@@ -126,6 +181,28 @@ fn ProjectRow(project: ProjectResponse) -> Element {
                 None => rsx! {
                     p { class: "text-sm text-zinc-500", "No Git Summary" }
                 },
+            }
+        }
+    }
+}
+
+#[component]
+fn ProjectDetail(project: ProjectResponse) -> Element {
+    rsx! {
+        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
+            a { class: "text-sm text-emerald-200 hover:text-emerald-100", href: "/projects", "Projects" }
+            h2 { class: "mt-4 text-base font-semibold", "Project detail" }
+            dl { class: "mt-4 grid gap-3 text-sm",
+                SettingRow { label: "Project path".to_string(), value: project.path.clone() }
+                SettingRow { label: "Project ID".to_string(), value: project.id.0.clone() }
+            }
+            div { class: "mt-4",
+                match project.git_summary {
+                    Some(summary) => rsx! { GitSummaryRow { summary } },
+                    None => rsx! {
+                        p { class: "text-sm text-zinc-500", "No Git Summary" }
+                    },
+                }
             }
         }
     }
@@ -177,4 +254,10 @@ async fn fetch_projects() -> Result<Vec<ProjectResponse>, String> {
         .json()
         .await
         .map_err(|error| error.to_string())
+}
+
+fn browser_pathname() -> String {
+    web_sys::window()
+        .and_then(|window| window.location().pathname().ok())
+        .unwrap_or_else(|| "/".to_string())
 }
