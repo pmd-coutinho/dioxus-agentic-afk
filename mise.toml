@@ -1,0 +1,23 @@
+[tools]
+rust = "1.94.1"
+
+[tasks.dev]
+description = "Run the Local Control Plane from source"
+run = "cargo run -p agentic-afk-control-plane-server --bin agentic-afk -- serve"
+
+[tasks.check]
+description = "Check the Rust workspace"
+run = "cargo check --workspace --all-targets"
+
+[tasks.test]
+description = "Run automated tests"
+run = "cargo test --workspace"
+
+[tasks.build]
+description = "Build runnable workspace artifacts"
+run = "cargo build --workspace"
+
+[tasks.ci]
+description = "Run the baseline CI workflow"
+depends = ["check", "test", "build"]
+

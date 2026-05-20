@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/control-plane-server",
+    "apps/dashboard",
+    "crates/contracts",
+    "crates/git-summary",
+    "crates/orchestrator",
+    "crates/persistence",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/pmd-coutinho/dioxus-agentic-afk"
+
+[workspace.dependencies]
+agentic-afk-contracts = { path = "crates/contracts" }
+anyhow = "1.0.100"
+axum = "0.8.7"
+clap = { version = "4.5.53", features = ["derive", "env"] }
+http-body-util = "0.1.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tower = { version = "0.5.2", features = ["util"] }
+tower-http = { version = "0.6.6", features = ["fs", "trace"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+utoipa = { version = "5.4.0", features = ["axum_extras"] }
+

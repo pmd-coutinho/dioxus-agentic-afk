@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>agentic-afk</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #09090b; color: #f4f4f5; }
+    body { margin: 0; }
+    main { max-width: 960px; margin: 0 auto; padding: 32px 24px; }
+    header { border-bottom: 1px solid #27272a; padding-bottom: 20px; margin-bottom: 24px; }
+    h1 { margin: 4px 0 0; font-size: 32px; }
+    h2 { margin: 0 0 10px; font-size: 18px; }
+    p { margin: 0; }
+    .eyebrow { color: #6ee7b7; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .grid { display: grid; gap: 16px; grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr); }
+    .panel { border: 1px solid #3f3f46; border-radius: 8px; background: #18181b; padding: 20px; }
+    .connected { border-color: #047857; background: #022c22; }
+    dl { display: grid; gap: 12px; margin: 0; }
+    dt { color: #a1a1aa; font-size: 14px; }
+    dd { margin: 4px 0 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main id="agentic-afk-dashboard">
+    <header>
+      <p class="eyebrow">Local Control Plane</p>
+      <h1>agentic-afk</h1>
+    </header>
+    <div class="grid">
+      <section id="connection" class="panel">
+        <h2>Checking API connection</h2>
+        <p>Waiting for /api/app-info</p>
+      </section>
+      <section class="panel">
+        <h2>Settings</h2>
+        <dl>
+          <div><dt>Bind address</dt><dd id="bind-address">-</dd></div>
+          <div><dt>Dashboard assets</dt><dd id="dashboard-assets">-</dd></div>
+          <div><dt>Database</dt><dd id="database-url">-</dd></div>
+        </dl>
+      </section>
+    </div>
+  </main>
+  <script type="module">
+    const connection = document.querySelector("#connection");
+    const setText = (selector, value) => document.querySelector(selector).textContent = value;
+
+    fetch("/api/app-info")
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((info) => {
+        connection.classList.add("connected");
+        connection.innerHTML = `<h2>API connected</h2><p>${info.app_name} ${info.version}</p>`;
+        setText("#bind-address", info.config.bind_address);
+        setText("#dashboard-assets", info.config.dashboard_asset_dir);
+        setText("#database-url", info.config.database_url);
+      })
+      .catch((error) => {
+        connection.innerHTML = `<h2>API disconnected</h2><p>${error.message}</p>`;
+      });
+  </script>
+</body>
+</html>
