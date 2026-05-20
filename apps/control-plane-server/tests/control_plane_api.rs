@@ -67,6 +67,20 @@ async fn local_control_plane_reports_health_and_truthful_app_info() {
         .unwrap();
 
     assert_eq!(app_info_response.status(), StatusCode::OK);
+    let app_info_body = app_info_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let app_info: agentic_afk_contracts::AppInfoResponse =
+        serde_json::from_slice(&app_info_body).unwrap();
+    assert_eq!(app_info.app_name, "agentic-afk");
+    assert_eq!(app_info.api_status, "connected");
+    assert_eq!(app_info.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(app_info.config.bind_address, "127.0.0.1:0");
+    assert_eq!(app_info.config.dashboard_asset_dir, "apps/dashboard/dist");
+    assert_eq!(app_info.config.database_url, "sqlite::memory:");
 }
 
 #[tokio::test]
