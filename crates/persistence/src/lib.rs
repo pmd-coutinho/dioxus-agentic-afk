@@ -92,7 +92,7 @@ pub async fn create_project(
         .await
         .map_err(|e| match e {
             sqlx::Error::Database(ref db_err)
-                if db_err.is_unique_violation() && db_err.message().contains("projects.path") =>
+                if db_err.is_unique_violation() && db_err.code().as_deref() == Some("2067") =>
             {
                 PersistenceError::Duplicate(normalized_path.clone())
             }
