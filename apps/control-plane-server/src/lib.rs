@@ -57,7 +57,7 @@ struct AppState {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(health, app_info),
+    paths(health, app_info, create_project, list_projects, get_project),
     components(schemas(
         HealthResponse,
         AppInfoResponse,
@@ -133,6 +133,17 @@ async fn app_info(State(state): State<Arc<AppState>>) -> Json<AppInfoResponse> {
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/projects",
+    request_body = CreateProjectRequest,
+    responses(
+        (status = CREATED, body = ProjectResponse),
+        (status = CONFLICT, body = ProblemDetail),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemDetail),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail)
+    )
+)]
 async fn create_project(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateProjectRequest>,
@@ -143,6 +154,14 @@ async fn create_project(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/projects",
+    responses(
+        (status = OK, body = [ProjectResponse]),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail)
+    )
+)]
 async fn list_projects(State(state): State<Arc<AppState>>) -> Response {
     match persistence::list_projects(&state.db).await {
         Ok(projects) => Json(projects).into_response(),
@@ -150,6 +169,16 @@ async fn list_projects(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/projects/{id}",
+    params(("id" = String, Path, description = "Project ID")),
+    responses(
+        (status = OK, body = ProjectResponse),
+        (status = NOT_FOUND, body = ProblemDetail),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail)
+    )
+)]
 async fn get_project(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match persistence::get_project(&state.db, &id).await {
         Ok(project) => Json(project).into_response(),
@@ -238,4 +267,3 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 }
-

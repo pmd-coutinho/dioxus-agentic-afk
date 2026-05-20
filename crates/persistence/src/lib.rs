@@ -49,9 +49,10 @@ pub async fn connect(database_url: &str) -> Result<Db, PersistenceError> {
 
 /// Run all pending migrations.
 pub async fn migrate(db: &Db) -> Result<(), PersistenceError> {
-    sqlx::migrate!("./migrations").run(db).await.map_err(|e| {
-        PersistenceError::Database(sqlx::Error::Configuration(Box::new(e)))
-    })?;
+    sqlx::migrate!("./migrations")
+        .run(db)
+        .await
+        .map_err(|e| PersistenceError::Database(sqlx::Error::Configuration(Box::new(e))))?;
     Ok(())
 }
 
@@ -90,7 +91,9 @@ pub async fn create_project(
         .execute(db)
         .await
         .map_err(|e| match e {
-            sqlx::Error::Database(ref db_err) if db_err.message().contains("UNIQUE") => {
+            sqlx::Error::Database(ref db_err)
+                if db_err.is_unique_violation() && db_err.message().contains("projects.path") =>
+            {
                 PersistenceError::Duplicate(normalized_path.clone())
             }
             other => PersistenceError::Database(other),
@@ -134,14 +137,18 @@ pub async fn get_project(db: &Db, id: &str) -> Result<ProjectResponse, Persisten
 }
 
 /// Idempotently seed a development Project at the given path.
-pub async fn seed_dev_project(db: &Db, dev_path: &str) -> Result<ProjectResponse, PersistenceError> {
+pub async fn seed_dev_project(
+    db: &Db,
+    dev_path: &str,
+) -> Result<ProjectResponse, PersistenceError> {
+    let normalized_path = normalize_project_path(dev_path)?;
+
     // Check if already seeded
-    let existing = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, path FROM projects WHERE path = ?",
-    )
-    .bind(dev_path)
-    .fetch_optional(db)
-    .await?;
+    let existing =
+        sqlx::query_as::<_, (String, String)>("SELECT id, path FROM projects WHERE path = ?")
+            .bind(&normalized_path)
+            .fetch_optional(db)
+            .await?;
 
     if let Some((id, path)) = existing {
         return Ok(ProjectResponse {
@@ -150,22 +157,16 @@ pub async fn seed_dev_project(db: &Db, dev_path: &str) -> Result<ProjectResponse
         });
     }
 
-    // Validate path
-    let path = Path::new(dev_path);
-    if !path.exists() || !path.is_dir() {
-        return Err(PersistenceError::InvalidPath(dev_path.to_string()));
-    }
-
     let id = Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO projects (id, path) VALUES (?, ?)")
         .bind(&id)
-        .bind(dev_path)
+        .bind(&normalized_path)
         .execute(db)
         .await?;
 
     Ok(ProjectResponse {
         id: ProjectId(id),
-        path: dev_path.to_string(),
+        path: normalized_path,
     })
 }
 

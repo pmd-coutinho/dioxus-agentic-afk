@@ -1,6 +1,4 @@
-use agentic_afk_contracts::{
-    CreateProjectRequest, HealthResponse, ProblemDetail, ProjectResponse,
-};
+use agentic_afk_contracts::{CreateProjectRequest, HealthResponse, ProblemDetail, ProjectResponse};
 use agentic_afk_control_plane_server::{ControlPlaneConfig, router};
 use agentic_afk_persistence::{self as persistence};
 use axum::body::Body;
@@ -257,9 +255,12 @@ async fn create_duplicate_project_returns_conflict() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/problem+json"
+    );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
     assert_eq!(problem.status, 409);
     assert_eq!(problem.problem_type, "urn:agentic-afk:duplicate");
 }
-
