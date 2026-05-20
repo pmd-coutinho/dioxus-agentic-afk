@@ -6,4 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+agentic-afk-contracts.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
