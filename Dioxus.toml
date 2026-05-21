@@ -1,5 +1,6 @@
 [application]
 name = "agentic-afk-dashboard"
+default_platform = "web"
 
 [web.app]
 title = "agentic-afk"
@@ -10,7 +11,3 @@ index_on_404 = true
 
 [[web.proxy]]
 backend = "http://127.0.0.1:3637/api/"
-
-[tool.dioxus.tailwind]
-input = "apps/dashboard/tailwind.css"
-output = "apps/dashboard/assets/tailwind.css"
