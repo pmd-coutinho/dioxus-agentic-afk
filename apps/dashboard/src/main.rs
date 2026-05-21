@@ -3,6 +3,8 @@ use agentic_afk_contracts::{
 };
 use dioxus::prelude::*;
 
+static TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
+
 fn main() {
     dioxus::launch(App);
 }
@@ -14,6 +16,7 @@ fn App() -> Element {
     let current_path = browser_pathname();
 
     rsx! {
+        document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         main { class: "min-h-screen bg-zinc-950 text-zinc-100",
             section { class: "mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-8",
                 header { class: "flex flex-col gap-1 border-b border-zinc-800 pb-5",

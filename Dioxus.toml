@@ -1,0 +1,16 @@
+[application]
+name = "agentic-afk-dashboard"
+
+[web.app]
+title = "agentic-afk"
+
+[web.watcher]
+watch_path = ["apps/dashboard/src", "apps/dashboard/tailwind.css"]
+index_on_404 = true
+
+[[web.proxy]]
+backend = "http://127.0.0.1:3637/api/"
+
+[tool.dioxus.tailwind]
+input = "apps/dashboard/tailwind.css"
+output = "apps/dashboard/assets/tailwind.css"

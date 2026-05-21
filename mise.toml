@@ -10,7 +10,7 @@ run = "cargo run -p agentic-afk-control-plane-server --bin agentic-afk -- serve"
 
 [tasks."dashboard:dev"]
 description = "Run the Dashboard Dioxus dev server"
-run = "dx serve --platform web --package agentic-afk-dashboard"
+run = "dx serve --open false --platform web --package agentic-afk-dashboard"
 
 [tasks."dashboard:build"]
 description = "Build the Dashboard web assets"
