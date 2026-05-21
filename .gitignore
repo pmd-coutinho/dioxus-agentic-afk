@@ -3,5 +3,4 @@ agentic-afk.db
 node_modules/
 test-results/
 playwright-report/
-apps/dashboard/dist/
 apps/dashboard/assets/tailwind.css

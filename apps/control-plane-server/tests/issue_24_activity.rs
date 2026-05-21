@@ -57,7 +57,7 @@ async fn test_router(
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
         worktrunk_binary_path,
@@ -663,7 +663,7 @@ async fn start_assignment_ready_for_proposal_records_change_proposal_opened_acti
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: proposal_gh_fake("activity-proposal-opened-gh"),
         worktrunk_binary_path: proposal_wt_fake("activity-proposal-opened-wt"),
@@ -695,7 +695,7 @@ async fn proposal_verified_records_activity_entry() {
         seed_github_assignment_with_proposal(&db, &project_path, &worktree_path).await;
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: fake_gh_verify("activity-verified-gh", "passing", false),
         worktrunk_binary_path: write_fake_command("activity-verified-wt-bin", "#!/bin/sh\nexit 0\n"),
@@ -742,7 +742,7 @@ async fn human_merge_records_completed_and_cleanup_activity() {
         seed_github_assignment_with_proposal(&db, &project_path, &worktree_path).await;
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: fake_gh_verify("activity-merged-gh", "passing", true),
         worktrunk_binary_path: write_fake_command("activity-merged-wt-bin", "#!/bin/sh\nexit 0\n"),
@@ -802,7 +802,7 @@ async fn successful_repair_records_change_proposal_repaired_activity() {
     .unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: write_fake_command("activity-repair-gh", "#!/bin/sh\nexit 0\n"),
         worktrunk_binary_path: write_fake_command("activity-repair-wt-bin", "#!/bin/sh\nexit 0\n"),

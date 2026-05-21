@@ -51,7 +51,7 @@ async fn test_router(
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: gh,
         worktrunk_binary_path: worktrunk,

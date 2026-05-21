@@ -24,7 +24,7 @@ async fn test_router() -> axum::Router {
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
@@ -38,7 +38,7 @@ async fn test_router_with_db() -> (axum::Router, persistence::Db) {
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
@@ -63,7 +63,7 @@ async fn test_router_with_execution_and_gh(
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path,
         worktrunk_binary_path,
@@ -184,14 +184,14 @@ async fn local_control_plane_reports_health_and_truthful_app_info() {
     assert_eq!(app_info.api_status, "connected");
     assert_eq!(app_info.version, env!("CARGO_PKG_VERSION"));
     assert_eq!(app_info.config.bind_address, "127.0.0.1:0");
-    assert_eq!(app_info.config.dashboard_asset_dir, "apps/dashboard/dist");
+    assert_eq!(app_info.config.dashboard_asset_dir, "target/dx/agentic-afk-dashboard/release/web/public");
     assert_eq!(app_info.config.database_url, "sqlite::memory:");
 }
 
 #[tokio::test]
 async fn dashboard_shell_loads_from_the_local_control_plane() {
     let dashboard_asset_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/dashboard/dist")
+        .join("../../target/dx/agentic-afk-dashboard/release/web/public")
         .canonicalize()
         .unwrap();
     let db = persistence::connect_in_memory().await.unwrap();
@@ -221,7 +221,7 @@ async fn dashboard_shell_loads_from_the_local_control_plane() {
 #[tokio::test]
 async fn dashboard_browser_routes_fallback_without_claiming_api_paths() {
     let dashboard_asset_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/dashboard/dist")
+        .join("../../target/dx/agentic-afk-dashboard/release/web/public")
         .canonicalize()
         .unwrap();
     let db = persistence::connect_in_memory().await.unwrap();
@@ -1353,7 +1353,7 @@ async fn assignment_state_survives_control_plane_router_restart() {
     let restarted = router(
         ControlPlaneConfig {
             bind_address: "127.0.0.1:0".parse().unwrap(),
-            dashboard_asset_dir: "apps/dashboard/dist".into(),
+            dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
             database_url: "sqlite::memory:".into(),
             gh_binary_path: "gh".into(),
             worktrunk_binary_path: fake_wt,
@@ -1433,7 +1433,7 @@ async fn assignment_state_blocks_running_local_markdown_assignment_when_codex_pr
     let restarted = router(
         ControlPlaneConfig {
             bind_address: "127.0.0.1:0".parse().unwrap(),
-            dashboard_asset_dir: "apps/dashboard/dist".into(),
+            dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
             database_url: "sqlite::memory:".into(),
             gh_binary_path: "gh".into(),
             worktrunk_binary_path: "wt".into(),
@@ -1983,7 +1983,7 @@ async fn lifecycle_status_write_back_updates_markdown_file() {
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
@@ -2068,7 +2068,7 @@ async fn planning_snapshot_reflects_lifecycle_status_exclusions() {
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
@@ -2151,7 +2151,7 @@ async fn lifecycle_status_write_back_preserves_raw_text() {
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
@@ -2231,7 +2231,7 @@ async fn lifecycle_status_write_back_rejects_nonexistent_issue() {
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
@@ -2290,7 +2290,7 @@ async fn lifecycle_status_write_back_rejects_invalid_status() {
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
@@ -2348,7 +2348,7 @@ async fn lifecycle_status_write_back_rejects_github_source() {
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),

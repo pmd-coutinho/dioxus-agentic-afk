@@ -47,7 +47,9 @@ impl ControlPlaneConfig {
             .unwrap_or_else(|_| "127.0.0.1:3637".to_string())
             .parse()?;
         let dashboard_asset_dir = std::env::var("AGENTIC_AFK_DASHBOARD_ASSET_DIR")
-            .unwrap_or_else(|_| "apps/dashboard/dist".to_string())
+            .unwrap_or_else(|_| {
+                "target/dx/agentic-afk-dashboard/release/web/public".to_string()
+            })
             .into();
         let database_url = std::env::var("AGENTIC_AFK_DATABASE_URL")
             .unwrap_or_else(|_| "sqlite://agentic-afk.db".to_string());
