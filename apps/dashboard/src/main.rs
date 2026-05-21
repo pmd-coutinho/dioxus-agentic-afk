@@ -14,40 +14,284 @@ fn main() {
 
 #[component]
 fn App() -> Element {
-    let app_info = use_resource(fetch_app_info);
-    let projects = use_resource(fetch_projects);
-    let current_path = browser_pathname();
-
     rsx! {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
+        Router::<Route> {}
+    }
+}
+
+#[rustfmt::skip]
+#[derive(Routable, Clone, Debug, PartialEq)]
+enum Route {
+    #[layout(AppShell)]
+        #[route("/")]
+        Home {},
+        #[route("/projects")]
+        ProjectList {},
+        #[nest("/projects/:id")]
+            #[layout(ProjectLayout)]
+                #[route("")]
+                ProjectOverview { id: String },
+                #[route("/planning")]
+                ProjectPlanning { id: String },
+                #[route("/assignment")]
+                ProjectAssignment { id: String },
+                #[route("/source")]
+                ProjectIssueSource { id: String },
+                #[route("/activity")]
+                ProjectActivity { id: String },
+            #[end_layout]
+        #[end_nest]
+        #[route("/settings")]
+        Settings {},
+}
+
+#[component]
+fn AppShell() -> Element {
+    rsx! {
         main { class: "min-h-screen bg-zinc-950 text-zinc-100",
             section { class: "mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-8",
                 header { class: "flex flex-col gap-1 border-b border-zinc-800 pb-5",
                     p { class: "text-sm font-medium uppercase tracking-wide text-emerald-300", "Local Control Plane" }
-                    h1 { class: "text-3xl font-semibold", "agentic-afk" }
+                    Link {
+                        to: Route::Home {},
+                        class: "w-fit",
+                        h1 { class: "text-3xl font-semibold", "agentic-afk" }
+                    }
                 }
+                Outlet::<Route> {}
+            }
+        }
+    }
+}
 
-                match &*app_info.read_unchecked() {
-                    Some(Ok(info)) => rsx! {
-                        Dashboard {
-                            info: info.clone(),
-                            projects: projects.read_unchecked().clone(),
-                            current_path,
-                        }
-                    },
-                    Some(Err(error)) => rsx! {
+#[component]
+fn Home() -> Element {
+    let app_info = use_resource(fetch_app_info);
+    let projects = use_resource(fetch_projects);
+
+    rsx! {
+        match &*app_info.read_unchecked() {
+            Some(Ok(info)) => rsx! {
+                div { class: "flex flex-col gap-4",
+                    div { class: "grid gap-4 md:grid-cols-[1.2fr_0.8fr]",
                         StatusPanel {
-                            title: "API disconnected".to_string(),
-                            detail: error.clone(),
-                            tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
+                            title: "API connected".to_string(),
+                            detail: format!("{} {}", info.app_name, info.version),
+                            tone: "border-emerald-700 bg-emerald-950/35 text-emerald-50".to_string(),
+                        }
+                        SettingsPanel { info: info.clone() }
+                    }
+                    ProjectsSection { projects: projects.read_unchecked().clone() }
+                }
+            },
+            Some(Err(error)) => rsx! {
+                StatusPanel {
+                    title: "API disconnected".to_string(),
+                    detail: error.clone(),
+                    tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
+                }
+            },
+            None => rsx! {
+                StatusPanel {
+                    title: "Checking API connection".to_string(),
+                    detail: "Waiting for /api/app-info".to_string(),
+                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                }
+            },
+        }
+    }
+}
+
+#[component]
+fn ProjectList() -> Element {
+    let projects = use_resource(fetch_projects);
+    rsx! {
+        div { class: "flex flex-col gap-4",
+            ProjectsSection { projects: projects.read_unchecked().clone() }
+        }
+    }
+}
+
+#[component]
+fn Settings() -> Element {
+    let app_info = use_resource(fetch_app_info);
+    rsx! {
+        div { class: "flex flex-col gap-4",
+            match &*app_info.read_unchecked() {
+                Some(Ok(info)) => rsx! { SettingsPanel { info: info.clone() } },
+                Some(Err(error)) => rsx! {
+                    StatusPanel {
+                        title: "API disconnected".to_string(),
+                        detail: error.clone(),
+                        tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
+                    }
+                },
+                None => rsx! {
+                    StatusPanel {
+                        title: "Loading Settings".to_string(),
+                        detail: "Waiting for /api/app-info".to_string(),
+                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                    }
+                },
+            }
+        }
+    }
+}
+
+#[component]
+fn ProjectsSection(projects: Option<Result<Vec<ProjectResponse>, String>>) -> Element {
+    rsx! {
+        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
+            h2 { class: "mb-4 text-base font-semibold", "Projects" }
+            match projects {
+                Some(Ok(projects)) if projects.is_empty() => rsx! {
+                    p { class: "text-sm text-zinc-400", "No Projects" }
+                },
+                Some(Ok(projects)) => rsx! {
+                    ul { class: "grid gap-3",
+                        for project in projects {
+                            ProjectRow { project }
+                        }
+                    }
+                },
+                Some(Err(error)) => rsx! {
+                    p { class: "text-sm text-red-200", "{error}" }
+                },
+                None => rsx! {
+                    p { class: "text-sm text-zinc-400", "Loading Projects" }
+                },
+            }
+        }
+    }
+}
+
+#[component]
+fn ProjectLayout(id: String) -> Element {
+    let project_resource_id = id.clone();
+    let project = use_resource(move || fetch_project(project_resource_id.clone()));
+
+    rsx! {
+        div { class: "flex flex-col gap-4",
+            match &*project.read_unchecked() {
+                Some(Ok(project)) => rsx! {
+                    ProjectHeader { project: project.clone() }
+                    ProjectSubNav { id: id.clone() }
+                    Outlet::<Route> {}
+                },
+                Some(Err(error)) => rsx! {
+                    StatusPanel {
+                        title: "Project unavailable".to_string(),
+                        detail: error.clone(),
+                        tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
+                    }
+                },
+                None => rsx! {
+                    StatusPanel {
+                        title: "Loading Project".to_string(),
+                        detail: id.clone(),
+                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                    }
+                },
+            }
+        }
+    }
+}
+
+#[component]
+fn ProjectSubNav(id: String) -> Element {
+    rsx! {
+        nav { class: "flex flex-wrap gap-3 border-b border-zinc-800 pb-3 text-sm",
+            Link {
+                to: Route::ProjectOverview { id: id.clone() },
+                class: "text-emerald-200 hover:text-emerald-100",
+                "Overview"
+            }
+            Link {
+                to: Route::ProjectPlanning { id: id.clone() },
+                class: "text-emerald-200 hover:text-emerald-100",
+                "Planning"
+            }
+            Link {
+                to: Route::ProjectAssignment { id: id.clone() },
+                class: "text-emerald-200 hover:text-emerald-100",
+                "Assignment"
+            }
+            Link {
+                to: Route::ProjectIssueSource { id: id.clone() },
+                class: "text-emerald-200 hover:text-emerald-100",
+                "Issue Source"
+            }
+            Link {
+                to: Route::ProjectActivity { id: id.clone() },
+                class: "text-emerald-200 hover:text-emerald-100",
+                "Activity"
+            }
+        }
+    }
+}
+
+#[component]
+fn ProjectHeader(project: ProjectResponse) -> Element {
+    let project_id = project.id.0.clone();
+    rsx! {
+        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
+            Link {
+                to: Route::ProjectList {},
+                class: "text-sm text-emerald-200 hover:text-emerald-100",
+                "Projects"
+            }
+            h2 { class: "mt-4 text-base font-semibold", "Project detail" }
+            dl { class: "mt-4 grid gap-3 text-sm",
+                SettingRow { label: "Project path".to_string(), value: project.path.clone() }
+                SettingRow { label: "Project ID".to_string(), value: project.id.0.clone() }
+                div { class: "grid gap-1 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
+                    dt { class: "text-zinc-400", "Trust" }
+                    dd { class: "break-words font-mono text-zinc-100",
+                        if project.trusted {
+                            span { class: "text-emerald-300", "Trusted for agent execution" }
+                        } else {
+                            div { class: "flex items-center gap-3",
+                                span { class: "text-zinc-400", "Not trusted" }
+                                button {
+                                    class: "rounded border border-emerald-700 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
+                                    onclick: {
+                                        let trust_project_id = project_id.clone();
+                                        move |_| {
+                                            let trust_project_id = trust_project_id.clone();
+                                            async move {
+                                                if trust_project_api(trust_project_id).await.is_ok() {
+                                                    reload_dashboard();
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "Trust Project"
+                                }
+                            }
+                        }
+                    }
+                }
+                match project.enabled_issue_source.clone() {
+                    Some(source) => rsx! {
+                        SettingRow {
+                            label: "Issue Source".to_string(),
+                            value: format!("{} {}", source.kind, source.locator),
                         }
                     },
                     None => rsx! {
-                        StatusPanel {
-                            title: "Checking API connection".to_string(),
-                            detail: "Waiting for /api/app-info".to_string(),
-                            tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                        SettingRow {
+                            label: "Issue Source".to_string(),
+                            value: "Not enabled".to_string(),
                         }
+                    },
+                }
+            }
+            div { class: "mt-4",
+                match project.git_summary.clone() {
+                    Some(summary) => rsx! { GitSummaryRow { summary } },
+                    None => rsx! {
+                        p { class: "text-sm text-zinc-500", "No Git Summary" }
                     },
                 }
             }
@@ -56,86 +300,153 @@ fn App() -> Element {
 }
 
 #[component]
-fn Dashboard(
-    info: AppInfoResponse,
-    projects: Option<Result<Vec<ProjectResponse>, String>>,
-    current_path: String,
-) -> Element {
-    if current_path == "/settings" {
-        return rsx! {
-            div { class: "flex flex-col gap-4",
-                SettingsPanel { info }
-            }
-        };
+fn ProjectOverview(id: String) -> Element {
+    rsx! {
+        IssueSourcePanels { id: id.clone() }
+        AssignmentPanel { id: id.clone() }
+        PlanningPanel { id: id.clone() }
+        ActivitySection { id }
     }
+}
 
-    if let Some(project_id) = current_path.strip_prefix("/projects/") {
-        return rsx! {
-            div { class: "flex flex-col gap-4",
-                match projects {
-                    Some(Ok(projects)) => {
-                        match projects.into_iter().find(|project| project.id.0 == project_id) {
-                            Some(project) => rsx! { ProjectDetail { project } },
-                            None => rsx! {
-                                StatusPanel {
-                                    title: "Project not found".to_string(),
-                                    detail: project_id.to_string(),
-                                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                                }
-                            },
-                        }
-                    },
-                    Some(Err(error)) => rsx! {
-                        StatusPanel {
-                            title: "Projects unavailable".to_string(),
-                            detail: error,
-                            tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
-                        }
-                    },
-                    None => rsx! {
-                        StatusPanel {
-                            title: "Loading Project".to_string(),
-                            detail: project_id.to_string(),
-                            tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                        }
-                    },
-                }
-            }
-        };
-    }
+#[component]
+fn ProjectPlanning(id: String) -> Element {
+    rsx! { PlanningPanel { id } }
+}
+
+#[component]
+fn ProjectAssignment(id: String) -> Element {
+    rsx! { AssignmentPanel { id } }
+}
+
+#[component]
+fn ProjectIssueSource(id: String) -> Element {
+    rsx! { IssueSourcePanels { id } }
+}
+
+#[component]
+fn ProjectActivity(id: String) -> Element {
+    rsx! { ActivitySection { id } }
+}
+
+#[component]
+fn IssueSourcePanels(id: String) -> Element {
+    let project_resource_id = id.clone();
+    let project = use_resource(move || fetch_project(project_resource_id.clone()));
+    let candidate_project_id = id.clone();
+    let issue_source_candidates =
+        use_resource(move || fetch_issue_source_candidates(candidate_project_id.clone()));
 
     rsx! {
-        div { class: "flex flex-col gap-4",
-            div { class: "grid gap-4 md:grid-cols-[1.2fr_0.8fr]",
+        match &*project.read_unchecked() {
+            Some(Ok(project)) if project.enabled_issue_source.is_some() => rsx! {
+                IssueSourceSyncStatus { project_id: id.clone() }
+            },
+            _ => rsx! {},
+        }
+        match &*issue_source_candidates.read_unchecked() {
+            Some(Ok(candidates)) => rsx! {
+                IssueSourceCandidates {
+                    project_id: id.clone(),
+                    candidates: candidates.clone(),
+                }
+            },
+            Some(Err(error)) => rsx! {
                 StatusPanel {
-                    title: "API connected".to_string(),
-                    detail: format!("{} {}", info.app_name, info.version),
-                    tone: "border-emerald-700 bg-emerald-950/35 text-emerald-50".to_string(),
+                    title: "Issue Source candidates unavailable".to_string(),
+                    detail: error.clone(),
+                    tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
                 }
-                SettingsPanel { info }
-            }
+            },
+            None => rsx! {
+                StatusPanel {
+                    title: "Loading Issue Source candidates".to_string(),
+                    detail: id.clone(),
+                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                }
+            },
+        }
+    }
+}
 
-            section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-                h2 { class: "mb-4 text-base font-semibold", "Projects" }
-                match projects {
-                    Some(Ok(projects)) if projects.is_empty() => rsx! {
-                        p { class: "text-sm text-zinc-400", "No Projects" }
-                    },
-                    Some(Ok(projects)) => rsx! {
-                        ul { class: "grid gap-3",
-                            for project in projects {
-                                ProjectRow { project }
-                            }
-                        }
-                    },
-                    Some(Err(error)) => rsx! {
-                        p { class: "text-sm text-red-200", "{error}" }
-                    },
-                    None => rsx! {
-                        p { class: "text-sm text-zinc-400", "Loading Projects" }
-                    },
+#[component]
+fn AssignmentPanel(id: String) -> Element {
+    let assignment_project_id = id.clone();
+    let assignment_state =
+        use_resource(move || fetch_assignment_state(assignment_project_id.clone()));
+    rsx! {
+        match &*assignment_state.read_unchecked() {
+            Some(Ok(state)) => rsx! { AssignmentState { project_id: id.clone(), state: state.clone() } },
+            Some(Err(error)) => rsx! {
+                StatusPanel {
+                    title: "Issue Assignment state unavailable".to_string(),
+                    detail: error.clone(),
+                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
                 }
-            }
+            },
+            None => rsx! {
+                StatusPanel {
+                    title: "Issue Assignment".to_string(),
+                    detail: "Loading".to_string(),
+                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                }
+            },
+        }
+    }
+}
+
+#[component]
+fn PlanningPanel(id: String) -> Element {
+    let planning_project_id = id.clone();
+    let planning_snapshot =
+        use_resource(move || fetch_planning_snapshot(planning_project_id.clone()));
+    let project_resource_id = id.clone();
+    let project = use_resource(move || fetch_project(project_resource_id.clone()));
+
+    rsx! {
+        match (&*planning_snapshot.read_unchecked(), &*project.read_unchecked()) {
+            (Some(Ok(snapshot)), Some(Ok(project))) => rsx! {
+                PlanningSnapshot {
+                    project_id: id.clone(),
+                    trusted: project.trusted,
+                    snapshot: snapshot.clone(),
+                }
+            },
+            (Some(Err(error)), _) => rsx! {
+                StatusPanel {
+                    title: "Planning snapshot unavailable".to_string(),
+                    detail: error.clone(),
+                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                }
+            },
+            _ => rsx! {
+                StatusPanel {
+                    title: "Loading planning snapshot".to_string(),
+                    detail: id.clone(),
+                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                }
+            },
+        }
+    }
+}
+
+#[component]
+fn ActivitySection(id: String) -> Element {
+    let activity_project_id = id.clone();
+    let activity = use_resource(move || fetch_project_activity(activity_project_id.clone()));
+    rsx! {
+        match &*activity.read_unchecked() {
+            Some(Ok(entries)) => rsx! { ActivityPanel { entries: entries.clone() } },
+            Some(Err(error)) => rsx! {
+                StatusPanel {
+                    title: "Activity unavailable".to_string(),
+                    detail: error.clone(),
+                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                }
+            },
+            None => rsx! {
+                ActivityPanel { entries: Vec::<ProjectActivityEntryResponse>::new() }
+            },
         }
     }
 }
@@ -176,13 +487,15 @@ fn SettingRow(label: String, value: String) -> Element {
 
 #[component]
 fn ProjectRow(project: ProjectResponse) -> Element {
-    let detail_href = format!("/projects/{}", project.id.0);
-
     rsx! {
         li { class: "grid gap-2 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
             div { class: "flex flex-col gap-1 md:flex-row md:items-baseline md:justify-between",
                 div { class: "flex items-center gap-2",
-                    a { class: "break-words font-mono text-sm text-emerald-200 hover:text-emerald-100", href: "{detail_href}", "{project.path}" }
+                    Link {
+                        to: Route::ProjectOverview { id: project.id.0.clone() },
+                        class: "break-words font-mono text-sm text-emerald-200 hover:text-emerald-100",
+                        "{project.path}"
+                    }
                     if project.trusted {
                         span { class: "rounded bg-emerald-900/40 px-1.5 py-0.5 text-xs text-emerald-200", "Trusted" }
                     }
@@ -194,154 +507,6 @@ fn ProjectRow(project: ProjectResponse) -> Element {
                 None => rsx! {
                     p { class: "text-sm text-zinc-500", "No Git Summary" }
                 },
-            }
-        }
-    }
-}
-
-#[component]
-fn ProjectDetail(project: ProjectResponse) -> Element {
-    let project_id = project.id.0.clone();
-    let planning_project_id = project_id.clone();
-    let planning_snapshot =
-        use_resource(move || fetch_planning_snapshot(planning_project_id.clone()));
-    let assignment_project_id = project_id.clone();
-    let assignment_state =
-        use_resource(move || fetch_assignment_state(assignment_project_id.clone()));
-    let candidate_project_id = project_id.clone();
-    let issue_source_candidates =
-        use_resource(move || fetch_issue_source_candidates(candidate_project_id.clone()));
-    let activity_project_id = project_id.clone();
-    let activity = use_resource(move || fetch_project_activity(activity_project_id.clone()));
-
-    rsx! {
-        div { class: "grid gap-4",
-            section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-                a { class: "text-sm text-emerald-200 hover:text-emerald-100", href: "/projects", "Projects" }
-                h2 { class: "mt-4 text-base font-semibold", "Project detail" }
-                dl { class: "mt-4 grid gap-3 text-sm",
-                    SettingRow { label: "Project path".to_string(), value: project.path.clone() }
-                    SettingRow { label: "Project ID".to_string(), value: project.id.0.clone() }
-                    div { class: "grid gap-1 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
-                        dt { class: "text-zinc-400", "Trust" }
-                        dd { class: "break-words font-mono text-zinc-100",
-                            if project.trusted {
-                                span { class: "text-emerald-300", "Trusted for agent execution" }
-                            } else {
-                                div { class: "flex items-center gap-3",
-                                    span { class: "text-zinc-400", "Not trusted" }
-                                    button {
-                                        class: "rounded border border-emerald-700 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
-                                        onclick: {
-                                            let trust_project_id = project_id.clone();
-                                            move |_| {
-                                                let trust_project_id = trust_project_id.clone();
-                                                async move {
-                                                    if trust_project_api(trust_project_id).await.is_ok() {
-                                                        reload_dashboard();
-                                                    }
-                                                }
-                                            }
-                                        },
-                                        "Trust Project"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    match project.enabled_issue_source.clone() {
-                        Some(source) => rsx! {
-                            SettingRow {
-                                label: "Issue Source".to_string(),
-                                value: format!("{} {}", source.kind, source.locator),
-                            }
-                        },
-                        None => rsx! {
-                            SettingRow {
-                                label: "Issue Source".to_string(),
-                                value: "Not enabled".to_string(),
-                            }
-                        },
-                    }
-                }
-                div { class: "mt-4",
-                    match project.git_summary {
-                        Some(summary) => rsx! { GitSummaryRow { summary } },
-                        None => rsx! {
-                            p { class: "text-sm text-zinc-500", "No Git Summary" }
-                        },
-                    }
-                }
-            }
-            if project.enabled_issue_source.is_some() {
-                IssueSourceSyncStatus { project_id: project_id.clone() }
-            }
-            match &*issue_source_candidates.read_unchecked() {
-                Some(Ok(candidates)) => rsx! {
-                    IssueSourceCandidates {
-                        project_id: project_id.clone(),
-                        candidates: candidates.clone(),
-                    }
-                },
-                Some(Err(error)) => rsx! {
-                    StatusPanel {
-                        title: "Issue Source candidates unavailable".to_string(),
-                        detail: error.clone(),
-                        tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
-                    }
-                },
-                None => rsx! {
-                    StatusPanel {
-                        title: "Loading Issue Source candidates".to_string(),
-                        detail: project.id.0.clone(),
-                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                    }
-                },
-            }
-            match &*assignment_state.read_unchecked() {
-                Some(Ok(state)) => rsx! { AssignmentState { project_id: project.id.0.clone(), state: state.clone() } },
-                Some(Err(error)) => rsx! {
-                    StatusPanel {
-                        title: "Issue Assignment state unavailable".to_string(),
-                        detail: error.clone(),
-                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                    }
-                },
-                None => rsx! {},
-            }
-            match &*planning_snapshot.read_unchecked() {
-                Some(Ok(snapshot)) => rsx! {
-                    PlanningSnapshot {
-                        project_id: project.id.0.clone(),
-                        trusted: project.trusted,
-                        snapshot: snapshot.clone(),
-                    }
-                },
-                Some(Err(error)) => rsx! {
-                    StatusPanel {
-                        title: "Planning snapshot unavailable".to_string(),
-                        detail: error.clone(),
-                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                    }
-                },
-                None => rsx! {
-                    StatusPanel {
-                        title: "Loading planning snapshot".to_string(),
-                        detail: project.id.0.clone(),
-                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                    }
-                },
-            }
-            match &*activity.read_unchecked() {
-                Some(Ok(entries)) => rsx! { ActivityPanel { entries: entries.clone() } },
-                Some(Err(error)) => rsx! {
-                    StatusPanel {
-                        title: "Activity unavailable".to_string(),
-                        detail: error.clone(),
-                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                    }
-                },
-                None => rsx! {},
             }
         }
     }
@@ -771,6 +936,14 @@ async fn fetch_projects() -> Result<Vec<ProjectResponse>, String> {
         .map_err(|error| error.to_string())
 }
 
+async fn fetch_project(project_id: String) -> Result<ProjectResponse, String> {
+    let projects = fetch_projects().await?;
+    projects
+        .into_iter()
+        .find(|project| project.id.0 == project_id)
+        .ok_or_else(|| format!("Project {project_id} not found"))
+}
+
 async fn fetch_planning_snapshot(project_id: String) -> Result<PlanningSnapshotResponse, String> {
     gloo_net::http::Request::get(&format!("/api/projects/{project_id}/planning-snapshot"))
         .send()
@@ -912,12 +1085,6 @@ async fn sync_issue_source(project_id: String) -> Result<IssueSourceSyncResponse
         .json()
         .await
         .map_err(|error| error.to_string())
-}
-
-fn browser_pathname() -> String {
-    web_sys::window()
-        .and_then(|window| window.location().pathname().ok())
-        .unwrap_or_else(|| "/".to_string())
 }
 
 fn reload_dashboard() {
