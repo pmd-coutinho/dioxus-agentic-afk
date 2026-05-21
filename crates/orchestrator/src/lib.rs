@@ -7,6 +7,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub mod repair;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodexExecution {
     pub process_id: u32,
@@ -61,6 +63,23 @@ pub fn create_assignment_worktree(
 }
 
 pub fn run_initial_codex(
+    codex_binary_path: &Path,
+    worktree_path: &Path,
+    prompt: &str,
+) -> Result<CodexExecution, String> {
+    run_codex_exec(codex_binary_path, worktree_path, prompt)
+}
+
+/// Shared `codex exec` invocation used by initial, recovery, and repair Assignment Attempts.
+pub fn run_codex_exec(
+    codex_binary_path: &Path,
+    worktree_path: &Path,
+    prompt: &str,
+) -> Result<CodexExecution, String> {
+    codex_exec_impl(codex_binary_path, worktree_path, prompt)
+}
+
+fn codex_exec_impl(
     codex_binary_path: &Path,
     worktree_path: &Path,
     prompt: &str,
