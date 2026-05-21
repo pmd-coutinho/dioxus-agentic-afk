@@ -32,8 +32,29 @@ pub async fn get_project_assignment(
     Ok(assignment)
 }
 
+/// Maximum byte length stored for `detail`. Activity is a control-plane event
+/// log, not an agent output channel — full Codex output must never land here
+/// (ADR-0030).
+pub const PROJECT_ACTIVITY_DETAIL_MAX_BYTES: usize = 512;
+
+fn truncate_detail(detail: Option<&str>) -> Option<String> {
+    detail.map(|raw| {
+        if raw.len() <= PROJECT_ACTIVITY_DETAIL_MAX_BYTES {
+            return raw.to_string();
+        }
+        let mut end = PROJECT_ACTIVITY_DETAIL_MAX_BYTES;
+        while end > 0 && !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut truncated = raw[..end].to_string();
+        truncated.push('…');
+        truncated
+    })
+}
+
 /// Record one Activity entry for a Project. Used by abandonment and other
-/// lifecycle transitions.
+/// lifecycle transitions. Detail is truncated to keep agent output out of
+/// Activity.
 pub async fn record_project_activity(
     db: &Db,
     project_id: &str,
@@ -41,6 +62,7 @@ pub async fn record_project_activity(
     kind: &str,
     detail: Option<&str>,
 ) -> Result<ProjectActivityEntry, PersistenceError> {
+    let detail = truncate_detail(detail);
     let id = Uuid::new_v4().to_string();
     let recorded_at = current_unix_timestamp();
     sqlx::query(
@@ -53,7 +75,7 @@ pub async fn record_project_activity(
     .bind(project_id)
     .bind(assignment_id)
     .bind(kind)
-    .bind(detail)
+    .bind(&detail)
     .bind(&recorded_at)
     .execute(db)
     .await?;
@@ -62,7 +84,7 @@ pub async fn record_project_activity(
         project_id: project_id.to_string(),
         assignment_id: assignment_id.map(str::to_string),
         kind: kind.to_string(),
-        detail: detail.map(str::to_string),
+        detail,
         recorded_at,
     })
 }

@@ -119,3 +119,24 @@ test('Project detail enables a discovered Issue Source candidate', async ({
     page.getByText('Eligible ready issue', { exact: true }),
   ).toBeVisible();
 });
+
+test('Project detail surfaces an Activity panel that reflects recorded entries', async ({
+  page,
+  request,
+}) => {
+  const projectPath = resolve('target/playwright/activity', randomUUID());
+  await mkdir(resolve(projectPath, '.git'), { recursive: true });
+
+  const created = await request.post('/api/projects', { data: { path: projectPath } });
+  await expect(created).toBeOK();
+  const project = await created.json();
+
+  await page.goto(`/projects/${project.id}`);
+  await expect(page.getByRole('heading', { name: 'Project detail' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Activity' })).toBeVisible();
+  await expect(page.getByText('No Activity recorded yet.')).toBeVisible();
+
+  const activity = await request.get(`/api/projects/${project.id}/activity`);
+  await expect(activity).toBeOK();
+  expect(await activity.json()).toEqual([]);
+});

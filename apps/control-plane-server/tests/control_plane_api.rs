@@ -295,6 +295,8 @@ async fn openapi_document_describes_project_api_and_problem_responses() {
     assert!(openapi["paths"]["/api/projects/{id}/issue-source/sync-status"]["get"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/planning-snapshot"]["get"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/assignment-state"]["get"].is_object());
+    assert!(openapi["paths"]["/api/projects/{id}/activity"]["get"].is_object());
+    assert!(openapi["components"]["schemas"]["ProjectActivityEntryResponse"].is_object());
     assert!(
         openapi["paths"]["/api/projects/{id}/source-issues/{source_id}/assignment"]["post"]
             .is_object()

@@ -1,7 +1,8 @@
 use agentic_afk_contracts::{
     AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueSourceCandidate,
     IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse,
-    ProjectAssignmentStateResponse, ProjectResponse, SourceIssueSnapshot,
+    ProjectActivityEntryResponse, ProjectAssignmentStateResponse, ProjectResponse,
+    SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
 
@@ -210,6 +211,8 @@ fn ProjectDetail(project: ProjectResponse) -> Element {
     let candidate_project_id = project_id.clone();
     let issue_source_candidates =
         use_resource(move || fetch_issue_source_candidates(candidate_project_id.clone()));
+    let activity_project_id = project_id.clone();
+    let activity = use_resource(move || fetch_project_activity(activity_project_id.clone()));
 
     rsx! {
         div { class: "grid gap-4",
@@ -328,6 +331,46 @@ fn ProjectDetail(project: ProjectResponse) -> Element {
                         tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
                     }
                 },
+            }
+            match &*activity.read_unchecked() {
+                Some(Ok(entries)) => rsx! { ActivityPanel { entries: entries.clone() } },
+                Some(Err(error)) => rsx! {
+                    StatusPanel {
+                        title: "Activity unavailable".to_string(),
+                        detail: error.clone(),
+                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                    }
+                },
+                None => rsx! {},
+            }
+        }
+    }
+}
+
+#[component]
+fn ActivityPanel(entries: Vec<ProjectActivityEntryResponse>) -> Element {
+    rsx! {
+        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
+            h2 { class: "text-base font-semibold", "Activity" }
+            if entries.is_empty() {
+                p { class: "mt-3 text-sm text-zinc-500", "No Activity recorded yet." }
+            } else {
+                ul { class: "mt-4 grid gap-2",
+                    for entry in entries {
+                        li { class: "flex flex-col gap-1 border-b border-zinc-800 pb-2 text-sm last:border-0 last:pb-0",
+                            div { class: "flex items-baseline justify-between gap-3",
+                                span { class: "font-mono text-emerald-200", "{entry.kind}" }
+                                span { class: "font-mono text-xs text-zinc-500", "{entry.recorded_at}" }
+                            }
+                            if let Some(detail) = entry.detail.clone() {
+                                p { class: "break-words text-xs text-zinc-300", "{detail}" }
+                            }
+                            if let Some(assignment_id) = entry.assignment_id.clone() {
+                                p { class: "font-mono text-[10px] text-zinc-500", "assignment {assignment_id}" }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -742,6 +785,18 @@ async fn fetch_assignment_state(
     project_id: String,
 ) -> Result<ProjectAssignmentStateResponse, String> {
     gloo_net::http::Request::get(&format!("/api/projects/{project_id}/assignment-state"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .json()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn fetch_project_activity(
+    project_id: String,
+) -> Result<Vec<ProjectActivityEntryResponse>, String> {
+    gloo_net::http::Request::get(&format!("/api/projects/{project_id}/activity"))
         .send()
         .await
         .map_err(|error| error.to_string())?

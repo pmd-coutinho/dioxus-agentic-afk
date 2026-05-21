@@ -120,6 +120,25 @@ pub(crate) async fn refresh_proposal_state(
             Ok(assignment) => assignment,
             Err(error) => return persistence_error_to_response(error),
         };
+        let _ = persistence::record_project_activity(
+            &state.db,
+            &project_id,
+            Some(&updated.id),
+            "assignment_completed",
+            updated
+                .change_proposal
+                .as_ref()
+                .map(|proposal| proposal.url.as_str()),
+        )
+        .await;
+        let _ = persistence::record_project_activity(
+            &state.db,
+            &project_id,
+            Some(&updated.id),
+            "assignment_cleanup",
+            Some(&updated.branch),
+        )
+        .await;
         return Json(updated).into_response();
     }
 
@@ -147,10 +166,23 @@ pub(crate) async fn refresh_proposal_state(
             assignment
         }
         CheckState::Passing => {
-            match persistence_verify::mark_proposal_verified(&state.db, &assignment.id).await {
-                Ok(assignment) => assignment,
-                Err(error) => return persistence_error_to_response(error),
-            }
+            let verified =
+                match persistence_verify::mark_proposal_verified(&state.db, &assignment.id).await {
+                    Ok(assignment) => assignment,
+                    Err(error) => return persistence_error_to_response(error),
+                };
+            let _ = persistence::record_project_activity(
+                &state.db,
+                &project_id,
+                Some(&verified.id),
+                "change_proposal_verified",
+                verified
+                    .change_proposal
+                    .as_ref()
+                    .map(|proposal| proposal.url.as_str()),
+            )
+            .await;
+            verified
         }
         CheckState::Failing(detail) => {
             // Mirror lifecycle to the Source Issue so source-visible state
@@ -161,12 +193,25 @@ pub(crate) async fn refresh_proposal_state(
                 &assignment.source_id,
                 "blocked",
             );
-            match persistence_verify::mark_proposal_failing(&state.db, &assignment.id, &detail)
-                .await
+            let failing = match persistence_verify::mark_proposal_failing(
+                &state.db,
+                &assignment.id,
+                &detail,
+            )
+            .await
             {
                 Ok(assignment) => assignment,
                 Err(error) => return persistence_error_to_response(error),
-            }
+            };
+            let _ = persistence::record_project_activity(
+                &state.db,
+                &project_id,
+                Some(&failing.id),
+                "change_proposal_failing",
+                Some(&detail),
+            )
+            .await;
+            failing
         }
     };
 

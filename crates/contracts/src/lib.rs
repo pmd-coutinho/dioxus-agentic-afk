@@ -196,6 +196,19 @@ pub struct AssignmentTerminalOutcome {
     pub summary: String,
 }
 
+/// One Project Activity entry. Activity is the chronological record of
+/// noteworthy Control Plane lifecycle events for a Project. Detail is bounded
+/// so full Codex output never lands here (ADR-0030).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ProjectActivityEntryResponse {
+    pub id: String,
+    pub project_id: String,
+    pub assignment_id: Option<String>,
+    pub kind: String,
+    pub detail: Option<String>,
+    pub recorded_at: String,
+}
+
 /// RFC 7807 problem+json error response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct ProblemDetail {

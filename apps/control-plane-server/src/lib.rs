@@ -9,8 +9,8 @@ use agentic_afk_contracts::{
     CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest, FailedCheckFact,
     HealthResponse, IssueAssignmentResponse, IssueSource, IssueSourceCandidate,
     IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse,
-    ProblemDetail, ProjectAssignmentStateResponse, ProjectResponse, RepairAssignmentRequest,
-    RepairBudgetResponse, SourceIssueSnapshot,
+    ProblemDetail, ProjectActivityEntryResponse, ProjectAssignmentStateResponse, ProjectResponse,
+    RepairAssignmentRequest, RepairBudgetResponse, SourceIssueSnapshot,
 };
 use agentic_afk_git_summary::summarize_project_path;
 use agentic_afk_orchestrator::{
@@ -109,7 +109,8 @@ pub struct SetLifecycleStatusRequest {
         get_planning_snapshot,
         get_assignment_state,
         update_lifecycle_status,
-        start_assignment
+        start_assignment,
+        get_project_activity
     ),
     components(schemas(
         HealthResponse,
@@ -133,6 +134,7 @@ pub struct SetLifecycleStatusRequest {
         RepairBudgetResponse,
         RepairAssignmentRequest,
         FailedCheckFact,
+        ProjectActivityEntryResponse,
         ProblemDetail
     )),
     tags((name = "Local Control Plane", description = "Local Control Plane API"))
@@ -179,6 +181,7 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
             "/api/projects/{id}/assignment-state",
             get(get_assignment_state),
         )
+        .route("/api/projects/{id}/activity", get(get_project_activity))
         .route(
             "/api/projects/{id}/source-issues/{source_id}/lifecycle-status",
             axum::routing::put(update_lifecycle_status),
@@ -524,6 +527,14 @@ async fn get_assignment_state(
             Ok(assignment) => assignment,
             Err(error) => return persistence_error_to_response(error),
         };
+        let _ = persistence::record_project_activity(
+            &state.db,
+            &id,
+            Some(&blocked_assignment.id),
+            "assignment_blocked",
+            Some(detail),
+        )
+        .await;
         if let Ok(project) = persistence::get_project(&state.db, &id).await
             && let Some(source) = project.enabled_issue_source.clone()
             && source.kind == "local_markdown"
@@ -557,6 +568,51 @@ async fn get_assignment_state(
         waiting_ready_issue_count,
     })
     .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ActivityQuery {
+    pub limit: Option<i64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/projects/{id}/activity",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+        ("limit" = Option<i64>, Query, description = "Max entries to return (default 50, max 200)")
+    ),
+    responses(
+        (status = OK, body = Vec<ProjectActivityEntryResponse>),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn get_project_activity(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ActivityQuery>,
+) -> Response {
+    if let Err(error) = persistence::get_project(&state.db, &id).await {
+        return persistence_error_to_response(error);
+    }
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let entries = match persistence::list_project_activity(&state.db, &id, limit).await {
+        Ok(entries) => entries,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    let responses: Vec<ProjectActivityEntryResponse> = entries
+        .into_iter()
+        .map(|entry| ProjectActivityEntryResponse {
+            id: entry.id,
+            project_id: entry.project_id,
+            assignment_id: entry.assignment_id,
+            kind: entry.kind,
+            detail: entry.detail,
+            recorded_at: entry.recorded_at,
+        })
+        .collect();
+    Json(responses).into_response()
 }
 
 #[utoipa::path(
@@ -826,6 +882,14 @@ async fn start_assignment(
         "running",
     );
     let _ = persistence::set_assignment_status(&state.db, &assignment.id, "running", None).await;
+    let _ = persistence::record_project_activity(
+        &state.db,
+        &id,
+        Some(&assignment.id),
+        "assignment_started",
+        Some(&assignment.branch),
+    )
+    .await;
 
     let prompt = format!(
         "Implement this Issue Assignment in the Assignment Worktree.\n\n{}",
@@ -962,6 +1026,30 @@ async fn start_assignment(
         }
     };
     let _ = refresh_local_markdown_snapshot(&state.db, &project, &source).await;
+
+    let terminal_kind = match assignment.status.as_str() {
+        "blocked" => Some("assignment_blocked"),
+        "failed" => Some("assignment_failed"),
+        "proposal_pending" => Some("change_proposal_opened"),
+        _ => None,
+    };
+    if let Some(kind) = terminal_kind {
+        let detail = match kind {
+            "change_proposal_opened" => assignment
+                .change_proposal
+                .as_ref()
+                .map(|proposal| proposal.url.clone()),
+            _ => assignment.status_detail.clone(),
+        };
+        let _ = persistence::record_project_activity(
+            &state.db,
+            &id,
+            Some(&assignment.id),
+            kind,
+            detail.as_deref(),
+        )
+        .await;
+    }
 
     (StatusCode::CREATED, Json(assignment)).into_response()
 }

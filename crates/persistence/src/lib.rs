@@ -30,8 +30,8 @@ mod abandon;
 mod recover;
 
 pub use abandon::{
-    ProjectActivityEntry, abandon_blocked_assignment, get_project_assignment,
-    list_project_activity, record_project_activity,
+    PROJECT_ACTIVITY_DETAIL_MAX_BYTES, ProjectActivityEntry, abandon_blocked_assignment,
+    get_project_assignment, list_project_activity, record_project_activity,
 };
 pub use recover::{list_assignment_attempts, record_recovery_attempt};
 

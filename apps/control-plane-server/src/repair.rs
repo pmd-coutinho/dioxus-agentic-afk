@@ -228,6 +228,19 @@ async fn apply_repair_outcome(
     )
     .await
     .unwrap_or(assignment);
+    let kind = match status {
+        "proposal_pending" => "change_proposal_repaired",
+        "failed" => "assignment_failed",
+        _ => "assignment_blocked",
+    };
+    let _ = persistence::record_project_activity(
+        &state.db,
+        &assignment.project_id.0,
+        Some(&assignment_id),
+        kind,
+        Some(proposal_url.as_str()),
+    )
+    .await;
     if let Some(proposal_status) = proposal_status {
         if let Ok(updated) = persistence::set_assignment_change_proposal(
             &state.db,
