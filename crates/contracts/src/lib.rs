@@ -126,7 +126,15 @@ pub struct IssueAssignmentResponse {
     pub worktree_path: String,
     pub status: String,
     pub status_detail: Option<String>,
+    pub change_proposal: Option<ChangeProposalResponse>,
     pub latest_attempt: Option<AssignmentAttemptResponse>,
+}
+
+/// Hosted code proposal created from an Issue Assignment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ChangeProposalResponse {
+    pub status: String,
+    pub url: String,
 }
 
 /// Project detail Issue Assignment state for the first single-slot execution slice.
@@ -142,6 +150,7 @@ pub struct AssignmentAttemptResponse {
     pub id: String,
     pub kind: String,
     pub process_id: Option<u32>,
+    pub process_identity: Option<String>,
     pub terminal_outcome: Option<AssignmentTerminalOutcome>,
 }
 

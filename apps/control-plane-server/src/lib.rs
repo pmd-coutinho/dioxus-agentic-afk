@@ -3,14 +3,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentic_afk_contracts::{
-    AppInfoResponse, AssignmentAttemptResponse, AssignmentTerminalOutcome, CreateProjectRequest,
-    EffectiveConfig, EnableIssueSourceRequest, HealthResponse, IssueAssignmentResponse,
-    IssueSource, IssueSourceCandidate, IssueSourceSyncResponse, IssueSourceSyncStatusResponse,
-    PlanningSnapshotResponse, ProblemDetail, ProjectAssignmentStateResponse, ProjectResponse,
-    SourceIssueSnapshot,
+    AppInfoResponse, AssignmentAttemptResponse, AssignmentTerminalOutcome, ChangeProposalResponse,
+    CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest, HealthResponse,
+    IssueAssignmentResponse, IssueSource, IssueSourceCandidate, IssueSourceSyncResponse,
+    IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProblemDetail,
+    ProjectAssignmentStateResponse, ProjectResponse, SourceIssueSnapshot,
 };
 use agentic_afk_git_summary::summarize_project_path;
-use agentic_afk_orchestrator::{create_assignment_worktree, preflight_binary, run_initial_codex};
+use agentic_afk_orchestrator::{
+    codex_process_identity, create_assignment_worktree, preflight_binary, run_initial_codex,
+};
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -116,6 +118,7 @@ pub struct SetLifecycleStatusRequest {
         PlanningSnapshotResponse,
         ProjectAssignmentStateResponse,
         IssueAssignmentResponse,
+        ChangeProposalResponse,
         AssignmentAttemptResponse,
         AssignmentTerminalOutcome,
         SourceIssueSnapshot,
@@ -458,10 +461,56 @@ async fn get_assignment_state(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Response {
-    let active_assignment = match persistence::get_active_assignment(&state.db, &id).await {
+    let mut active_assignment = match persistence::get_active_assignment(&state.db, &id).await {
         Ok(assignment) => assignment,
         Err(error) => return persistence_error_to_response(error),
     };
+    let lost_process_detail = active_assignment
+        .as_ref()
+        .filter(|assignment| assignment.status == "running")
+        .and_then(|assignment| match assignment.latest_attempt.as_ref() {
+            Some(attempt) => match (attempt.process_id, attempt.process_identity.as_deref()) {
+                (Some(process_id), Some(expected_identity)) => {
+                    match codex_process_identity(process_id) {
+                        None => Some("owned Codex process is no longer running"),
+                        Some(identity) if expected_identity != identity => {
+                            Some("owned Codex process identity no longer matches")
+                        }
+                        Some(_) => None,
+                    }
+                }
+                _ => Some("owned Codex process identity is missing"),
+            },
+            None => Some("owned Codex process identity is missing"),
+        });
+    if let Some(detail) = lost_process_detail
+        && let Some(assignment) = active_assignment.as_ref()
+    {
+        let blocked_assignment = match persistence::set_assignment_status(
+            &state.db,
+            &assignment.id,
+            "blocked",
+            Some(detail),
+        )
+        .await
+        {
+            Ok(assignment) => assignment,
+            Err(error) => return persistence_error_to_response(error),
+        };
+        if let Ok(project) = persistence::get_project(&state.db, &id).await
+            && let Some(source) = project.enabled_issue_source.clone()
+            && source.kind == "local_markdown"
+        {
+            let _ = write_local_markdown_lifecycle(
+                &project,
+                &source,
+                &blocked_assignment.source_id,
+                "blocked",
+            );
+            let _ = refresh_local_markdown_snapshot(&state.db, &project, &source).await;
+        }
+        active_assignment = Some(blocked_assignment);
+    }
     let waiting_ready_issue_count = persistence::get_planning_snapshot(&state.db, &id)
         .await
         .map(|snapshot| {
@@ -651,13 +700,15 @@ async fn start_assignment(
             "Project has no enabled Issue Source".to_string(),
         );
     };
-    if source.kind != "local_markdown" {
+    if !matches!(source.kind.as_str(), "local_markdown" | "github") {
         return sync_problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "urn:agentic-afk:assignment-source-not-supported",
             "Unprocessable Entity",
-            "The first Issue Assignment tracer bullet supports local_markdown Issue Sources"
-                .to_string(),
+            format!(
+                "Issue Assignment execution is not supported for {} Issue Sources",
+                source.kind
+            ),
         );
     }
 
@@ -692,6 +743,12 @@ async fn start_assignment(
             return assignment_problem("urn:agentic-afk:assignment-preflight-failed", detail);
         }
     }
+    if source.kind == "github"
+        && let Err(detail) =
+            preflight_github_assignment(&state.config.gh_binary_path, &project, &source)
+    {
+        return assignment_problem("urn:agentic-afk:assignment-preflight-failed", detail);
+    }
 
     let branch = assignment_branch(&source, &issue.source_id);
     let mut assignment = match persistence::create_issue_assignment(
@@ -724,11 +781,23 @@ async fn start_assignment(
         Err(error) => return persistence_error_to_response(error),
     };
 
-    if let Err(detail) = write_local_markdown_lifecycle(&project, &source, &source_id, "claimed") {
+    if let Err(detail) = write_assignment_lifecycle(
+        &state.config.gh_binary_path,
+        &project,
+        &source,
+        &source_id,
+        "claimed",
+    ) {
         let _ = persistence::release_issue_assignment(&state.db, &assignment.id).await;
         return assignment_problem("urn:agentic-afk:assignment-claim-failed", detail);
     }
-    let _ = write_local_markdown_lifecycle(&project, &source, &source_id, "running");
+    let _ = write_assignment_lifecycle(
+        &state.config.gh_binary_path,
+        &project,
+        &source,
+        &source_id,
+        "running",
+    );
     let _ = persistence::set_assignment_status(&state.db, &assignment.id, "running", None).await;
 
     let prompt = format!(
@@ -742,23 +811,86 @@ async fn start_assignment(
                 &state.db,
                 &assignment.id,
                 Some(execution.process_id),
+                execution.process_identity.as_deref(),
                 Some(&execution.terminal_outcome),
             )
             .await;
-            let (status, detail) = match execution.terminal_outcome.outcome.as_str() {
+            let (status, detail, proposal_url) = match execution.terminal_outcome.outcome.as_str() {
+                "ReadyForProposal" if source.kind == "github" => {
+                    match create_github_change_proposal(
+                        &state.config.gh_binary_path,
+                        &source,
+                        &issue,
+                        &assignment.branch,
+                        &worktree_path,
+                    ) {
+                        Ok(url) => ("proposal_pending", None, Some(url)),
+                        Err(detail) => ("blocked", Some(detail), None),
+                    }
+                }
                 "ReadyForProposal" => (
                     "blocked",
-                    Some("local markdown Issue Source has no Change Proposal target"),
+                    Some("local markdown Issue Source has no Change Proposal target".to_string()),
+                    None,
                 ),
-                "Failed" => ("failed", Some(execution.terminal_outcome.summary.as_str())),
-                _ => ("blocked", Some(execution.terminal_outcome.summary.as_str())),
+                "Failed" => (
+                    "failed",
+                    Some(execution.terminal_outcome.summary.clone()),
+                    None,
+                ),
+                _ => (
+                    "blocked",
+                    Some(execution.terminal_outcome.summary.clone()),
+                    None,
+                ),
             };
-            let _ = write_local_markdown_lifecycle(&project, &source, &source_id, "blocked");
-            match persistence::set_assignment_status(&state.db, &assignment.id, status, detail)
-                .await
+            let _ = write_assignment_lifecycle(
+                &state.config.gh_binary_path,
+                &project,
+                &source,
+                &source_id,
+                if status == "proposal_pending" {
+                    "running"
+                } else {
+                    "blocked"
+                },
+            );
+            if source.kind == "github"
+                && status == "blocked"
+                && let Some(detail) = detail.as_deref()
+            {
+                let _ = comment_github_issue(
+                    &state.config.gh_binary_path,
+                    &source.locator,
+                    &source_id,
+                    &format!("Issue Assignment blocked: {detail}"),
+                );
+            }
+            assignment = match persistence::set_assignment_status(
+                &state.db,
+                &assignment.id,
+                status,
+                detail.as_deref(),
+            )
+            .await
             {
                 Ok(assignment) => assignment,
                 Err(error) => return persistence_error_to_response(error),
+            };
+            if let Some(url) = proposal_url {
+                match persistence::set_assignment_change_proposal(
+                    &state.db,
+                    &assignment.id,
+                    "pending",
+                    &url,
+                )
+                .await
+                {
+                    Ok(assignment) => assignment,
+                    Err(error) => return persistence_error_to_response(error),
+                }
+            } else {
+                assignment
             }
         }
         Err(detail) => {
@@ -766,10 +898,29 @@ async fn start_assignment(
                 outcome: "Failed".to_string(),
                 summary: detail.clone(),
             };
-            let _ =
-                persistence::record_initial_attempt(&state.db, &assignment.id, None, Some(&failed))
-                    .await;
-            let _ = write_local_markdown_lifecycle(&project, &source, &source_id, "blocked");
+            let _ = persistence::record_initial_attempt(
+                &state.db,
+                &assignment.id,
+                None,
+                None,
+                Some(&failed),
+            )
+            .await;
+            let _ = write_assignment_lifecycle(
+                &state.config.gh_binary_path,
+                &project,
+                &source,
+                &source_id,
+                "blocked",
+            );
+            if source.kind == "github" {
+                let _ = comment_github_issue(
+                    &state.config.gh_binary_path,
+                    &source.locator,
+                    &source_id,
+                    &format!("Issue Assignment blocked: {detail}"),
+                );
+            }
             match persistence::set_assignment_status(
                 &state.db,
                 &assignment.id,
@@ -838,6 +989,237 @@ fn write_local_markdown_lifecycle(
         updated_raw,
         0,
     ))
+}
+
+fn write_assignment_lifecycle(
+    gh_binary_path: &std::path::Path,
+    project: &ProjectResponse,
+    source: &IssueSource,
+    source_id: &str,
+    lifecycle_status: &str,
+) -> Result<(), String> {
+    match source.kind.as_str() {
+        "local_markdown" => {
+            write_local_markdown_lifecycle(project, source, source_id, lifecycle_status).map(|_| ())
+        }
+        "github" => {
+            write_github_lifecycle(gh_binary_path, &source.locator, source_id, lifecycle_status)
+        }
+        _ => Err(format!(
+            "Lifecycle write-back is not supported for {} Issue Sources",
+            source.kind
+        )),
+    }
+}
+
+fn write_github_lifecycle(
+    gh_binary_path: &std::path::Path,
+    locator: &str,
+    source_id: &str,
+    lifecycle_status: &str,
+) -> Result<(), String> {
+    let lifecycle_label = format!("agentic-afk:{lifecycle_status}");
+    let output = Command::new(gh_binary_path)
+        .args([
+            "issue",
+            "edit",
+            source_id,
+            "--repo",
+            locator,
+            "--remove-label",
+            "agentic-afk:claimed",
+            "--remove-label",
+            "agentic-afk:running",
+            "--remove-label",
+            "agentic-afk:blocked",
+            "--remove-label",
+            "agentic-afk:completed",
+            "--add-label",
+            &lifecycle_label,
+        ])
+        .output()
+        .map_err(|error| format!("failed to run GitHub lifecycle write-back: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to write GitHub Issue lifecycle: {}",
+            command_output(&output)
+        ))
+    }
+}
+
+fn preflight_github_assignment(
+    gh_binary_path: &std::path::Path,
+    project: &ProjectResponse,
+    source: &IssueSource,
+) -> Result<(), String> {
+    preflight_github_auth(gh_binary_path)?;
+    let project_locator = github_origin_locator(std::path::Path::new(&project.path))
+        .ok_or_else(|| "Project Git remote does not identify a GitHub repository".to_string())?;
+    if project_locator != source.locator {
+        return Err(format!(
+            "Project GitHub remote {project_locator} does not match Issue Source {}",
+            source.locator
+        ));
+    }
+    refresh_github_origin(std::path::Path::new(&project.path))?;
+    ensure_github_lifecycle_labels(gh_binary_path, &source.locator)
+}
+
+fn refresh_github_origin(project_path: &std::path::Path) -> Result<(), String> {
+    let output = Command::new("git")
+        .current_dir(project_path)
+        .args(["fetch", "--prune", "origin"])
+        .output()
+        .map_err(|error| format!("failed to refresh GitHub origin: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to refresh GitHub origin before claim: {}",
+            command_output(&output)
+        ))
+    }
+}
+
+fn github_origin_locator(project_path: &std::path::Path) -> Option<String> {
+    let config = std::fs::read_to_string(project_path.join(".git/config")).ok()?;
+    let mut in_origin = false;
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_origin = trimmed == r#"[remote "origin"]"#;
+            continue;
+        }
+        if in_origin {
+            let (key, url) = trimmed.split_once('=')?;
+            if key.trim() == "url" {
+                return github_locator_from_url(url.trim());
+            }
+        }
+    }
+    None
+}
+
+fn preflight_github_auth(gh_binary_path: &std::path::Path) -> Result<(), String> {
+    let auth = Command::new(gh_binary_path)
+        .args(["auth", "status"])
+        .output()
+        .map_err(|error| format!("failed to run gh auth status: {error}"))?;
+    if auth.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "gh is not authenticated: {}",
+            command_output(&auth)
+        ))
+    }
+}
+
+fn ensure_github_lifecycle_labels(
+    gh_binary_path: &std::path::Path,
+    locator: &str,
+) -> Result<(), String> {
+    for label in [
+        "agentic-afk:claimed",
+        "agentic-afk:running",
+        "agentic-afk:blocked",
+        "agentic-afk:completed",
+    ] {
+        let output = Command::new(gh_binary_path)
+            .args([
+                "label", "create", label, "--repo", locator, "--force", "--color", "57606a",
+            ])
+            .output()
+            .map_err(|error| {
+                format!("failed to provision GitHub lifecycle label {label}: {error}")
+            })?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to provision GitHub lifecycle label {label}: {}",
+                command_output(&output)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn comment_github_issue(
+    gh_binary_path: &std::path::Path,
+    locator: &str,
+    source_id: &str,
+    body: &str,
+) -> Result<(), String> {
+    let output = Command::new(gh_binary_path)
+        .args([
+            "issue", "comment", source_id, "--repo", locator, "--body", body,
+        ])
+        .output()
+        .map_err(|error| format!("failed to comment on GitHub Source Issue: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to comment on GitHub Source Issue: {}",
+            command_output(&output)
+        ))
+    }
+}
+
+fn create_github_change_proposal(
+    gh_binary_path: &std::path::Path,
+    source: &IssueSource,
+    issue: &SourceIssueSnapshot,
+    branch: &str,
+    worktree_path: &std::path::Path,
+) -> Result<String, String> {
+    let push = Command::new("git")
+        .current_dir(worktree_path)
+        .args(["push", "--set-upstream", "origin", branch])
+        .output()
+        .map_err(|error| format!("failed to push Change Proposal branch: {error}"))?;
+    if !push.status.success() {
+        return Err(format!(
+            "failed to push Change Proposal branch: {}",
+            command_output(&push)
+        ));
+    }
+
+    let body = format!("Fixes #{}\n\nCreated by agentic-afk.", issue.source_id);
+    let proposal = Command::new(gh_binary_path)
+        .args([
+            "pr",
+            "create",
+            "--repo",
+            &source.locator,
+            "--head",
+            branch,
+            "--title",
+            &issue.title,
+            "--body",
+            &body,
+        ])
+        .output()
+        .map_err(|error| format!("failed to create GitHub Change Proposal: {error}"))?;
+    if !proposal.status.success() {
+        return Err(format!(
+            "failed to create GitHub Change Proposal: {}",
+            command_output(&proposal)
+        ));
+    }
+    let url = String::from_utf8_lossy(&proposal.stdout).trim().to_string();
+    if url.is_empty() {
+        Err("GitHub Change Proposal creation did not return a URL".to_string())
+    } else {
+        comment_github_issue(
+            gh_binary_path,
+            &source.locator,
+            &issue.source_id,
+            &format!("Change Proposal created: {url}"),
+        )?;
+        Ok(url)
+    }
 }
 
 async fn refresh_local_markdown_snapshot(
@@ -994,7 +1376,13 @@ fn parse_github_issue(issue: GitHubIssue) -> SourceIssueSnapshot {
     } else {
         "not-ready".to_string()
     };
-    snapshot.lifecycle_status = "ready".to_string();
+    snapshot.lifecycle_status = issue
+        .labels
+        .iter()
+        .find_map(|label| label.name.strip_prefix("agentic-afk:"))
+        .filter(|status| matches!(*status, "claimed" | "running" | "blocked" | "completed"))
+        .unwrap_or("ready")
+        .to_string();
     snapshot
 }
 

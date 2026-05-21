@@ -3,10 +3,10 @@
 //! Provides SQLite-backed storage for Projects.
 
 use agentic_afk_contracts::{
-    AssignmentAttemptResponse, AssignmentTerminalOutcome, CreateProjectRequest,
-    EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource, IssueSourceSyncResponse,
-    IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProjectId, ProjectResponse,
-    SourceIssueSnapshot,
+    AssignmentAttemptResponse, AssignmentTerminalOutcome, ChangeProposalResponse,
+    CreateProjectRequest, EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource,
+    IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProjectId,
+    ProjectResponse, SourceIssueSnapshot,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
@@ -536,10 +536,33 @@ pub async fn set_assignment_status(
     update_assignment(db, assignment_id, status, status_detail, None).await
 }
 
+pub async fn set_assignment_change_proposal(
+    db: &Db,
+    assignment_id: &str,
+    status: &str,
+    url: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    let result = sqlx::query(
+        "UPDATE issue_assignments SET change_proposal_status = ?, change_proposal_url = ? WHERE id = ?",
+    )
+    .bind(status)
+    .bind(url)
+    .bind(assignment_id)
+    .execute(db)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(PersistenceError::AssignmentNotFound(
+            assignment_id.to_string(),
+        ));
+    }
+    get_issue_assignment(db, assignment_id).await
+}
+
 pub async fn record_initial_attempt(
     db: &Db,
     assignment_id: &str,
     process_id: Option<u32>,
+    process_identity: Option<&str>,
     terminal_outcome: Option<&AssignmentTerminalOutcome>,
 ) -> Result<IssueAssignmentResponse, PersistenceError> {
     let id = Uuid::new_v4().to_string();
@@ -550,14 +573,15 @@ pub async fn record_initial_attempt(
     sqlx::query(
         r#"
         INSERT INTO assignment_attempts (
-            id, assignment_id, kind, process_id, terminal_outcome_json
+            id, assignment_id, kind, process_id, process_identity, terminal_outcome_json
         )
-        VALUES (?, ?, 'initial', ?, ?)
+        VALUES (?, ?, 'initial', ?, ?, ?)
         "#,
     )
     .bind(id)
     .bind(assignment_id)
     .bind(process_id.map(i64::from))
+    .bind(process_identity)
     .bind(terminal_outcome_json)
     .execute(db)
     .await?;
@@ -640,29 +664,45 @@ async fn get_issue_assignment(
     .fetch_one(db)
     .await?
     .0;
-    let latest_attempt = sqlx::query_as::<_, (String, String, Option<i64>, Option<String>)>(
-        r#"
-        SELECT id, kind, process_id, terminal_outcome_json
+    let (change_proposal_status, change_proposal_url) = sqlx::query_as::<
+        _,
+        (Option<String>, Option<String>),
+    >(
+        "SELECT change_proposal_status, change_proposal_url FROM issue_assignments WHERE id = ?",
+    )
+    .bind(assignment_id)
+    .fetch_one(db)
+    .await?;
+    let change_proposal = change_proposal_status
+        .zip(change_proposal_url)
+        .map(|(status, url)| ChangeProposalResponse { status, url });
+    let latest_attempt =
+        sqlx::query_as::<_, (String, String, Option<i64>, Option<String>, Option<String>)>(
+            r#"
+        SELECT id, kind, process_id, process_identity, terminal_outcome_json
         FROM assignment_attempts
         WHERE assignment_id = ?
         ORDER BY rowid DESC
         LIMIT 1
         "#,
-    )
-    .bind(assignment_id)
-    .fetch_optional(db)
-    .await?
-    .map(|(id, kind, process_id, terminal_outcome_json)| {
-        let terminal_outcome = terminal_outcome_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str(json).ok());
-        AssignmentAttemptResponse {
-            id,
-            kind,
-            process_id: process_id.and_then(|id| u32::try_from(id).ok()),
-            terminal_outcome,
-        }
-    });
+        )
+        .bind(assignment_id)
+        .fetch_optional(db)
+        .await?
+        .map(
+            |(id, kind, process_id, process_identity, terminal_outcome_json)| {
+                let terminal_outcome = terminal_outcome_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok());
+                AssignmentAttemptResponse {
+                    id,
+                    kind,
+                    process_id: process_id.and_then(|id| u32::try_from(id).ok()),
+                    process_identity,
+                    terminal_outcome,
+                }
+            },
+        );
     Ok(IssueAssignmentResponse {
         id,
         project_id: ProjectId(project_id),
@@ -672,6 +712,7 @@ async fn get_issue_assignment(
         worktree_path,
         status,
         status_detail,
+        change_proposal,
         latest_attempt,
     })
 }

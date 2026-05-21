@@ -574,6 +574,15 @@ fn AssignmentState(state: ProjectAssignmentStateResponse) -> Element {
                         if let Some(detail) = assignment.status_detail {
                             p { class: "text-zinc-300", "{detail}" }
                         }
+                        if let Some(proposal) = assignment.change_proposal {
+                            a {
+                                class: "w-fit text-emerald-300 underline decoration-emerald-800 underline-offset-4 hover:text-emerald-200",
+                                href: "{proposal.url}",
+                                target: "_blank",
+                                rel: "noreferrer",
+                                "Change Proposal {proposal.status}"
+                            }
+                        }
                     }
                     if state.waiting_ready_issue_count > 0 {
                         p { class: "mt-4 border-t border-zinc-800 pt-3 text-sm text-zinc-300",

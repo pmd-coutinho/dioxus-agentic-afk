@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodexExecution {
     pub process_id: u32,
+    pub process_identity: Option<String>,
     pub terminal_outcome: AssignmentTerminalOutcome,
 }
 
@@ -21,6 +22,14 @@ pub fn preflight_binary(binary_path: &Path, name: &str) -> Result<(), String> {
     } else {
         Err(format!("{name} preflight exited with {}", output.status))
     }
+}
+
+pub fn codex_process_identity(process_id: u32) -> Option<String> {
+    let stat =
+        std::fs::read_to_string(Path::new("/proc").join(process_id.to_string()).join("stat"))
+            .ok()?;
+    let process_start_time = stat.rsplit_once(") ")?.1.split_whitespace().nth(19)?;
+    Some(format!("procfs-start-time:{process_start_time}"))
 }
 
 pub fn create_assignment_worktree(
@@ -86,6 +95,7 @@ pub fn run_initial_codex(
         .spawn()
         .map_err(|error| format!("failed to spawn Codex: {error}"))?;
     let process_id = child.id();
+    let process_identity = codex_process_identity(process_id);
     let output = child
         .wait_with_output()
         .map_err(|error| format!("failed to wait for Codex: {error}"))?;
@@ -103,6 +113,7 @@ pub fn run_initial_codex(
         .map_err(|error| format!("failed to parse Codex terminal outcome: {error}"))?;
     Ok(CodexExecution {
         process_id,
+        process_identity,
         terminal_outcome,
     })
 }

@@ -12,6 +12,7 @@ use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::process::Command;
 use tower::ServiceExt;
 
 fn temp_project_path(name: &str) -> PathBuf {
@@ -50,13 +51,21 @@ async fn test_router_with_execution(
     worktrunk_binary_path: PathBuf,
     codex_binary_path: PathBuf,
 ) -> (axum::Router, persistence::Db) {
+    test_router_with_execution_and_gh(worktrunk_binary_path, codex_binary_path, "gh".into()).await
+}
+
+async fn test_router_with_execution_and_gh(
+    worktrunk_binary_path: PathBuf,
+    codex_binary_path: PathBuf,
+    gh_binary_path: PathBuf,
+) -> (axum::Router, persistence::Db) {
     let db = persistence::connect_in_memory().await.unwrap();
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
-        gh_binary_path: "gh".into(),
+        gh_binary_path,
         worktrunk_binary_path,
         codex_binary_path,
     };
@@ -73,6 +82,58 @@ fn write_fake_command(name: &str, body: &str) -> PathBuf {
         std::fs::set_permissions(&path, permissions).unwrap();
     }
     path
+}
+
+fn setup_git_project_with_remote(name: &str) -> (PathBuf, PathBuf) {
+    let project_path = temp_project_path(name);
+    let remote_path = temp_project_path(&format!("{name}-remote"));
+    std::fs::create_dir_all(&project_path).unwrap();
+    std::fs::create_dir_all(&remote_path).unwrap();
+    run_git(&project_path, &["init", "-b", "main"]);
+    run_git(&project_path, &["config", "user.name", "Agentic AFK Test"]);
+    run_git(
+        &project_path,
+        &["config", "user.email", "agentic-afk@example.invalid"],
+    );
+    std::fs::write(project_path.join("README.md"), "test\n").unwrap();
+    run_git(&project_path, &["add", "README.md"]);
+    run_git(&project_path, &["commit", "-m", "initial"]);
+    run_git(&remote_path, &["init", "--bare"]);
+    run_git(
+        &project_path,
+        &["remote", "add", "origin", "git@github.com:owner/repo.git"],
+    );
+    run_git(
+        &project_path,
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            remote_path.to_str().unwrap(),
+        ],
+    );
+    let rewrite_key = format!("url.{}.insteadOf", remote_path.to_str().unwrap());
+    run_git(
+        &project_path,
+        &["config", &rewrite_key, "git@github.com:owner/repo.git"],
+    );
+    run_git(&project_path, &["push", "-u", "origin", "main"]);
+    (project_path, remote_path)
+}
+
+fn run_git(path: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
 }
 
 #[tokio::test]
@@ -780,6 +841,191 @@ async fn start_assignment_runs_local_markdown_issue_through_worktrunk_and_codex(
 }
 
 #[tokio::test]
+async fn start_assignment_runs_trusted_eligible_github_ready_issue() {
+    let (project_path, _remote_path) = setup_git_project_with_remote("github-assignment-start");
+    let fake_gh = write_fake_command(
+        "github-assignment-start-fake-gh",
+        "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then exit 0; fi\nif [ \"$1\" = \"label\" ]; then exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '[{\"number\":21,\"title\":\"GitHub assignment\",\"body\":\"Do the work.\",\"labels\":[{\"name\":\"ready-for-agent\"}]}]\\n'\n  exit 0\nfi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 9\n",
+    );
+    let fake_wt = write_fake_command(
+        "github-assignment-start-fake-wt",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nworktree=\"/tmp/agentic-afk-github-start-worktree-$$\"\nmkdir -p \"$worktree\"\nprintf '{\"path\":\"%s\"}\\n' \"$worktree\"\n",
+    );
+    let fake_codex = write_fake_command(
+        "github-assignment-start-fake-codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output-last-message\" ]; then shift; last=\"$1\"; fi\n  shift\ndone\nprintf '{\"outcome\":\"Blocked\",\"summary\":\"need review\"}\\n' > \"$last\"\n",
+    );
+    let (app, _db) = test_router_with_execution_and_gh(fake_wt, fake_codex, fake_gh).await;
+    let project = create_trusted_github_project(&app, &project_path, "owner/repo").await;
+    sync_issue_source(&app, &project).await;
+
+    let response = start_source_issue_assignment(&app, &project, "21").await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let assignment: IssueAssignmentResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(assignment.source_id, "21");
+    assert_eq!(assignment.branch, "agentic-afk/github-21");
+    assert_eq!(assignment.status, "blocked");
+}
+
+#[tokio::test]
+async fn github_sync_excludes_ready_issues_with_active_afk_lifecycle_labels() {
+    let project_path = temp_project_path("github-active-sync");
+    std::fs::create_dir_all(&project_path).unwrap();
+    let fake_gh = write_fake_command(
+        "github-active-sync-fake-gh",
+        "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '[{\"number\":21,\"title\":\"Running\",\"labels\":[{\"name\":\"ready-for-agent\"},{\"name\":\"agentic-afk:running\"}]},{\"number\":22,\"title\":\"Ready\",\"labels\":[{\"name\":\"ready-for-agent\"}]}]\\n'\n  exit 0\nfi\nexit 9\n",
+    );
+    let noop = write_fake_command("github-active-sync-noop", "#!/bin/sh\nexit 0\n");
+    let (app, _db) = test_router_with_execution_and_gh(noop.clone(), noop, fake_gh).await;
+    let project = create_trusted_github_project(&app, &project_path, "owner/repo").await;
+
+    sync_issue_source(&app, &project).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/planning-snapshot", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(snapshot.eligible[0].source_id, "22");
+    assert_eq!(snapshot.active[0].source_id, "21");
+    assert_eq!(snapshot.active[0].readiness, "ready");
+    assert_eq!(snapshot.active[0].lifecycle_status, "running");
+}
+
+#[tokio::test]
+async fn github_assignment_write_back_preserves_ready_label_and_replaces_afk_lifecycle() {
+    let (project_path, _remote_path) = setup_git_project_with_remote("github-assignment-labels");
+    let gh_log = temp_project_path("github-assignment-labels-log");
+    let fake_gh = write_fake_command(
+        "github-assignment-labels-fake-gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"auth\" ]; then exit 0; fi\nif [ \"$1\" = \"label\" ]; then exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '[{{\"number\":21,\"title\":\"Labels\",\"labels\":[{{\"name\":\"ready-for-agent\"}}]}}]\\n'\n  exit 0\nfi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nexit 9\n",
+            gh_log.display()
+        ),
+    );
+    let fake_wt = write_fake_command(
+        "github-assignment-labels-fake-wt",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nworktree=\"/tmp/agentic-afk-github-labels-worktree-$$\"\nmkdir -p \"$worktree\"\nprintf '{\"path\":\"%s\"}\\n' \"$worktree\"\n",
+    );
+    let fake_codex = write_fake_command(
+        "github-assignment-labels-fake-codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output-last-message\" ]; then shift; last=\"$1\"; fi\n  shift\ndone\nprintf '{\"outcome\":\"Blocked\",\"summary\":\"wait\"}\\n' > \"$last\"\n",
+    );
+    let (app, _db) = test_router_with_execution_and_gh(fake_wt, fake_codex, fake_gh).await;
+    let project = create_trusted_github_project(&app, &project_path, "owner/repo").await;
+    sync_issue_source(&app, &project).await;
+
+    let response = start_source_issue_assignment(&app, &project, "21").await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let log = std::fs::read_to_string(gh_log).unwrap();
+    assert!(log.contains("label create agentic-afk:claimed --repo owner/repo"));
+    assert!(log.contains("issue edit 21 --repo owner/repo"));
+    assert!(log.contains("--remove-label agentic-afk:claimed"));
+    assert!(log.contains("--remove-label agentic-afk:running"));
+    assert!(log.contains("--remove-label agentic-afk:blocked"));
+    assert!(log.contains("--remove-label agentic-afk:completed"));
+    assert!(log.contains("--add-label agentic-afk:blocked"));
+    assert!(!log.contains("--remove-label ready-for-agent"));
+}
+
+#[tokio::test]
+async fn github_ready_for_proposal_pushes_branch_and_exposes_pending_change_proposal() {
+    let (project_path, remote_path) = setup_git_project_with_remote("github-proposal");
+    let gh_log = temp_project_path("github-proposal-gh-log");
+    let fake_gh = write_fake_command(
+        "github-proposal-fake-gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"auth\" ]; then exit 0; fi\nif [ \"$1\" = \"label\" ]; then exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '[{{\"number\":21,\"title\":\"Proposal title\",\"labels\":[{{\"name\":\"ready-for-agent\"}}]}}]\\n'\n  exit 0\nfi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then\n  printf 'https://github.com/owner/repo/pull/42\\n'\n  exit 0\nfi\nexit 9\n",
+            gh_log.display()
+        ),
+    );
+    let fake_wt = write_fake_command(
+        "github-proposal-fake-wt",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\ngit switch -c \"$3\" >/dev/null\nprintf '{\"path\":\"%s\"}\\n' \"$PWD\"\n",
+    );
+    let fake_codex = write_fake_command(
+        "github-proposal-fake-codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output-last-message\" ]; then shift; last=\"$1\"; fi\n  shift\ndone\nprintf '{\"outcome\":\"ReadyForProposal\",\"summary\":\"tests passed\"}\\n' > \"$last\"\n",
+    );
+    let (app, _db) = test_router_with_execution_and_gh(fake_wt, fake_codex, fake_gh).await;
+    let project = create_trusted_github_project(&app, &project_path, "owner/repo").await;
+    sync_issue_source(&app, &project).await;
+
+    let response = start_source_issue_assignment(&app, &project, "21").await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let assignment: IssueAssignmentResponse = serde_json::from_slice(&body).unwrap();
+    let proposal = assignment.change_proposal.unwrap();
+    assert_eq!(proposal.status, "pending");
+    assert_eq!(proposal.url, "https://github.com/owner/repo/pull/42");
+    assert!(
+        run_git(&remote_path, &["branch", "--list", "agentic-afk/github-21"])
+            .contains("agentic-afk/github-21")
+    );
+    let log = std::fs::read_to_string(gh_log).unwrap();
+    assert!(log.contains("pr create --repo owner/repo --head agentic-afk/github-21"));
+    assert!(log.contains("Fixes #21"));
+    assert!(log.contains("issue comment 21 --repo owner/repo"));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/assignment-state", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let state: ProjectAssignmentStateResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        state
+            .active_assignment
+            .unwrap()
+            .change_proposal
+            .unwrap()
+            .url,
+        "https://github.com/owner/repo/pull/42"
+    );
+}
+
+#[tokio::test]
+async fn github_assignment_preflight_failure_does_not_write_lifecycle_labels() {
+    let project_path = temp_project_path("github-assignment-preflight");
+    std::fs::create_dir_all(&project_path).unwrap();
+    let gh_log = temp_project_path("github-assignment-preflight-log");
+    let fake_gh = write_fake_command(
+        "github-assignment-preflight-fake-gh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"auth\" ]; then exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"list\" ]; then\n  printf '[{{\"number\":21,\"title\":\"No git\",\"labels\":[{{\"name\":\"ready-for-agent\"}}]}}]\\n'\n  exit 0\nfi\nexit 9\n",
+            gh_log.display()
+        ),
+    );
+    let noop = write_fake_command("github-assignment-preflight-noop", "#!/bin/sh\nexit 0\n");
+    let (app, _db) = test_router_with_execution_and_gh(noop.clone(), noop, fake_gh).await;
+    let project = create_trusted_github_project(&app, &project_path, "owner/repo").await;
+    sync_issue_source(&app, &project).await;
+
+    let response = start_source_issue_assignment(&app, &project, "21").await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let log = std::fs::read_to_string(gh_log).unwrap();
+    assert!(!log.contains("issue edit"));
+}
+
+#[tokio::test]
 async fn assignment_state_shows_waiting_ready_issues_and_rejects_second_start() {
     let (project_path, issues_dir) = setup_local_markdown_project("assignment-waiting");
     std::fs::create_dir_all(project_path.join(".git")).unwrap();
@@ -1139,6 +1385,279 @@ async fn assignment_state_survives_control_plane_router_restart() {
 }
 
 #[tokio::test]
+async fn assignment_state_blocks_running_local_markdown_assignment_when_codex_process_is_gone() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-process-gone");
+    std::fs::write(
+        issues_dir.join("gone.md"),
+        "# Gone\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let (app, db) = test_router_with_db().await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    sync_local_markdown_project(&app, &project).await;
+
+    let issue = persistence::get_planning_snapshot(&db, &project.id.0)
+        .await
+        .unwrap()
+        .eligible
+        .into_iter()
+        .find(|issue| issue.source_id == "gone")
+        .unwrap();
+    let assignment = persistence::create_issue_assignment(
+        &db,
+        &project.id.0,
+        project.enabled_issue_source.as_ref().unwrap(),
+        &issue,
+        "agentic-afk/local-markdown-gone",
+    )
+    .await
+    .unwrap();
+    let assignment = persistence::set_assignment_worktree(&db, &assignment.id, "/tmp/gone")
+        .await
+        .unwrap();
+    let assignment = persistence::set_assignment_status(&db, &assignment.id, "running", None)
+        .await
+        .unwrap();
+    persistence::record_initial_attempt(
+        &db,
+        &assignment.id,
+        Some(u32::MAX),
+        Some("missing-process-identity"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let restarted = router(
+        ControlPlaneConfig {
+            bind_address: "127.0.0.1:0".parse().unwrap(),
+            dashboard_asset_dir: "apps/dashboard/dist".into(),
+            database_url: "sqlite::memory:".into(),
+            gh_binary_path: "gh".into(),
+            worktrunk_binary_path: "wt".into(),
+            codex_binary_path: "codex".into(),
+        },
+        db,
+    );
+    let response = restarted
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/assignment-state", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let state: ProjectAssignmentStateResponse = serde_json::from_slice(&body).unwrap();
+    let assignment = state.active_assignment.unwrap();
+    assert_eq!(assignment.status, "blocked");
+    assert!(
+        assignment
+            .status_detail
+            .as_deref()
+            .unwrap()
+            .contains("Codex process")
+    );
+    assert!(
+        std::fs::read_to_string(issues_dir.join("gone.md"))
+            .unwrap()
+            .contains("Lifecycle Status: blocked")
+    );
+}
+
+#[tokio::test]
+async fn assignment_state_blocks_running_assignment_without_owned_codex_process_identity() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-process-missing");
+    std::fs::write(
+        issues_dir.join("missing.md"),
+        "# Missing\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let (app, db) = test_router_with_db().await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    sync_local_markdown_project(&app, &project).await;
+
+    let issue = persistence::get_planning_snapshot(&db, &project.id.0)
+        .await
+        .unwrap()
+        .eligible
+        .into_iter()
+        .find(|issue| issue.source_id == "missing")
+        .unwrap();
+    let assignment = persistence::create_issue_assignment(
+        &db,
+        &project.id.0,
+        project.enabled_issue_source.as_ref().unwrap(),
+        &issue,
+        "agentic-afk/local-markdown-missing",
+    )
+    .await
+    .unwrap();
+    let assignment = persistence::set_assignment_worktree(&db, &assignment.id, "/tmp/missing")
+        .await
+        .unwrap();
+    persistence::set_assignment_status(&db, &assignment.id, "running", None)
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/assignment-state", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let state: ProjectAssignmentStateResponse = serde_json::from_slice(&body).unwrap();
+    let assignment = state.active_assignment.unwrap();
+    assert_eq!(assignment.status, "blocked");
+    assert!(
+        assignment
+            .status_detail
+            .as_deref()
+            .unwrap()
+            .contains("identity")
+    );
+}
+
+#[tokio::test]
+async fn assignment_state_keeps_running_local_markdown_assignment_with_live_codex_process() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-process-live");
+    std::fs::write(
+        issues_dir.join("live.md"),
+        "# Live\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let (app, db) = test_router_with_db().await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    sync_local_markdown_project(&app, &project).await;
+
+    let issue = persistence::get_planning_snapshot(&db, &project.id.0)
+        .await
+        .unwrap()
+        .eligible
+        .into_iter()
+        .find(|issue| issue.source_id == "live")
+        .unwrap();
+    let assignment = persistence::create_issue_assignment(
+        &db,
+        &project.id.0,
+        project.enabled_issue_source.as_ref().unwrap(),
+        &issue,
+        "agentic-afk/local-markdown-live",
+    )
+    .await
+    .unwrap();
+    let assignment = persistence::set_assignment_worktree(&db, &assignment.id, "/tmp/live")
+        .await
+        .unwrap();
+    let assignment = persistence::set_assignment_status(&db, &assignment.id, "running", None)
+        .await
+        .unwrap();
+    let process_identity =
+        agentic_afk_orchestrator::codex_process_identity(std::process::id()).unwrap();
+    persistence::record_initial_attempt(
+        &db,
+        &assignment.id,
+        Some(std::process::id()),
+        Some(&process_identity),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/assignment-state", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let state: ProjectAssignmentStateResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(state.active_assignment.unwrap().status, "running");
+}
+
+#[tokio::test]
+async fn assignment_state_blocks_running_assignment_when_codex_pid_identity_mismatches() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-process-reused");
+    std::fs::write(
+        issues_dir.join("reused.md"),
+        "# Reused\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let (app, db) = test_router_with_db().await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    sync_local_markdown_project(&app, &project).await;
+
+    let issue = persistence::get_planning_snapshot(&db, &project.id.0)
+        .await
+        .unwrap()
+        .eligible
+        .into_iter()
+        .find(|issue| issue.source_id == "reused")
+        .unwrap();
+    let assignment = persistence::create_issue_assignment(
+        &db,
+        &project.id.0,
+        project.enabled_issue_source.as_ref().unwrap(),
+        &issue,
+        "agentic-afk/local-markdown-reused",
+    )
+    .await
+    .unwrap();
+    let assignment = persistence::set_assignment_worktree(&db, &assignment.id, "/tmp/reused")
+        .await
+        .unwrap();
+    let assignment = persistence::set_assignment_status(&db, &assignment.id, "running", None)
+        .await
+        .unwrap();
+    persistence::record_initial_attempt(
+        &db,
+        &assignment.id,
+        Some(std::process::id()),
+        Some("different-process-identity"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/assignment-state", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let state: ProjectAssignmentStateResponse = serde_json::from_slice(&body).unwrap();
+    let assignment = state.active_assignment.unwrap();
+    assert_eq!(assignment.status, "blocked");
+    assert!(
+        assignment
+            .status_detail
+            .as_deref()
+            .unwrap()
+            .contains("identity")
+    );
+}
+
+#[tokio::test]
 async fn project_list_includes_trusted_field() {
     let app = test_router().await;
 
@@ -1340,6 +1859,10 @@ async fn create_trusted_local_markdown_project(
 }
 
 async fn sync_local_markdown_project(app: &axum::Router, project: &ProjectResponse) {
+    sync_issue_source(app, project).await;
+}
+
+async fn sync_issue_source(app: &axum::Router, project: &ProjectResponse) {
     let response = app
         .clone()
         .oneshot(
@@ -1352,6 +1875,76 @@ async fn sync_local_markdown_project(app: &axum::Router, project: &ProjectRespon
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn create_trusted_github_project(
+    app: &axum::Router,
+    project_path: &std::path::Path,
+    locator: &str,
+) -> ProjectResponse {
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&CreateProjectRequest {
+                        path: project_path.display().to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let body = create_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let project: ProjectResponse = serde_json::from_slice(&body).unwrap();
+    let source_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/issue-source", project.id.0))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&EnableIssueSourceRequest {
+                        kind: "github".to_string(),
+                        locator: locator.to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(source_response.status(), StatusCode::OK);
+    let trust_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/trust", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(trust_response.status(), StatusCode::OK);
+    let body = trust_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    serde_json::from_slice(&body).unwrap()
 }
 
 async fn start_source_issue_assignment(
