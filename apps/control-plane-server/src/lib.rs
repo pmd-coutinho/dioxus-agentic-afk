@@ -25,6 +25,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use utoipa::OpenApi;
 use utoipa::ToSchema;
 
+mod abandon;
+mod recover;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneConfig {
     pub bind_address: SocketAddr,
@@ -75,9 +78,9 @@ impl ControlPlaneConfig {
 }
 
 #[derive(Clone)]
-struct AppState {
-    config: ControlPlaneConfig,
-    db: Db,
+pub(crate) struct AppState {
+    pub(crate) config: ControlPlaneConfig,
+    pub(crate) db: Db,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -175,6 +178,14 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route(
             "/api/projects/{id}/source-issues/{source_id}/assignment",
             post(start_assignment),
+        )
+        .route(
+            "/api/projects/{id}/assignments/{assignment_id}/abandon",
+            post(abandon::abandon_assignment),
+        )
+        .route(
+            "/api/projects/{id}/assignments/{assignment_id}/recover",
+            post(recover::recover_assignment),
         )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
@@ -939,7 +950,7 @@ async fn start_assignment(
     (StatusCode::CREATED, Json(assignment)).into_response()
 }
 
-fn assignment_problem(problem_type: &str, detail: String) -> Response {
+pub(crate) fn assignment_problem(problem_type: &str, detail: String) -> Response {
     sync_problem_response(
         StatusCode::UNPROCESSABLE_ENTITY,
         problem_type,
@@ -1220,6 +1231,23 @@ fn create_github_change_proposal(
         )?;
         Ok(url)
     }
+}
+
+pub(crate) async fn refresh_local_markdown_after_change(
+    db: &Db,
+    project: &ProjectResponse,
+    source: &IssueSource,
+) -> Result<(), String> {
+    refresh_local_markdown_snapshot(db, project, source).await
+}
+
+pub(crate) fn write_assignment_lifecycle_for_abandon(
+    gh_binary_path: &std::path::Path,
+    project: &ProjectResponse,
+    source: &IssueSource,
+    source_id: &str,
+) -> Result<(), String> {
+    write_assignment_lifecycle(gh_binary_path, project, source, source_id, "ready")
 }
 
 async fn refresh_local_markdown_snapshot(
@@ -1598,7 +1626,7 @@ fn github_locator_from_url(url: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
-fn persistence_error_to_response(err: PersistenceError) -> Response {
+pub(crate) fn persistence_error_to_response(err: PersistenceError) -> Response {
     let (status, problem_type, title) = match &err {
         PersistenceError::NotFound(_) => (
             StatusCode::NOT_FOUND,
@@ -1635,6 +1663,11 @@ fn persistence_error_to_response(err: PersistenceError) -> Response {
             "urn:agentic-afk:assignment-not-found",
             "Not Found",
         ),
+        PersistenceError::AssignmentNotAbandonable(_) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:assignment-not-abandonable",
+            "Unprocessable Entity",
+        ),
         PersistenceError::Database(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "urn:agentic-afk:internal-error",
@@ -1657,7 +1690,7 @@ fn persistence_error_to_response(err: PersistenceError) -> Response {
         .into_response()
 }
 
-fn sync_problem_response(
+pub(crate) fn sync_problem_response(
     status: StatusCode,
     problem_type: &str,
     title: &str,

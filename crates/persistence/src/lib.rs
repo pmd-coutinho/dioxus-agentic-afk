@@ -14,6 +14,15 @@ use std::path::Path;
 use std::str::FromStr;
 use uuid::Uuid;
 
+mod abandon;
+mod recover;
+
+pub use abandon::{
+    ProjectActivityEntry, abandon_blocked_assignment, get_project_assignment,
+    list_project_activity, record_project_activity,
+};
+pub use recover::{list_assignment_attempts, record_recovery_attempt};
+
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
     #[error("project not found: {0}")]
@@ -30,6 +39,8 @@ pub enum PersistenceError {
     ActiveAssignment(String),
     #[error("Issue Assignment not found: {0}")]
     AssignmentNotFound(String),
+    #[error("Issue Assignment is not in an abandonable state: {0}")]
+    AssignmentNotAbandonable(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -636,6 +647,30 @@ async fn update_assignment(
         ));
     }
     get_issue_assignment(db, assignment_id).await
+}
+
+/// Look up an Issue Assignment by id, ignoring Project scope.
+pub async fn get_issue_assignment_public(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    get_issue_assignment(db, assignment_id).await
+}
+
+/// Fetch the persisted raw text of the Source Issue an Issue Assignment was created
+/// against. Used by recovery to build prompts from durable facts.
+pub async fn get_assignment_source_raw_text(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<String, PersistenceError> {
+    let row = sqlx::query_as::<_, (String,)>(
+        "SELECT source_raw_text FROM issue_assignments WHERE id = ?",
+    )
+    .bind(assignment_id)
+    .fetch_optional(db)
+    .await?;
+    row.map(|(raw,)| raw)
+        .ok_or_else(|| PersistenceError::AssignmentNotFound(assignment_id.to_string()))
 }
 
 async fn get_issue_assignment(
