@@ -233,8 +233,9 @@ async fn apply_repair_outcome(
         "failed" => "assignment_failed",
         _ => "assignment_blocked",
     };
-    let _ = persistence::record_project_activity(
+    let _ = crate::activity_publisher::record_project_activity(
         &state.db,
+        &state.event_bus,
         &assignment.project_id.0,
         Some(&assignment_id),
         kind,

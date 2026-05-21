@@ -184,8 +184,9 @@ pub async fn recover_assignment(
     let _ = worktree_path; // kept above for clarity that recovery reuses the same path.
     let _ = assignment_problem; // suppress unused-import warning when reusing helpers later.
 
-    let _ = persistence::record_project_activity(
+    let _ = crate::activity_publisher::record_project_activity(
         &state.db,
+        &state.event_bus,
         &project_id,
         Some(&final_assignment.id),
         "assignment_recovered",

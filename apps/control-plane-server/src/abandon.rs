@@ -41,8 +41,9 @@ pub(crate) async fn abandon_assignment(
         std::path::Path::new(&project.path),
         &assignment.branch,
     ) {
-        let _ = persistence::record_project_activity(
+        let _ = crate::activity_publisher::record_project_activity(
             &state.db,
+            &state.event_bus,
             &project_id,
             Some(&assignment_id),
             "assignment_abandon_failed",
@@ -80,8 +81,9 @@ pub(crate) async fn abandon_assignment(
         }
     }
 
-    let _ = persistence::record_project_activity(
+    let _ = crate::activity_publisher::record_project_activity(
         &state.db,
+        &state.event_bus,
         &project_id,
         Some(&assignment_id),
         "assignment_abandoned",

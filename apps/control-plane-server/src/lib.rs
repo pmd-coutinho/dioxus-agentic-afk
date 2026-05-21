@@ -9,8 +9,9 @@ use agentic_afk_contracts::{
     CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest, FailedCheckFact,
     HealthResponse, IssueAssignmentResponse, IssueSource, IssueSourceCandidate,
     IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse,
-    ProblemDetail, ProjectActivityEntryResponse, ProjectAssignmentStateResponse, ProjectResponse,
-    RepairAssignmentRequest, RepairBudgetResponse, SourceIssueSnapshot,
+    ProblemDetail, ProjectActivityEntryResponse, ProjectAssignmentStateResponse, ProjectEvent,
+    ProjectId, ProjectResponse, ProjectSnapshot, ProjectSnapshotResponse, RepairAssignmentRequest,
+    RepairBudgetResponse, SourceIssueSnapshot,
 };
 use agentic_afk_git_summary::summarize_project_path;
 use agentic_afk_orchestrator::{
@@ -29,6 +30,8 @@ use utoipa::OpenApi;
 use utoipa::ToSchema;
 
 mod abandon;
+pub mod activity_publisher;
+pub mod event_bus;
 mod recover;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,6 +89,7 @@ impl ControlPlaneConfig {
 pub(crate) struct AppState {
     pub(crate) config: ControlPlaneConfig,
     pub(crate) db: Db,
+    pub(crate) event_bus: event_bus::EventBus,
 }
 
 mod repair;
@@ -112,7 +116,8 @@ pub struct SetLifecycleStatusRequest {
         get_assignment_state,
         update_lifecycle_status,
         start_assignment,
-        get_project_activity
+        get_project_activity,
+        get_project_snapshot
     ),
     components(schemas(
         HealthResponse,
@@ -137,6 +142,9 @@ pub struct SetLifecycleStatusRequest {
         RepairAssignmentRequest,
         FailedCheckFact,
         ProjectActivityEntryResponse,
+        ProjectSnapshot,
+        ProjectSnapshotResponse,
+        ProjectEvent,
         ProblemDetail
     )),
     tags((name = "Local Control Plane", description = "Local Control Plane API"))
@@ -144,9 +152,20 @@ pub struct SetLifecycleStatusRequest {
 struct ApiDoc;
 
 pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
+    router_with_bus(config, db, event_bus::EventBus::new())
+}
+
+/// Build a router that shares a caller-provided `EventBus`. Useful for
+/// tests that need to publish activity through the same bus the SSE
+/// endpoint subscribes from.
+pub fn router_with_bus(config: ControlPlaneConfig, db: Db, event_bus: event_bus::EventBus) -> Router {
     let asset_dir = config.dashboard_asset_dir.clone();
     let index = asset_dir.join("index.html");
-    let state = Arc::new(AppState { config, db });
+    let state = Arc::new(AppState {
+        config,
+        db,
+        event_bus,
+    });
 
     Router::new()
         .route("/health", get(health))
@@ -184,6 +203,8 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
             get(get_assignment_state),
         )
         .route("/api/projects/{id}/activity", get(get_project_activity))
+        .route("/api/projects/{id}/snapshot", get(get_project_snapshot))
+        .route("/api/projects/{id}/events", get(get_project_events))
         .route(
             "/api/projects/{id}/source-issues/{source_id}/lifecycle-status",
             axum::routing::put(update_lifecycle_status),
@@ -529,8 +550,9 @@ async fn get_assignment_state(
             Ok(assignment) => assignment,
             Err(error) => return persistence_error_to_response(error),
         };
-        let _ = persistence::record_project_activity(
+        let _ = crate::activity_publisher::record_project_activity(
             &state.db,
+            &state.event_bus,
             &id,
             Some(&blocked_assignment.id),
             "assignment_blocked",
@@ -615,6 +637,125 @@ async fn get_project_activity(
         })
         .collect();
     Json(responses).into_response()
+}
+
+/// Bundle the current Project state into one response. Composed of the
+/// four existing per-panel reads (`project`, `planning-snapshot`,
+/// `assignment-state`, `activity`) plus the latest event-bus `sequence` at
+/// assembly time, so the Dashboard can hydrate its reactive store and
+/// immediately subscribe to the SSE stream from that sequence (ADR-0032).
+#[utoipa::path(
+    get,
+    path = "/api/projects/{id}/snapshot",
+    params(("id" = String, Path, description = "Project ID")),
+    responses(
+        (status = OK, body = ProjectSnapshotResponse),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn get_project_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let project = match persistence::get_project(&state.db, &id).await {
+        Ok(project) => with_git_summary(project),
+        Err(error) => return persistence_error_to_response(error),
+    };
+
+    // Planning snapshot may not exist yet (no Issue Source enabled or never
+    // synced). Treat missing snapshot as `None` rather than 404 for the
+    // bundle, since other panels still have data to show.
+    let planning_snapshot = match persistence::get_planning_snapshot(&state.db, &id).await {
+        Ok(snapshot) => Some(snapshot),
+        Err(PersistenceError::SnapshotNotFound(_)) => None,
+        Err(error) => return persistence_error_to_response(error),
+    };
+
+    let active_assignment = match persistence::get_active_assignment(&state.db, &id).await {
+        Ok(assignment) => assignment,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    let waiting_ready_issue_count = planning_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .eligible
+                .iter()
+                .filter(|issue| {
+                    active_assignment
+                        .as_ref()
+                        .is_none_or(|assignment| assignment.source_id != issue.source_id)
+                })
+                .count()
+        })
+        .unwrap_or_default();
+    let assignment_state = ProjectAssignmentStateResponse {
+        active_assignment,
+        waiting_ready_issue_count,
+    };
+
+    let activity_entries = match persistence::list_project_activity(&state.db, &id, 50).await {
+        Ok(entries) => entries,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    let activity: Vec<ProjectActivityEntryResponse> = activity_entries
+        .into_iter()
+        .map(|entry| ProjectActivityEntryResponse {
+            id: entry.id,
+            project_id: entry.project_id,
+            assignment_id: entry.assignment_id,
+            kind: entry.kind,
+            detail: entry.detail,
+            recorded_at: entry.recorded_at,
+        })
+        .collect();
+
+    let sequence = state.event_bus.latest_sequence(&ProjectId(id.clone()));
+    Json(ProjectSnapshotResponse {
+        snapshot: ProjectSnapshot {
+            project,
+            planning_snapshot,
+            assignment_state,
+            activity,
+        },
+        sequence,
+    })
+    .into_response()
+}
+
+/// Server-Sent Events stream of typed `ProjectEvent` deltas for one Project.
+///
+/// Honors `Last-Event-ID`: when set to a sequence still resident in the
+/// per-Project ring buffer, the stream replays events with `sequence >
+/// Last-Event-ID` before emitting live events. When the requested sequence
+/// predates the ring (or the server has restarted), the first emitted event
+/// is `Resync`, signalling the client to re-hydrate via `/snapshot`.
+async fn get_project_events(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(error) = persistence::get_project(&state.db, &id).await {
+        return persistence_error_to_response(error);
+    }
+    let last_event_id = headers
+        .get(axum::http::header::HeaderName::from_static("last-event-id"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| raw.parse::<u64>().ok());
+    let project_id = ProjectId(id);
+    let stream = state.event_bus.subscribe(&project_id, last_event_id);
+    use futures_util::StreamExt as _;
+    let sse_stream = stream.map(|sequenced| {
+        let event = axum::response::sse::Event::default()
+            .id(sequenced.sequence.to_string())
+            .json_data(&sequenced.event)
+            .unwrap_or_else(|_| axum::response::sse::Event::default());
+        Ok::<_, std::convert::Infallible>(event)
+    });
+    axum::response::sse::Sse::new(sse_stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response()
 }
 
 #[utoipa::path(
@@ -884,8 +1025,9 @@ async fn start_assignment(
         "running",
     );
     let _ = persistence::set_assignment_status(&state.db, &assignment.id, "running", None).await;
-    let _ = persistence::record_project_activity(
+    let _ = crate::activity_publisher::record_project_activity(
         &state.db,
+        &state.event_bus,
         &id,
         Some(&assignment.id),
         "assignment_started",
@@ -1043,8 +1185,9 @@ async fn start_assignment(
                 .map(|proposal| proposal.url.clone()),
             _ => assignment.status_detail.clone(),
         };
-        let _ = persistence::record_project_activity(
+        let _ = crate::activity_publisher::record_project_activity(
             &state.db,
+            &state.event_bus,
             &id,
             Some(&assignment.id),
             kind,

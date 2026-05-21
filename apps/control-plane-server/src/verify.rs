@@ -120,8 +120,9 @@ pub(crate) async fn refresh_proposal_state(
             Ok(assignment) => assignment,
             Err(error) => return persistence_error_to_response(error),
         };
-        let _ = persistence::record_project_activity(
+        let _ = crate::activity_publisher::record_project_activity(
             &state.db,
+            &state.event_bus,
             &project_id,
             Some(&updated.id),
             "assignment_completed",
@@ -131,8 +132,9 @@ pub(crate) async fn refresh_proposal_state(
                 .map(|proposal| proposal.url.as_str()),
         )
         .await;
-        let _ = persistence::record_project_activity(
+        let _ = crate::activity_publisher::record_project_activity(
             &state.db,
+            &state.event_bus,
             &project_id,
             Some(&updated.id),
             "assignment_cleanup",
@@ -171,8 +173,9 @@ pub(crate) async fn refresh_proposal_state(
                     Ok(assignment) => assignment,
                     Err(error) => return persistence_error_to_response(error),
                 };
-            let _ = persistence::record_project_activity(
+            let _ = crate::activity_publisher::record_project_activity(
                 &state.db,
+                &state.event_bus,
                 &project_id,
                 Some(&verified.id),
                 "change_proposal_verified",
@@ -203,8 +206,9 @@ pub(crate) async fn refresh_proposal_state(
                 Ok(assignment) => assignment,
                 Err(error) => return persistence_error_to_response(error),
             };
-            let _ = persistence::record_project_activity(
+            let _ = crate::activity_publisher::record_project_activity(
                 &state.db,
+                &state.event_bus,
                 &project_id,
                 Some(&failing.id),
                 "change_proposal_failing",

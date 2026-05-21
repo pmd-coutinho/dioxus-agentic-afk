@@ -209,6 +209,43 @@ pub struct ProjectActivityEntryResponse {
     pub recorded_at: String,
 }
 
+/// Bundle of Project state served as the single hydration response for the
+/// Dashboard's reactive store. Composed from the four panel-scoped GETs
+/// (`project`, `planning-snapshot`, `assignment-state`, `activity`) so the
+/// Dashboard does one round trip instead of four.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ProjectSnapshot {
+    pub project: ProjectResponse,
+    pub planning_snapshot: Option<PlanningSnapshotResponse>,
+    pub assignment_state: ProjectAssignmentStateResponse,
+    pub activity: Vec<ProjectActivityEntryResponse>,
+}
+
+/// HTTP response body for `GET /api/projects/{id}/snapshot`. Carries the
+/// monotonic `sequence` so the client can resume the SSE stream from
+/// `Last-Event-ID: <sequence>` and receive only deltas missed since.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ProjectSnapshotResponse {
+    pub snapshot: ProjectSnapshot,
+    pub sequence: u64,
+}
+
+/// Typed delta pushed over SSE to the Dashboard. Variants mirror the
+/// Activity envelope (`kind` + bounded `detail`) so the audit log and the
+/// live wire format remain a single source of truth, with `Resync` added
+/// for the ring-buffer-overflow recovery path (ADR-0032).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProjectEvent {
+    /// One Project Activity entry was appended. Carries the same fields the
+    /// `activity` REST endpoint exposes so the Dashboard can append it
+    /// directly to its activity list without an additional fetch.
+    Activity(ProjectActivityEntryResponse),
+    /// The client's `Last-Event-ID` predates the per-Project ring buffer.
+    /// The client must re-fetch `/snapshot` to recover authoritative state.
+    Resync,
+}
+
 /// RFC 7807 problem+json error response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct ProblemDetail {
