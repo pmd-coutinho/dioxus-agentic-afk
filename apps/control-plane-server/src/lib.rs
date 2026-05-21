@@ -1,3 +1,5 @@
+mod verify;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,9 +77,9 @@ impl ControlPlaneConfig {
 }
 
 #[derive(Clone)]
-struct AppState {
-    config: ControlPlaneConfig,
-    db: Db,
+pub(crate) struct AppState {
+    pub(crate) config: ControlPlaneConfig,
+    pub(crate) db: Db,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -175,6 +177,10 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route(
             "/api/projects/{id}/source-issues/{source_id}/assignment",
             post(start_assignment),
+        )
+        .route(
+            "/api/projects/{id}/assignments/{assignment_id}/refresh-proposal-state",
+            post(verify::refresh_proposal_state),
         )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
@@ -1598,7 +1604,16 @@ fn github_locator_from_url(url: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
-fn persistence_error_to_response(err: PersistenceError) -> Response {
+pub(crate) fn write_github_lifecycle_pub(
+    gh_binary_path: &std::path::Path,
+    locator: &str,
+    source_id: &str,
+    lifecycle_status: &str,
+) -> Result<(), String> {
+    write_github_lifecycle(gh_binary_path, locator, source_id, lifecycle_status)
+}
+
+pub(crate) fn persistence_error_to_response(err: PersistenceError) -> Response {
     let (status, problem_type, title) = match &err {
         PersistenceError::NotFound(_) => (
             StatusCode::NOT_FOUND,
@@ -1657,7 +1672,7 @@ fn persistence_error_to_response(err: PersistenceError) -> Response {
         .into_response()
 }
 
-fn sync_problem_response(
+pub(crate) fn sync_problem_response(
     status: StatusCode,
     problem_type: &str,
     title: &str,
