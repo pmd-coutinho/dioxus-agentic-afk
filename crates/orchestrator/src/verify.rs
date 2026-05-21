@@ -166,7 +166,7 @@ pub fn cleanup_assignment_worktree(
 ) -> Result<(), String> {
     let output = Command::new(worktrunk_binary_path)
         .current_dir(project_path)
-        .args(["remove", branch, "--yes"])
+        .args(["remove", branch, "--force"])
         .output()
         .map_err(|error| format!("failed to remove Assignment Worktree: {error}"))?;
     if !output.status.success() {
