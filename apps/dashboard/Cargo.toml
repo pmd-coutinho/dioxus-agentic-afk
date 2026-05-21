@@ -7,6 +7,6 @@ repository.workspace = true
 
 [dependencies]
 agentic-afk-contracts.workspace = true
-dioxus = { version = "=0.7.2", features = ["web"] }
+dioxus = { version = "=0.7.9", features = ["web"] }
 gloo-net = "0.6.0"
 web-sys = { version = "0.3.82", features = ["Location", "Window"] }

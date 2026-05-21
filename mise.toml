@@ -2,7 +2,7 @@
 codex = "latest"
 node = "26.1.0"
 rust = "1.94.1"
-"cargo:dioxus-cli" = "0.7.2"
+"cargo:dioxus-cli" = "0.7.9"
 
 [tasks.dev]
 description = "Run the Local Control Plane from source"
