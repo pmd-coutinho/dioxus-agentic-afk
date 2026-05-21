@@ -41,6 +41,7 @@ dependencies = [
  "agentic-afk-contracts",
  "dioxus",
  "gloo-net",
+ "serde_json",
  "web-sys",
 ]
 

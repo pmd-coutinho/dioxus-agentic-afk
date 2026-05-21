@@ -1,3 +1,7 @@
+mod project_store;
+
+use project_store::{ProjectStore, Toast, ToastKind};
+
 use agentic_afk_contracts::{
     AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueSourceCandidate,
     IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse,
@@ -48,6 +52,7 @@ enum Route {
 
 #[component]
 fn AppShell() -> Element {
+    use_context_provider(ProjectStore::new);
     rsx! {
         main { class: "min-h-screen bg-zinc-950 text-zinc-100",
             section { class: "mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-8",
@@ -59,7 +64,53 @@ fn AppShell() -> Element {
                         h1 { class: "text-3xl font-semibold", "agentic-afk" }
                     }
                 }
+                ToastRegion {}
                 Outlet::<Route> {}
+            }
+        }
+    }
+}
+
+#[component]
+fn ToastRegion() -> Element {
+    let store = use_context::<ProjectStore>();
+    let toasts = store.toasts();
+    rsx! {
+        div {
+            class: "flex flex-col gap-2",
+            role: "status",
+            "aria-live": "polite",
+            for toast in toasts.read().clone().into_iter() {
+                ToastView { store, toast }
+            }
+        }
+    }
+}
+
+#[component]
+fn ToastView(store: ProjectStore, toast: Toast) -> Element {
+    let tone = match toast.kind {
+        ToastKind::Success => "border-emerald-700 bg-emerald-950/40 text-emerald-100",
+        ToastKind::Error => "border-red-700 bg-red-950/40 text-red-100",
+    };
+    let id = toast.id;
+    rsx! {
+        div {
+            class: format!("flex items-start justify-between gap-3 rounded border px-4 py-3 text-sm {tone}"),
+            "data-toast-kind": match toast.kind {
+                ToastKind::Success => "success",
+                ToastKind::Error => "error",
+            },
+            div { class: "flex flex-col gap-0.5",
+                p { class: "font-medium", "{toast.title}" }
+                if !toast.detail.is_empty() {
+                    p { class: "text-zinc-200/80", "{toast.detail}" }
+                }
+            }
+            button {
+                class: "text-xs text-zinc-300 hover:text-zinc-100",
+                onclick: move |_| store.dismiss_toast(id),
+                "Dismiss"
             }
         }
     }
@@ -169,7 +220,12 @@ fn ProjectsSection(projects: Option<Result<Vec<ProjectResponse>, String>>) -> El
 #[component]
 fn ProjectLayout(id: String) -> Element {
     let project_resource_id = id.clone();
-    let project = use_resource(move || fetch_project(project_resource_id.clone()));
+    let store = use_context::<ProjectStore>();
+    let reload_counter = store.reload_counter();
+    let project = use_resource(move || {
+        let _ = reload_counter.read();
+        fetch_project(project_resource_id.clone())
+    });
 
     rsx! {
         div { class: "flex flex-col gap-4",
@@ -251,24 +307,7 @@ fn ProjectHeader(project: ProjectResponse) -> Element {
                         if project.trusted {
                             span { class: "text-emerald-300", "Trusted for agent execution" }
                         } else {
-                            div { class: "flex items-center gap-3",
-                                span { class: "text-zinc-400", "Not trusted" }
-                                button {
-                                    class: "rounded border border-emerald-700 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
-                                    onclick: {
-                                        let trust_project_id = project_id.clone();
-                                        move |_| {
-                                            let trust_project_id = trust_project_id.clone();
-                                            async move {
-                                                if trust_project_api(trust_project_id).await.is_ok() {
-                                                    reload_dashboard();
-                                                }
-                                            }
-                                        }
-                                    },
-                                    "Trust Project"
-                                }
-                            }
+                            TrustProjectButton { project_id: project_id.clone() }
                         }
                     }
                 }
@@ -293,6 +332,64 @@ fn ProjectHeader(project: ProjectResponse) -> Element {
                     None => rsx! {
                         p { class: "text-sm text-zinc-500", "No Git Summary" }
                     },
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn TrustProjectButton(project_id: String) -> Element {
+    use project_store::{MutationCategory, MutationKey, MutationState};
+
+    let store = use_context::<ProjectStore>();
+    let key = MutationKey::TrustProject(agentic_afk_contracts::ProjectId(project_id.clone()));
+    let pending = store.is_pending(&key);
+    let inline_error = match store.state(&key) {
+        Some(MutationState::Error {
+            category: MutationCategory::Validation,
+            title,
+            detail,
+        }) => Some((title, detail)),
+        _ => None,
+    };
+
+    rsx! {
+        div { class: "flex flex-col gap-1",
+            div { class: "flex items-center gap-3",
+                span { class: "text-zinc-400", "Not trusted" }
+                button {
+                    class: "rounded border border-emerald-700 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45 disabled:cursor-not-allowed disabled:opacity-50",
+                    disabled: pending,
+                    "data-testid": "trust-project-button",
+                    "data-mutation-pending": if pending { "true" } else { "false" },
+                    onclick: {
+                        let project_id = project_id.clone();
+                        let key = key.clone();
+                        move |_| {
+                            let project_id = project_id.clone();
+                            let key = key.clone();
+                            async move {
+                                let result = store
+                                    .mutate(key, trust_project_api(project_id.clone()))
+                                    .await;
+                                if result.is_ok() {
+                                    store.push_success(
+                                        "Project trusted",
+                                        "Agent execution is now allowed",
+                                    );
+                                }
+                            }
+                        }
+                    },
+                    if pending { "Trusting…" } else { "Trust Project" }
+                }
+            }
+            if let Some((title, detail)) = inline_error {
+                p {
+                    class: "text-xs text-red-300",
+                    "data-trust-error": "true",
+                    "{title}: {detail}"
                 }
             }
         }
@@ -331,11 +428,17 @@ fn ProjectActivity(id: String) -> Element {
 
 #[component]
 fn IssueSourcePanels(id: String) -> Element {
+    let reload = use_context::<ProjectStore>().reload_counter();
     let project_resource_id = id.clone();
-    let project = use_resource(move || fetch_project(project_resource_id.clone()));
+    let project = use_resource(move || {
+        let _ = reload.read();
+        fetch_project(project_resource_id.clone())
+    });
     let candidate_project_id = id.clone();
-    let issue_source_candidates =
-        use_resource(move || fetch_issue_source_candidates(candidate_project_id.clone()));
+    let issue_source_candidates = use_resource(move || {
+        let _ = reload.read();
+        fetch_issue_source_candidates(candidate_project_id.clone())
+    });
 
     rsx! {
         match &*project.read_unchecked() {
@@ -371,9 +474,12 @@ fn IssueSourcePanels(id: String) -> Element {
 
 #[component]
 fn AssignmentPanel(id: String) -> Element {
+    let reload = use_context::<ProjectStore>().reload_counter();
     let assignment_project_id = id.clone();
-    let assignment_state =
-        use_resource(move || fetch_assignment_state(assignment_project_id.clone()));
+    let assignment_state = use_resource(move || {
+        let _ = reload.read();
+        fetch_assignment_state(assignment_project_id.clone())
+    });
     rsx! {
         match &*assignment_state.read_unchecked() {
             Some(Ok(state)) => rsx! { AssignmentState { project_id: id.clone(), state: state.clone() } },
@@ -397,11 +503,17 @@ fn AssignmentPanel(id: String) -> Element {
 
 #[component]
 fn PlanningPanel(id: String) -> Element {
+    let reload = use_context::<ProjectStore>().reload_counter();
     let planning_project_id = id.clone();
-    let planning_snapshot =
-        use_resource(move || fetch_planning_snapshot(planning_project_id.clone()));
+    let planning_snapshot = use_resource(move || {
+        let _ = reload.read();
+        fetch_planning_snapshot(planning_project_id.clone())
+    });
     let project_resource_id = id.clone();
-    let project = use_resource(move || fetch_project(project_resource_id.clone()));
+    let project = use_resource(move || {
+        let _ = reload.read();
+        fetch_project(project_resource_id.clone())
+    });
 
     rsx! {
         match (&*planning_snapshot.read_unchecked(), &*project.read_unchecked()) {
@@ -432,8 +544,12 @@ fn PlanningPanel(id: String) -> Element {
 
 #[component]
 fn ActivitySection(id: String) -> Element {
+    let reload = use_context::<ProjectStore>().reload_counter();
     let activity_project_id = id.clone();
-    let activity = use_resource(move || fetch_project_activity(activity_project_id.clone()));
+    let activity = use_resource(move || {
+        let _ = reload.read();
+        fetch_project_activity(activity_project_id.clone())
+    });
     rsx! {
         match &*activity.read_unchecked() {
             Some(Ok(entries)) => rsx! { ActivityPanel { entries: entries.clone() } },
@@ -543,8 +659,12 @@ fn ActivityPanel(entries: Vec<ProjectActivityEntryResponse>) -> Element {
 
 #[component]
 fn IssueSourceSyncStatus(project_id: String) -> Element {
+    let reload = use_context::<ProjectStore>().reload_counter();
     let sync_project_id = project_id.clone();
-    let sync_status = use_resource(move || fetch_issue_source_sync_status(sync_project_id.clone()));
+    let sync_status = use_resource(move || {
+        let _ = reload.read();
+        fetch_issue_source_sync_status(sync_project_id.clone())
+    });
     let refresh_project_id = project_id.clone();
 
     rsx! {
@@ -1008,14 +1128,22 @@ async fn enable_issue_source(
         .map_err(|error| error.to_string())
 }
 
-async fn trust_project_api(project_id: String) -> Result<ProjectResponse, String> {
-    gloo_net::http::Request::put(&format!("/api/projects/{project_id}/trust"))
+async fn trust_project_api(
+    project_id: String,
+) -> Result<ProjectResponse, project_store::MutationFailure> {
+    let response = gloo_net::http::Request::put(&format!("/api/projects/{project_id}/trust"))
         .send()
         .await
-        .map_err(|error| error.to_string())?
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    response
         .json()
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
 }
 
 async fn start_assignment(
