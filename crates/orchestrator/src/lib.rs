@@ -1,5 +1,7 @@
 //! Process adapters owned by the Orchestrator boundary.
 
+pub mod verify;
+
 use agentic_afk_contracts::AssignmentTerminalOutcome;
 use serde_json::Value;
 use std::path::{Path, PathBuf};

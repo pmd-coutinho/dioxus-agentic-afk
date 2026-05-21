@@ -14,6 +14,16 @@ use std::path::Path;
 use std::str::FromStr;
 use uuid::Uuid;
 
+pub mod verify;
+
+/// Public re-export of the internal assignment lookup, used by sibling modules.
+pub(crate) async fn get_issue_assignment_public(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    get_issue_assignment(db, assignment_id).await
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
     #[error("project not found: {0}")]
@@ -593,7 +603,7 @@ pub async fn get_active_assignment(
     project_id: &str,
 ) -> Result<Option<IssueAssignmentResponse>, PersistenceError> {
     let id = sqlx::query_as::<_, (String,)>(
-        "SELECT id FROM issue_assignments WHERE project_id = ? AND status != 'abandoned' LIMIT 1",
+        "SELECT id FROM issue_assignments WHERE project_id = ? AND status != 'abandoned' ORDER BY rowid DESC LIMIT 1",
     )
     .bind(project_id)
     .fetch_optional(db)

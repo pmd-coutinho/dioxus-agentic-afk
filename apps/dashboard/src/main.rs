@@ -565,28 +565,56 @@ fn AssignmentState(state: ProjectAssignmentStateResponse) -> Element {
         section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
             h2 { class: "text-base font-semibold", "Issue Assignment" }
             match state.active_assignment {
-                Some(assignment) => rsx! {
-                    div { class: "mt-4 grid gap-2 text-sm",
-                        p { class: "font-medium text-zinc-100", "{assignment.source_title}" }
-                        p { class: "font-mono text-xs text-zinc-400", "{assignment.source_id}" }
-                        p { class: "text-zinc-300", "State {assignment.status}" }
-                        p { class: "break-words font-mono text-xs text-zinc-500", "{assignment.branch}" }
-                        if let Some(detail) = assignment.status_detail {
-                            p { class: "text-zinc-300", "{detail}" }
-                        }
-                        if let Some(proposal) = assignment.change_proposal {
-                            a {
-                                class: "w-fit text-emerald-300 underline decoration-emerald-800 underline-offset-4 hover:text-emerald-200",
-                                href: "{proposal.url}",
-                                target: "_blank",
-                                rel: "noreferrer",
-                                "Change Proposal {proposal.status}"
+                Some(assignment) => {
+                    let lifecycle_label = match assignment.status.as_str() {
+                        "proposal_pending" => "Change Proposal awaiting checks",
+                        "proposal_verified" => "Verified — awaiting human merge",
+                        "completed" => "Completed",
+                        other => other,
+                    };
+                    let can_refresh_proposal = matches!(
+                        assignment.status.as_str(),
+                        "proposal_pending" | "proposal_verified"
+                    );
+                    let refresh_project_id = assignment.project_id.0.clone();
+                    let refresh_assignment_id = assignment.id.clone();
+                    rsx! {
+                        div { class: "mt-4 grid gap-2 text-sm",
+                            p { class: "font-medium text-zinc-100", "{assignment.source_title}" }
+                            p { class: "font-mono text-xs text-zinc-400", "{assignment.source_id}" }
+                            p { class: "text-zinc-300", "State {lifecycle_label}" }
+                            p { class: "break-words font-mono text-xs text-zinc-500", "{assignment.branch}" }
+                            if let Some(detail) = assignment.status_detail.clone() {
+                                p { class: "text-zinc-300", "{detail}" }
+                            }
+                            if let Some(proposal) = assignment.change_proposal.clone() {
+                                a {
+                                    class: "w-fit text-emerald-300 underline decoration-emerald-800 underline-offset-4 hover:text-emerald-200",
+                                    href: "{proposal.url}",
+                                    target: "_blank",
+                                    rel: "noreferrer",
+                                    "Change Proposal {proposal.status}"
+                                }
+                            }
+                            if can_refresh_proposal {
+                                button {
+                                    class: "mt-2 w-fit rounded border border-emerald-700 px-2.5 py-1.5 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
+                                    onclick: move |_| {
+                                        let project_id = refresh_project_id.clone();
+                                        let assignment_id = refresh_assignment_id.clone();
+                                        async move {
+                                            let _ = refresh_proposal_state(project_id, assignment_id).await;
+                                            reload_dashboard();
+                                        }
+                                    },
+                                    "Refresh Proposal State"
+                                }
                             }
                         }
-                    }
-                    if state.waiting_ready_issue_count > 0 {
-                        p { class: "mt-4 border-t border-zinc-800 pt-3 text-sm text-zinc-300",
-                            "{state.waiting_ready_issue_count} eligible Ready Issue waiting for the Project assignment slot."
+                        if state.waiting_ready_issue_count > 0 {
+                            p { class: "mt-4 border-t border-zinc-800 pt-3 text-sm text-zinc-300",
+                                "{state.waiting_ready_issue_count} eligible Ready Issue waiting for the Project assignment slot."
+                            }
                         }
                     }
                 },
@@ -596,6 +624,21 @@ fn AssignmentState(state: ProjectAssignmentStateResponse) -> Element {
             }
         }
     }
+}
+
+async fn refresh_proposal_state(
+    project_id: String,
+    assignment_id: String,
+) -> Result<agentic_afk_contracts::IssueAssignmentResponse, String> {
+    gloo_net::http::Request::post(&format!(
+        "/api/projects/{project_id}/assignments/{assignment_id}/refresh-proposal-state"
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?
+    .json()
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[component]
