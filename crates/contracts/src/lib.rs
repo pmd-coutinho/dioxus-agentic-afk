@@ -38,6 +38,7 @@ pub struct CreateProjectRequest {
 pub struct ProjectResponse {
     pub id: ProjectId,
     pub path: String,
+    pub trusted: bool,
     pub git_summary: Option<GitSummary>,
     pub enabled_issue_source: Option<IssueSource>,
 }
@@ -96,6 +97,8 @@ pub struct PlanningSnapshotResponse {
     pub last_failure: Option<String>,
     pub non_ready: Vec<SourceIssueSnapshot>,
     pub blocked: Vec<SourceIssueSnapshot>,
+    pub active: Vec<SourceIssueSnapshot>,
+    pub completed: Vec<SourceIssueSnapshot>,
     pub eligible: Vec<SourceIssueSnapshot>,
 }
 
@@ -105,6 +108,7 @@ pub struct SourceIssueSnapshot {
     pub source_id: String,
     pub title: String,
     pub readiness: String,
+    pub lifecycle_status: String,
     pub parent_issue: Option<String>,
     pub issue_dependencies: Vec<String>,
     pub source_order: i64,
@@ -149,6 +153,7 @@ mod tests {
         let resp = ProjectResponse {
             id: ProjectId("550e8400-e29b-41d4-a716-446655440000".to_string()),
             path: "/home/user/my-project".to_string(),
+            trusted: false,
             git_summary: None,
             enabled_issue_source: None,
         };

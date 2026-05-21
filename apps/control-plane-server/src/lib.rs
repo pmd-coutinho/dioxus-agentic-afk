@@ -15,7 +15,8 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use std::process::Command;
 use tower_http::services::{ServeDir, ServeFile};
 use utoipa::OpenApi;
@@ -65,6 +66,11 @@ struct AppState {
     db: Db,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct SetLifecycleStatusRequest {
+    pub lifecycle_status: String,
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -73,11 +79,13 @@ struct AppState {
         create_project,
         list_projects,
         get_project,
+        trust_project,
         list_issue_source_candidates,
         enable_issue_source,
         get_issue_source_sync_status,
         sync_issue_source,
-        get_planning_snapshot
+        get_planning_snapshot,
+        update_lifecycle_status
     ),
     components(schemas(
         HealthResponse,
@@ -85,6 +93,7 @@ struct AppState {
         EffectiveConfig,
         CreateProjectRequest,
         EnableIssueSourceRequest,
+        SetLifecycleStatusRequest,
         ProjectResponse,
         IssueSource,
         IssueSourceCandidate,
@@ -111,6 +120,10 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route("/api/projects", post(create_project).get(list_projects))
         .route("/api/projects/{id}", get(get_project))
         .route(
+            "/api/projects/{id}/trust",
+            axum::routing::put(trust_project),
+        )
+        .route(
             "/api/projects/{id}/issue-source-candidates",
             get(list_issue_source_candidates),
         )
@@ -129,6 +142,10 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route(
             "/api/projects/{id}/planning-snapshot",
             get(get_planning_snapshot),
+        )
+        .route(
+            "/api/projects/{id}/source-issues/{source_id}/lifecycle-status",
+            axum::routing::put(update_lifecycle_status),
         )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
@@ -236,6 +253,26 @@ async fn list_projects(State(state): State<Arc<AppState>>) -> Response {
 )]
 async fn get_project(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match persistence::get_project(&state.db, &id).await {
+        Ok(project) => Json(with_git_summary(project)).into_response(),
+        Err(e) => persistence_error_to_response(e),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/projects/{id}/trust",
+    params(("id" = String, Path, description = "Project ID")),
+    responses(
+        (status = OK, body = ProjectResponse),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn trust_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match persistence::trust_project(&state.db, &id).await {
         Ok(project) => Json(with_git_summary(project)).into_response(),
         Err(e) => persistence_error_to_response(e),
     }
@@ -384,6 +421,135 @@ async fn get_planning_snapshot(
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/projects/{id}/source-issues/{source_id}/lifecycle-status",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+        ("source_id" = String, Path, description = "Source Issue ID")
+    ),
+    request_body = SetLifecycleStatusRequest,
+    responses(
+        (status = OK, body = SourceIssueSnapshot),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn update_lifecycle_status(
+    State(state): State<Arc<AppState>>,
+    Path((id, source_id)): Path<(String, String)>,
+    Json(request): Json<SetLifecycleStatusRequest>,
+) -> Response {
+    let project = match persistence::get_project(&state.db, &id).await {
+        Ok(project) => project,
+        Err(e) => return persistence_error_to_response(e),
+    };
+
+    let Some(source) = project.enabled_issue_source else {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:issue-source-not-enabled",
+            "Unprocessable Entity",
+            "Project has no enabled Issue Source".to_string(),
+        );
+    };
+
+    if source.kind != "local_markdown" {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:lifecycle-write-back-not-supported",
+            "Unprocessable Entity",
+            "Lifecycle write-back is only supported for local_markdown Issue Sources".to_string(),
+        );
+    }
+
+    let valid_statuses = ["ready", "claimed", "running", "blocked", "completed"];
+    if !valid_statuses.contains(&request.lifecycle_status.as_str()) {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:invalid-lifecycle-status",
+            "Unprocessable Entity",
+            format!(
+                "Invalid lifecycle_status: {}. Must be one of: ready, claimed, running, blocked, completed",
+                request.lifecycle_status
+            ),
+        );
+    }
+
+    let project_root = match std::fs::canonicalize(&project.path) {
+        Ok(path) => path,
+        Err(error) => {
+            return sync_problem_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "urn:agentic-afk:internal-error",
+                "Internal Server Error",
+                format!("failed to resolve Project path: {error}"),
+            );
+        }
+    };
+
+    let source_dir = match std::fs::canonicalize(project_root.join(&source.locator)) {
+        Ok(path) => path,
+        Err(error) => {
+            return sync_problem_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "urn:agentic-afk:internal-error",
+                "Internal Server Error",
+                format!("failed to read local markdown Issue Source: {error}"),
+            );
+        }
+    };
+
+    if !source_dir.starts_with(&project_root) {
+        return sync_problem_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "urn:agentic-afk:internal-error",
+            "Internal Server Error",
+            "local markdown Issue Source must be inside the Project path".to_string(),
+        );
+    }
+
+    let issue_path = source_dir.join(format!("{source_id}.md"));
+    let raw_text = match std::fs::read_to_string(&issue_path) {
+        Ok(text) => text,
+        Err(_) => {
+            return sync_problem_response(
+                StatusCode::NOT_FOUND,
+                "urn:agentic-afk:source-issue-not-found",
+                "Not Found",
+                format!("Source Issue not found: {source_id}"),
+            );
+        }
+    };
+
+    let updated_text = update_markdown_lifecycle_status(raw_text, &request.lifecycle_status);
+
+    if let Err(error) = std::fs::write(&issue_path, updated_text) {
+        return sync_problem_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "urn:agentic-afk:internal-error",
+            "Internal Server Error",
+            format!("failed to write Source Issue file: {error}"),
+        );
+    }
+
+    let updated_raw = match std::fs::read_to_string(&issue_path) {
+        Ok(text) => text,
+        Err(error) => {
+            return sync_problem_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "urn:agentic-afk:internal-error",
+                "Internal Server Error",
+                format!("failed to read updated Source Issue file: {error}"),
+            );
+        }
+    };
+
+    let snapshot = parse_local_markdown_issue(source_id, updated_raw, 0);
+    Json(snapshot).into_response()
+}
+
 fn read_local_markdown_issues(
     project_path: &str,
     locator: &str,
@@ -520,6 +686,7 @@ fn parse_github_issue(issue: GitHubIssue) -> SourceIssueSnapshot {
     } else {
         "not-ready".to_string()
     };
+    snapshot.lifecycle_status = "ready".to_string();
     snapshot
 }
 
@@ -536,6 +703,7 @@ fn parse_local_markdown_issue(
         .to_string();
 
     let mut readiness = "not-ready".to_string();
+    let mut lifecycle_status = "ready".to_string();
     let mut parent_issue = None;
     let mut issue_dependencies = Vec::new();
     let mut source_order = fallback_order;
@@ -553,6 +721,17 @@ fn parse_local_markdown_issue(
                     "ready".to_string()
                 } else {
                     "not-ready".to_string()
+                };
+            }
+            "lifecycle status" => {
+                let normalized = value.to_ascii_lowercase();
+                lifecycle_status = if matches!(
+                    normalized.as_str(),
+                    "claimed" | "running" | "blocked" | "completed"
+                ) {
+                    normalized
+                } else {
+                    "ready".to_string()
                 };
             }
             "parent issue" | "parent" => {
@@ -577,11 +756,63 @@ fn parse_local_markdown_issue(
         source_id,
         title,
         readiness,
+        lifecycle_status,
         parent_issue,
         issue_dependencies,
         source_order,
         raw_text,
     }
+}
+
+fn update_markdown_lifecycle_status(raw_text: String, lifecycle_status: &str) -> String {
+    let mut found = false;
+    let mut lines: Vec<String> = raw_text
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed
+                .to_ascii_lowercase()
+                .starts_with("lifecycle status")
+                && trimmed.contains(':')
+            {
+                found = true;
+                let leading_ws = &line[..line.len() - line.trim_start().len()];
+                format!("{}Lifecycle Status: {}", leading_ws, lifecycle_status)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+
+    if !found {
+        // Insert after the first heading, or at the top if there is no heading.
+        let insert_idx = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("# "))
+            .map(|idx| {
+                // Find the next blank line after the heading, or the end of the heading line.
+                let after_heading = &lines[idx + 1..];
+                after_heading
+                    .iter()
+                    .position(|l| l.trim().is_empty())
+                    .map(|blank| idx + 1 + blank)
+                    .unwrap_or(idx + 1)
+            })
+            .unwrap_or(0);
+        let leading_ws = lines.get(insert_idx).map(|l| {
+            let ws = &l[..l.len() - l.trim_start().len()];
+            if ws.is_empty() { "\n".to_string() } else { ws.to_string() }
+        });
+        let new_line = format!("Lifecycle Status: {}", lifecycle_status);
+        if let Some(ws) = leading_ws {
+            lines.insert(insert_idx, new_line);
+            lines.insert(insert_idx + 1, ws);
+        } else {
+            lines.push(new_line);
+        }
+    }
+
+    lines.join("\n")
 }
 
 fn normalize_issue_ref(value: &str) -> Option<String> {
@@ -810,6 +1041,7 @@ mod tests {
         assert_eq!(issue.source_id, "issue-10");
         assert_eq!(issue.title, "Sync local issues");
         assert_eq!(issue.readiness, "ready");
+        assert_eq!(issue.lifecycle_status, "ready");
         assert_eq!(issue.parent_issue.as_deref(), Some("8"));
         assert_eq!(issue.issue_dependencies, vec!["9", "local-3"]);
         assert_eq!(issue.source_order, 10);
@@ -826,8 +1058,67 @@ mod tests {
 
         assert_eq!(issue.title, "fallback-id");
         assert_eq!(issue.readiness, "not-ready");
+        assert_eq!(issue.lifecycle_status, "ready");
         assert_eq!(issue.parent_issue, None);
         assert!(issue.issue_dependencies.is_empty());
         assert_eq!(issue.source_order, 4);
+    }
+
+    #[test]
+    fn lifecycle_write_back_replaces_existing_line() {
+        let raw = "# Title\n\nReadiness: ready\nLifecycle Status: ready\n\nBody".to_string();
+        let updated = update_markdown_lifecycle_status(raw, "claimed");
+        assert!(updated.contains("Lifecycle Status: claimed"));
+        assert!(!updated.contains("Lifecycle Status: ready"));
+        assert!(updated.contains("Readiness: ready"));
+        assert!(updated.contains("Body"));
+    }
+
+    #[test]
+    fn lifecycle_write_back_adds_line_when_missing() {
+        let raw = "# Title\n\nReadiness: ready\n\nBody".to_string();
+        let updated = update_markdown_lifecycle_status(raw, "running");
+        assert!(updated.contains("Lifecycle Status: running"));
+        assert!(updated.contains("Readiness: ready"));
+        assert!(updated.contains("Body"));
+    }
+
+    #[test]
+    fn lifecycle_write_back_adds_line_after_title_when_no_other_metadata() {
+        let raw = "# Title\n\nBody".to_string();
+        let updated = update_markdown_lifecycle_status(raw, "blocked");
+        assert!(updated.contains("Lifecycle Status: blocked"));
+        assert!(updated.starts_with("# Title\n"));
+        assert!(updated.contains("Body"));
+    }
+
+    #[test]
+    fn lifecycle_write_back_preserves_raw_text_with_no_title() {
+        let raw = "Just body text".to_string();
+        let updated = update_markdown_lifecycle_status(raw, "completed");
+        assert!(updated.contains("Lifecycle Status: completed"));
+        assert!(updated.contains("Just body text"));
+    }
+
+    #[test]
+    fn local_markdown_parser_reads_all_lifecycle_statuses() {
+        for (value, expected) in [
+            ("claimed", "claimed"),
+            ("running", "running"),
+            ("blocked", "blocked"),
+            ("completed", "completed"),
+            ("ready", "ready"),
+            ("READY", "ready"),
+            ("CLAIMED", "claimed"),
+            ("bogus", "ready"),
+        ] {
+            let raw = format!("# Title\n\nLifecycle Status: {}\n", value);
+            let issue = parse_local_markdown_issue("id".to_string(), raw, 1);
+            assert_eq!(
+                issue.lifecycle_status, expected,
+                "lifecycle_status for input '{}' should be '{}'",
+                value, expected
+            );
+        }
     }
 }

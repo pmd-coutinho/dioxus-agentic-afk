@@ -1,7 +1,6 @@
 use agentic_afk_contracts::{
-    CreateProjectRequest, EnableIssueSourceRequest, HealthResponse, IssueSource,
-    IssueSourceCandidate, IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProblemDetail,
-    ProjectResponse,
+    CreateProjectRequest, EnableIssueSourceRequest, HealthResponse, PlanningSnapshotResponse,
+    ProblemDetail, ProjectResponse, SourceIssueSnapshot,
 };
 use agentic_afk_control_plane_server::{ControlPlaneConfig, router};
 use agentic_afk_persistence::{self as persistence};
@@ -215,6 +214,7 @@ async fn openapi_document_describes_project_api_and_problem_responses() {
     assert!(openapi["paths"]["/api/projects"]["get"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}"]["get"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/issue-source-candidates"]["get"].is_object());
+    assert!(openapi["paths"]["/api/projects/{id}/trust"]["put"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/issue-source"]["put"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/issue-source/sync"]["post"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/issue-source/sync-status"]["get"].is_object());
@@ -282,6 +282,7 @@ async fn create_project_via_api() {
     let app = test_router().await;
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -303,853 +304,9 @@ async fn create_project_via_api() {
     let project: ProjectResponse = serde_json::from_slice(&body).unwrap();
     assert_eq!(project.path, "/tmp");
     assert!(!project.id.0.is_empty());
+    assert_eq!(project.trusted, false);
     assert_eq!(project.git_summary, None);
-    assert_eq!(project.enabled_issue_source, None);
-}
-
-#[tokio::test]
-async fn issue_source_candidates_are_discovered_but_not_enabled() {
-    let (app, _db) = test_router_with_db().await;
-    let project_path = temp_project_path("issue-source-candidates");
-    std::fs::create_dir_all(project_path.join(".git")).unwrap();
-    std::fs::write(
-        project_path.join(".git/config"),
-        "[remote \"origin\"]\n    url = git@github.com:pmd-coutinho/dioxus-agentic-afk.git\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(project_path.join(".scratch/issues")).unwrap();
-
-    let create_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/projects")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&CreateProjectRequest {
-                        path: project_path.display().to_string(),
-                    })
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(create_response.status(), StatusCode::CREATED);
-    let create_body = create_response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    let project: ProjectResponse = serde_json::from_slice(&create_body).unwrap();
-    assert_eq!(project.enabled_issue_source, None);
-
-    let candidates_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/api/projects/{}/issue-source-candidates",
-                    project.id.0
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    std::fs::remove_dir_all(&project_path).unwrap();
-    assert_eq!(candidates_response.status(), StatusCode::OK);
-    let candidates_body = candidates_response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    let candidates: Vec<IssueSourceCandidate> = serde_json::from_slice(&candidates_body).unwrap();
-    assert!(candidates.iter().any(|candidate| {
-        candidate.kind == "github"
-            && candidate.locator == "pmd-coutinho/dioxus-agentic-afk"
-            && !candidate.enabled
-    }));
-    assert!(candidates.iter().any(|candidate| {
-        candidate.kind == "local_markdown"
-            && candidate.locator == ".scratch/issues"
-            && !candidate.enabled
-    }));
-}
-
-#[tokio::test]
-async fn enabled_issue_source_is_persisted_and_can_be_switched() {
-    let (app, db) = test_router_with_db().await;
-    let project = persistence::create_project(
-        &db,
-        &CreateProjectRequest {
-            path: "/tmp".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let enable_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/projects/{}/issue-source", project.id.0))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&EnableIssueSourceRequest {
-                        kind: "github".to_string(),
-                        locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
-                    })
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(enable_response.status(), StatusCode::OK);
-    let enable_body = enable_response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    let enabled_project: ProjectResponse = serde_json::from_slice(&enable_body).unwrap();
-    assert_eq!(
-        enabled_project.enabled_issue_source,
-        Some(IssueSource {
-            kind: "github".to_string(),
-            locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
-        })
-    );
-
-    let restarted_config = ControlPlaneConfig {
-        bind_address: "127.0.0.1:0".parse().unwrap(),
-        dashboard_asset_dir: "apps/dashboard/dist".into(),
-        database_url: "sqlite::memory:".into(),
-        gh_binary_path: "gh".into(),
-    };
-    let restarted_app = router(restarted_config, db.clone());
-    let switch_response = restarted_app
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/projects/{}/issue-source", project.id.0))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&EnableIssueSourceRequest {
-                        kind: "local_markdown".to_string(),
-                        locator: ".scratch/issues".to_string(),
-                    })
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(switch_response.status(), StatusCode::OK);
-    let switch_body = switch_response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    let switched_project: ProjectResponse = serde_json::from_slice(&switch_body).unwrap();
-    assert_eq!(
-        switched_project.enabled_issue_source,
-        Some(IssueSource {
-            kind: "local_markdown".to_string(),
-            locator: ".scratch/issues".to_string(),
-        })
-    );
-}
-
-#[tokio::test]
-async fn issue_source_sync_status_can_be_read_before_a_snapshot_exists() {
-    let (app, db) = test_router_with_db().await;
-    let project = persistence::create_project(
-        &db,
-        &CreateProjectRequest {
-            path: "/tmp".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-    persistence::enable_issue_source(
-        &db,
-        &project.id.0,
-        &EnableIssueSourceRequest {
-            kind: "local_markdown".to_string(),
-            locator: ".scratch/issues".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/api/projects/{}/issue-source/sync-status",
-                    project.id.0
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let status: IssueSourceSyncStatusResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        status.source,
-        IssueSource {
-            kind: "local_markdown".to_string(),
-            locator: ".scratch/issues".to_string(),
-        }
-    );
-    assert_eq!(status.last_successful_sync_at, None);
-    assert_eq!(status.last_failure, None);
-}
-
-#[tokio::test]
-async fn local_markdown_issue_source_can_be_synced_into_a_planning_snapshot() {
-    let (app, db) = test_router_with_db().await;
-    let project_path = temp_project_path("local-markdown-sync");
-    let issues_path = project_path.join(".scratch/issues");
-    std::fs::create_dir_all(&issues_path).unwrap();
-    std::fs::write(
-        issues_path.join("001-parent.md"),
-        "# Parent planning issue\n\nReadiness: not-ready\nSource Order: 1\n\n## Body\nKeep this raw text.\n",
-    )
-    .unwrap();
-    std::fs::write(
-        issues_path.join("002-blocked.md"),
-        "# Blocked ready issue\n\nReadiness: ready\nParent Issue: 001-parent\nIssue Dependencies: 003-eligible\nSource Order: 2\n",
-    )
-    .unwrap();
-    std::fs::write(
-        issues_path.join("003-eligible.md"),
-        "# Eligible ready issue\n\nReadiness: ready\nParent Issue: 001-parent\nSource Order: 3\n",
-    )
-    .unwrap();
-
-    let project = persistence::create_project(
-        &db,
-        &CreateProjectRequest {
-            path: project_path.display().to_string(),
-        },
-    )
-    .await
-    .unwrap();
-    persistence::enable_issue_source(
-        &db,
-        &project.id.0,
-        &EnableIssueSourceRequest {
-            kind: "local_markdown".to_string(),
-            locator: ".scratch/issues".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let sync_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(sync_response.status(), StatusCode::OK);
-
-    let snapshot_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/projects/{}/planning-snapshot", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    std::fs::remove_dir_all(&project_path).unwrap();
-    assert_eq!(snapshot_response.status(), StatusCode::OK);
-    let body = snapshot_response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(snapshot.source.kind, "local_markdown");
-    assert!(snapshot.last_successful_sync_at.is_some());
-    assert_eq!(snapshot.last_failure, None);
-    assert_eq!(snapshot.non_ready.len(), 1);
-    assert_eq!(snapshot.blocked.len(), 1);
-    assert_eq!(snapshot.eligible.len(), 1);
-    assert_eq!(snapshot.non_ready[0].source_id, "001-parent");
-    assert_eq!(snapshot.non_ready[0].title, "Parent planning issue");
-    assert_eq!(snapshot.non_ready[0].source_order, 1);
-    assert!(
-        snapshot.non_ready[0]
-            .raw_text
-            .contains("Keep this raw text.")
-    );
-    assert_eq!(snapshot.blocked[0].issue_dependencies, vec!["003-eligible"]);
-    assert_eq!(
-        snapshot.eligible[0].parent_issue.as_deref(),
-        Some("001-parent")
-    );
-}
-
-#[tokio::test]
-async fn github_issue_source_can_be_synced_into_a_planning_snapshot() {
-    let gh = write_fake_gh(
-        "fake-gh-github-sync",
-        r#"#!/bin/sh
-case "$1 $2" in
-  "auth status")
-    exit 0
-    ;;
-  "issue list")
-    cat <<'JSON'
-[
-  {
-    "number": 8,
-    "title": "Parent GitHub issue",
-    "body": "Readiness: not-ready\nSource Order: 1\n\n## Body\nKeep this GitHub raw text.",
-    "labels": []
-  },
-  {
-    "number": 9,
-    "title": "Dependency ready issue",
-    "body": "Parent Issue: #8\nSource Order: 2",
-    "labels": [{"name": "ready-for-agent"}]
-  },
-  {
-    "number": 11,
-    "title": "Blocked GitHub ready issue",
-    "body": "Parent Issue: #8\nIssue Dependencies: #9, #10\nSource Order: 3",
-    "labels": [{"name": "ready-for-agent"}]
-  }
-]
-JSON
-    exit 0
-    ;;
-esac
-exit 1
-"#,
-    );
-    let (app, db) = test_router_with_gh(gh.clone()).await;
-    let project = persistence::create_project(
-        &db,
-        &CreateProjectRequest {
-            path: "/tmp".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-    persistence::enable_issue_source(
-        &db,
-        &project.id.0,
-        &EnableIssueSourceRequest {
-            kind: "github".to_string(),
-            locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let sync_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(sync_response.status(), StatusCode::OK);
-
-    let snapshot_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/projects/{}/planning-snapshot", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let _ = std::fs::remove_file(&gh);
-    assert_eq!(snapshot_response.status(), StatusCode::OK);
-    let body = snapshot_response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(snapshot.source.kind, "github");
-    assert_eq!(snapshot.source.locator, "pmd-coutinho/dioxus-agentic-afk");
-    assert!(snapshot.last_successful_sync_at.is_some());
-    assert_eq!(snapshot.last_failure, None);
-    assert_eq!(snapshot.non_ready.len(), 1);
-    assert_eq!(snapshot.blocked.len(), 1);
-    assert_eq!(snapshot.eligible.len(), 1);
-    assert_eq!(snapshot.non_ready[0].source_id, "8");
-    assert_eq!(snapshot.non_ready[0].title, "Parent GitHub issue");
-    assert!(
-        snapshot.non_ready[0]
-            .raw_text
-            .contains("Keep this GitHub raw text.")
-    );
-    assert_eq!(snapshot.eligible[0].source_id, "9");
-    assert_eq!(snapshot.blocked[0].source_id, "11");
-    assert_eq!(snapshot.blocked[0].parent_issue.as_deref(), Some("8"));
-    assert_eq!(snapshot.blocked[0].issue_dependencies, vec!["9", "10"]);
-}
-
-#[tokio::test]
-async fn github_auth_failure_preserves_last_successful_snapshot() {
-    let gh = write_fake_gh(
-        "fake-gh-github-auth-failure",
-        r#"#!/bin/sh
-case "$1 $2" in
-  "auth status")
-    exit 0
-    ;;
-  "issue list")
-    cat <<'JSON'
-[
-  {
-    "number": 11,
-    "title": "Still visible GitHub issue",
-    "body": "Source Order: 1",
-    "labels": [{"name": "ready-for-agent"}]
-  }
-]
-JSON
-    exit 0
-    ;;
-esac
-exit 1
-"#,
-    );
-    let (app, db) = test_router_with_gh(gh.clone()).await;
-    let project = persistence::create_project(
-        &db,
-        &CreateProjectRequest {
-            path: "/tmp".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-    persistence::enable_issue_source(
-        &db,
-        &project.id.0,
-        &EnableIssueSourceRequest {
-            kind: "github".to_string(),
-            locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let first_sync = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(first_sync.status(), StatusCode::OK);
-
-    std::fs::write(
-        &gh,
-        r#"#!/bin/sh
-case "$1 $2" in
-  "auth status")
-    echo "not logged in" >&2
-    exit 1
-    ;;
-esac
-exit 1
-"#,
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        let mut permissions = std::fs::metadata(&gh).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&gh, permissions).unwrap();
-    }
-
-    let failed_sync = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(failed_sync.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        failed_sync.headers().get("content-type").unwrap(),
-        "application/problem+json"
-    );
-    let failed_body = failed_sync.into_body().collect().await.unwrap().to_bytes();
-    let problem: ProblemDetail = serde_json::from_slice(&failed_body).unwrap();
-    assert!(problem.detail.contains("gh is not authenticated"));
-
-    let snapshot_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/projects/{}/planning-snapshot", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let _ = std::fs::remove_file(&gh);
-    assert_eq!(snapshot_response.status(), StatusCode::OK);
-    let body = snapshot_response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(snapshot.eligible.len(), 1);
-    assert_eq!(snapshot.eligible[0].title, "Still visible GitHub issue");
-    assert!(
-        snapshot
-            .last_failure
-            .as_deref()
-            .is_some_and(|failure| failure.contains("gh is not authenticated"))
-    );
-}
-
-#[tokio::test]
-async fn github_sync_reports_missing_and_unavailable_gh() {
-    let (missing_app, missing_db) =
-        test_router_with_gh(temp_project_path("missing-gh-binary")).await;
-    let missing_project = persistence::create_project(
-        &missing_db,
-        &CreateProjectRequest {
-            path: "/tmp".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-    persistence::enable_issue_source(
-        &missing_db,
-        &missing_project.id.0,
-        &EnableIssueSourceRequest {
-            kind: "github".to_string(),
-            locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let missing_response = missing_app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "/api/projects/{}/issue-source/sync",
-                    missing_project.id.0
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(missing_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let missing_body = missing_response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    let missing_problem: ProblemDetail = serde_json::from_slice(&missing_body).unwrap();
-    assert!(
-        missing_problem
-            .detail
-            .contains("failed to run gh auth status")
-    );
-
-    let gh = write_fake_gh(
-        "fake-gh-github-unavailable",
-        r#"#!/bin/sh
-case "$1 $2" in
-  "auth status")
-    exit 0
-    ;;
-  "issue list")
-    echo "network unavailable" >&2
-    exit 1
-    ;;
-esac
-exit 1
-"#,
-    );
-    let (unavailable_app, unavailable_db) = test_router_with_gh(gh.clone()).await;
-    let unavailable_project = persistence::create_project(
-        &unavailable_db,
-        &CreateProjectRequest {
-            path: "/tmp".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-    persistence::enable_issue_source(
-        &unavailable_db,
-        &unavailable_project.id.0,
-        &EnableIssueSourceRequest {
-            kind: "github".to_string(),
-            locator: "pmd-coutinho/dioxus-agentic-afk".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let unavailable_response = unavailable_app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "/api/projects/{}/issue-source/sync",
-                    unavailable_project.id.0
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let _ = std::fs::remove_file(&gh);
-    assert_eq!(
-        unavailable_response.status(),
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    let unavailable_body = unavailable_response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    let unavailable_problem: ProblemDetail = serde_json::from_slice(&unavailable_body).unwrap();
-    assert!(
-        unavailable_problem
-            .detail
-            .contains("failed to sync GitHub Issue Source")
-    );
-    assert!(unavailable_problem.detail.contains("network unavailable"));
-}
-
-#[tokio::test]
-async fn failed_local_markdown_sync_preserves_last_successful_snapshot() {
-    let (app, db) = test_router_with_db().await;
-    let project_path = temp_project_path("local-markdown-sync-failure");
-    let issues_path = project_path.join(".scratch/issues");
-    std::fs::create_dir_all(&issues_path).unwrap();
-    std::fs::write(
-        issues_path.join("001-ready.md"),
-        "# Still visible\n\nReadiness: ready\nSource Order: 1\n",
-    )
-    .unwrap();
-    let project = persistence::create_project(
-        &db,
-        &CreateProjectRequest {
-            path: project_path.display().to_string(),
-        },
-    )
-    .await
-    .unwrap();
-    persistence::enable_issue_source(
-        &db,
-        &project.id.0,
-        &EnableIssueSourceRequest {
-            kind: "local_markdown".to_string(),
-            locator: ".scratch/issues".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let first_sync = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(first_sync.status(), StatusCode::OK);
-
-    std::fs::remove_dir_all(&issues_path).unwrap();
-    let failed_sync = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(failed_sync.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        failed_sync.headers().get("content-type").unwrap(),
-        "application/problem+json"
-    );
-
-    let snapshot_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/projects/{}/planning-snapshot", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    std::fs::remove_dir_all(&project_path).unwrap();
-    assert_eq!(snapshot_response.status(), StatusCode::OK);
-    let body = snapshot_response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(snapshot.eligible.len(), 1);
-    assert_eq!(snapshot.eligible[0].title, "Still visible");
-    assert!(snapshot.last_successful_sync_at.is_some());
-    assert!(
-        snapshot
-            .last_failure
-            .as_deref()
-            .is_some_and(|failure| failure.contains("failed to read local markdown Issue Source"))
-    );
-}
-
-#[tokio::test]
-async fn enable_issue_source_rejects_unknown_kind_with_problem_json() {
-    let (app, db) = test_router_with_db().await;
-    let project = persistence::create_project(
-        &db,
-        &CreateProjectRequest {
-            path: "/tmp".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/projects/{}/issue-source", project.id.0))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&EnableIssueSourceRequest {
-                        kind: "spreadsheet".to_string(),
-                        locator: "backlog".to_string(),
-                    })
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        response.headers().get("content-type").unwrap(),
-        "application/problem+json"
-    );
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
-    assert_eq!(problem.status, 422);
-    assert_eq!(problem.problem_type, "urn:agentic-afk:invalid-issue-source");
-}
-
-#[tokio::test]
-async fn git_backed_project_response_includes_derived_git_summary() {
-    let app = test_router().await;
-    let project_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/projects")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&CreateProjectRequest {
-                        path: project_path.display().to_string(),
-                    })
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let project: ProjectResponse = serde_json::from_slice(&body).unwrap();
-    let git_summary = project
-        .git_summary
-        .expect("Git-backed Project should include Git Summary");
-    assert!(git_summary.branch.is_some());
-    assert!(git_summary.head.is_some());
-}
-
-#[tokio::test]
-async fn project_reads_include_derived_git_summary_without_persisting_it() {
-    let (app, db) = test_router_with_db().await;
-    let project_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    let persisted = persistence::create_project(
-        &db,
-        &CreateProjectRequest {
-            path: project_path.display().to_string(),
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(persisted.git_summary, None);
+    assert_eq!(project.trusted, false);
 
     let list_response = app
         .clone()
@@ -1169,12 +326,12 @@ async fn project_reads_include_derived_git_summary_without_persisting_it() {
         .unwrap()
         .to_bytes();
     let projects: Vec<ProjectResponse> = serde_json::from_slice(&list_body).unwrap();
-    assert!(projects[0].git_summary.is_some());
+    assert_eq!(projects[0].trusted, false);
 
     let get_response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/projects/{}", persisted.id.0))
+                .uri(format!("/api/projects/{}", project.id.0))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1183,7 +340,7 @@ async fn project_reads_include_derived_git_summary_without_persisting_it() {
     assert_eq!(get_response.status(), StatusCode::OK);
     let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
     let project: ProjectResponse = serde_json::from_slice(&get_body).unwrap();
-    assert!(project.git_summary.is_some());
+    assert_eq!(project.trusted, false);
 }
 
 #[tokio::test]
@@ -1195,6 +352,7 @@ async fn malformed_git_metadata_returns_graceful_no_summary_state() {
     std::fs::write(project_path.join(".git"), "not a gitdir").unwrap();
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1202,7 +360,7 @@ async fn malformed_git_metadata_returns_graceful_no_summary_state() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&CreateProjectRequest {
-                        path: project_path.display().to_string(),
+                        path: "/tmp".to_string(),
                     })
                     .unwrap(),
                 ))
@@ -1268,6 +426,7 @@ async fn create_project_invalid_path_returns_problem_json() {
     let app = test_router().await;
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1275,7 +434,7 @@ async fn create_project_invalid_path_returns_problem_json() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&CreateProjectRequest {
-                        path: "/nonexistent/path".to_string(),
+                        path: "/nonexistent/path/that/does/not/exist".to_string(),
                     })
                     .unwrap(),
                 ))
@@ -1346,4 +505,713 @@ async fn create_duplicate_project_returns_conflict() {
     let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
     assert_eq!(problem.status, 409);
     assert_eq!(problem.problem_type, "urn:agentic-afk:duplicate");
+}
+
+#[tokio::test]
+async fn trust_project_via_api() {
+    let app = test_router().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&CreateProjectRequest {
+                        path: "/tmp".to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let project: ProjectResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(project.trusted, false);
+
+    let trust_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/trust", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(trust_response.status(), StatusCode::OK);
+    let trust_body = trust_response.into_body().collect().await.unwrap().to_bytes();
+    let trusted_project: ProjectResponse = serde_json::from_slice(&trust_body).unwrap();
+    assert_eq!(trusted_project.trusted, true);
+    assert_eq!(trusted_project.id, project.id);
+}
+
+#[tokio::test]
+async fn trust_project_is_idempotent() {
+    let app = test_router().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&CreateProjectRequest {
+                        path: "/tmp".to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let project: ProjectResponse = serde_json::from_slice(&body).unwrap();
+
+    for _ in 0..2 {
+        let trust_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/projects/{}/trust", project.id.0))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(trust_response.status(), StatusCode::OK);
+        let trust_body = trust_response.into_body().collect().await.unwrap().to_bytes();
+        let trusted_project: ProjectResponse = serde_json::from_slice(&trust_body).unwrap();
+        assert_eq!(trusted_project.trusted, true);
+    }
+}
+
+#[tokio::test]
+async fn trust_nonexistent_project_returns_404() {
+    let app = test_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/projects/nonexistent-id/trust")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/problem+json"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem.status, 404);
+    assert_eq!(problem.problem_type, "urn:agentic-afk:not-found");
+}
+
+#[tokio::test]
+async fn project_list_includes_trusted_field() {
+    let app = test_router().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&CreateProjectRequest {
+                        path: "/tmp".to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let created: ProjectResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created.trusted, false);
+
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/trust", created.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/projects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_body = list_response.into_body().collect().await.unwrap().to_bytes();
+    let projects: Vec<ProjectResponse> = serde_json::from_slice(&list_body).unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].trusted, true);
+
+    let get_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}", created.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
+    let project: ProjectResponse = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(project.trusted, true);
+}
+
+#[tokio::test]
+async fn git_summary_and_trust_are_both_returned() {
+    let app = test_router().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&CreateProjectRequest {
+                        path: "/tmp".to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let created: ProjectResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created.trusted, false);
+    assert_eq!(created.git_summary, None);
+
+    let trust_response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/trust", created.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(trust_response.status(), StatusCode::OK);
+    let trust_body = trust_response.into_body().collect().await.unwrap().to_bytes();
+    let trusted: ProjectResponse = serde_json::from_slice(&trust_body).unwrap();
+    assert_eq!(trusted.trusted, true);
+    assert_eq!(trusted.git_summary, None);
+}
+
+fn setup_local_markdown_project(name: &str) -> (PathBuf, PathBuf) {
+    let project_path = temp_project_path(name);
+    let issues_dir = project_path.join(".scratch/issues");
+    std::fs::create_dir_all(&issues_dir).unwrap();
+    (project_path, issues_dir)
+}
+
+async fn create_and_enable_local_markdown_project(
+    app: &axum::Router,
+    project_path: &std::path::Path,
+) -> ProjectResponse {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&CreateProjectRequest {
+                        path: project_path.display().to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let project: ProjectResponse = serde_json::from_slice(&body).unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/issue-source", project.id.0))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&EnableIssueSourceRequest {
+                        kind: "local_markdown".to_string(),
+                        locator: ".scratch/issues".to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    project
+}
+
+#[tokio::test]
+async fn lifecycle_status_write_back_updates_markdown_file() {
+    let (project_path, issues_dir) = setup_local_markdown_project("lifecycle-write-back");
+    let issue_path = issues_dir.join("test-issue.md");
+    std::fs::write(
+        &issue_path,
+        "# Test Issue\n\nReadiness: ready\n\nBody text here.\n",
+    )
+    .unwrap();
+
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let config = ControlPlaneConfig {
+        bind_address: "127.0.0.1:0".parse().unwrap(),
+        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
+    };
+    let app = router(config, db.clone());
+
+    let project = create_and_enable_local_markdown_project(&app, &project_path).await;
+
+    // Sync first so the snapshot exists
+    let sync_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_response.status(), StatusCode::OK);
+
+    // Update lifecycle status
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/projects/{}/source-issues/test-issue/lifecycle-status",
+                    project.id.0
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"lifecycle_status":"claimed"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let snapshot: SourceIssueSnapshot = serde_json::from_slice(&body).unwrap();
+    assert_eq!(snapshot.lifecycle_status, "claimed");
+    assert_eq!(snapshot.source_id, "test-issue");
+
+    // Verify file was updated
+    let updated_raw = std::fs::read_to_string(&issue_path).unwrap();
+    assert!(updated_raw.contains("Lifecycle Status: claimed"));
+    assert!(!updated_raw.contains("Lifecycle Status: ready"));
+    assert!(updated_raw.contains("Readiness: ready"));
+    assert!(updated_raw.contains("Body text here."));
+
+    std::fs::remove_dir_all(&project_path).unwrap();
+}
+
+#[tokio::test]
+async fn planning_snapshot_reflects_lifecycle_status_exclusions() {
+    let (project_path, issues_dir) = setup_local_markdown_project("lifecycle-snapshot");
+    std::fs::write(
+        issues_dir.join("eligible.md"),
+        "# Eligible\n\nReadiness: ready\n\nBody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        issues_dir.join("claimed.md"),
+        "# Claimed\n\nReadiness: ready\nLifecycle Status: claimed\n\nBody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        issues_dir.join("completed.md"),
+        "# Completed\n\nReadiness: ready\nLifecycle Status: completed\n\nBody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        issues_dir.join("not-ready.md"),
+        "# Not Ready\n\nReadiness: not-ready\n\nBody\n",
+    )
+    .unwrap();
+
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let config = ControlPlaneConfig {
+        bind_address: "127.0.0.1:0".parse().unwrap(),
+        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
+    };
+    let app = router(config, db.clone());
+
+    let project = create_and_enable_local_markdown_project(&app, &project_path).await;
+
+    let sync_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_response.status(), StatusCode::OK);
+
+    let snapshot_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/projects/{}/planning-snapshot",
+                    project.id.0
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot_response.status(), StatusCode::OK);
+    let body = snapshot_response.into_body().collect().await.unwrap().to_bytes();
+    let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
+
+    let eligible_ids: Vec<_> = snapshot.eligible.iter().map(|i| i.source_id.clone()).collect();
+    let active_ids: Vec<_> = snapshot.active.iter().map(|i| i.source_id.clone()).collect();
+    let completed_ids: Vec<_> = snapshot.completed.iter().map(|i| i.source_id.clone()).collect();
+    let non_ready_ids: Vec<_> = snapshot.non_ready.iter().map(|i| i.source_id.clone()).collect();
+
+    assert!(eligible_ids.contains(&"eligible".to_string()));
+    assert!(active_ids.contains(&"claimed".to_string()));
+    assert!(completed_ids.contains(&"completed".to_string()));
+    assert!(non_ready_ids.contains(&"not-ready".to_string()));
+
+    std::fs::remove_dir_all(&project_path).unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_status_write_back_preserves_raw_text() {
+    let (project_path, issues_dir) = setup_local_markdown_project("lifecycle-preserve");
+    let original = "# Title\n\nReadiness: ready\nParent Issue: #5\n\nKeep this paragraph.\n\n- list item\n";
+    std::fs::write(issues_dir.join("preserve.md"), original).unwrap();
+
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let config = ControlPlaneConfig {
+        bind_address: "127.0.0.1:0".parse().unwrap(),
+        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
+    };
+    let app = router(config, db.clone());
+
+    let project = create_and_enable_local_markdown_project(&app, &project_path).await;
+
+    let sync_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/projects/{}/source-issues/preserve/lifecycle-status",
+                    project.id.0
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"lifecycle_status":"blocked"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let updated_raw = std::fs::read_to_string(issues_dir.join("preserve.md")).unwrap();
+    assert!(updated_raw.contains("Lifecycle Status: blocked"));
+    assert!(updated_raw.contains("Keep this paragraph."));
+    assert!(updated_raw.contains("- list item"));
+    assert!(updated_raw.contains("Parent Issue: #5"));
+
+    std::fs::remove_dir_all(&project_path).unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_status_write_back_rejects_nonexistent_project() {
+    let app = test_router().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/projects/nonexistent-id/source-issues/issue/lifecycle-status")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"lifecycle_status":"claimed"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem.status, 404);
+}
+
+#[tokio::test]
+async fn lifecycle_status_write_back_rejects_nonexistent_issue() {
+    let (project_path, _issues_dir) = setup_local_markdown_project("lifecycle-no-issue");
+
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let config = ControlPlaneConfig {
+        bind_address: "127.0.0.1:0".parse().unwrap(),
+        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
+    };
+    let app = router(config, db.clone());
+
+    let project = create_and_enable_local_markdown_project(&app, &project_path).await;
+
+    let sync_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/projects/{}/source-issues/missing-issue/lifecycle-status",
+                    project.id.0
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"lifecycle_status":"claimed"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem.status, 404);
+
+    std::fs::remove_dir_all(&project_path).unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_status_write_back_rejects_invalid_status() {
+    let (project_path, issues_dir) = setup_local_markdown_project("lifecycle-invalid");
+    std::fs::write(
+        issues_dir.join("issue.md"),
+        "# Issue\n\nReadiness: ready\n\nBody\n",
+    )
+    .unwrap();
+
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let config = ControlPlaneConfig {
+        bind_address: "127.0.0.1:0".parse().unwrap(),
+        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
+    };
+    let app = router(config, db.clone());
+
+    let project = create_and_enable_local_markdown_project(&app, &project_path).await;
+
+    let sync_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/projects/{}/source-issues/issue/lifecycle-status",
+                    project.id.0
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"lifecycle_status":"bogus"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem.status, 422);
+    assert_eq!(problem.problem_type, "urn:agentic-afk:invalid-lifecycle-status");
+
+    std::fs::remove_dir_all(&project_path).unwrap();
+}
+
+#[tokio::test]
+async fn lifecycle_status_write_back_rejects_github_source() {
+    let (project_path, _issues_dir) = setup_local_markdown_project("lifecycle-github");
+
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let config = ControlPlaneConfig {
+        bind_address: "127.0.0.1:0".parse().unwrap(),
+        dashboard_asset_dir: "apps/dashboard/dist".into(),
+        database_url: "sqlite::memory:".into(),
+        gh_binary_path: "gh".into(),
+    };
+    let app = router(config, db.clone());
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&CreateProjectRequest {
+                        path: project_path.display().to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let body = create_response.into_body().collect().await.unwrap().to_bytes();
+    let project: ProjectResponse = serde_json::from_slice(&body).unwrap();
+
+    // Enable github source
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/issue-source", project.id.0))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&EnableIssueSourceRequest {
+                        kind: "github".to_string(),
+                        locator: "owner/repo".to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/projects/{}/source-issues/1/lifecycle-status",
+                    project.id.0
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"lifecycle_status":"claimed"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem.status, 422);
+    assert_eq!(
+        problem.problem_type,
+        "urn:agentic-afk:lifecycle-write-back-not-supported"
+    );
+
+    std::fs::remove_dir_all(&project_path).unwrap();
 }

@@ -180,7 +180,12 @@ fn ProjectRow(project: ProjectResponse) -> Element {
     rsx! {
         li { class: "grid gap-2 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
             div { class: "flex flex-col gap-1 md:flex-row md:items-baseline md:justify-between",
-                a { class: "break-words font-mono text-sm text-emerald-200 hover:text-emerald-100", href: "{detail_href}", "{project.path}" }
+                div { class: "flex items-center gap-2",
+                    a { class: "break-words font-mono text-sm text-emerald-200 hover:text-emerald-100", href: "{detail_href}", "{project.path}" }
+                    if project.trusted {
+                        span { class: "rounded bg-emerald-900/40 px-1.5 py-0.5 text-xs text-emerald-200", "Trusted" }
+                    }
+                }
                 p { class: "font-mono text-xs text-zinc-500", "{project.id.0}" }
             }
             match project.git_summary {
@@ -211,6 +216,33 @@ fn ProjectDetail(project: ProjectResponse) -> Element {
                 dl { class: "mt-4 grid gap-3 text-sm",
                     SettingRow { label: "Project path".to_string(), value: project.path.clone() }
                     SettingRow { label: "Project ID".to_string(), value: project.id.0.clone() }
+                    div { class: "grid gap-1 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
+                        dt { class: "text-zinc-400", "Trust" }
+                        dd { class: "break-words font-mono text-zinc-100",
+                            if project.trusted {
+                                span { class: "text-emerald-300", "Trusted for agent execution" }
+                            } else {
+                                div { class: "flex items-center gap-3",
+                                    span { class: "text-zinc-400", "Not trusted" }
+                                    button {
+                                        class: "rounded border border-emerald-700 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
+                                        onclick: {
+                                            let trust_project_id = project_id.clone();
+                                            move |_| {
+                                                let trust_project_id = trust_project_id.clone();
+                                                async move {
+                                                    if trust_project_api(trust_project_id).await.is_ok() {
+                                                        reload_dashboard();
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "Trust Project"
+                                    }
+                                }
+                            }
+                        }
+                    }
                     match project.enabled_issue_source.clone() {
                         Some(source) => rsx! {
                             SettingRow {
@@ -399,14 +431,22 @@ fn PlanningSnapshot(snapshot: PlanningSnapshotResponse) -> Element {
                 },
                 None => rsx! {},
             }
-            div { class: "mt-4 grid gap-4 lg:grid-cols-3",
+            div { class: "mt-4 grid gap-4 lg:grid-cols-5",
                 PlanningGroup {
                     title: "Eligible Ready Issues".to_string(),
                     issues: snapshot.eligible,
                 }
                 PlanningGroup {
+                    title: "Active Issues".to_string(),
+                    issues: snapshot.active,
+                }
+                PlanningGroup {
                     title: "Blocked Ready Issues".to_string(),
                     issues: snapshot.blocked,
+                }
+                PlanningGroup {
+                    title: "Completed Issues".to_string(),
+                    issues: snapshot.completed,
                 }
                 PlanningGroup {
                     title: "Non-ready Source Issues".to_string(),
@@ -540,6 +580,16 @@ async fn enable_issue_source(
     gloo_net::http::Request::put(&format!("/api/projects/{project_id}/issue-source"))
         .json(&EnableIssueSourceRequest { kind, locator })
         .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .json()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn trust_project_api(project_id: String) -> Result<ProjectResponse, String> {
+    gloo_net::http::Request::put(&format!("/api/projects/{project_id}/trust"))
         .send()
         .await
         .map_err(|error| error.to_string())?

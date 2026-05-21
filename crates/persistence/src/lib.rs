@@ -93,7 +93,7 @@ pub async fn create_project(
 
     let id = Uuid::new_v4().to_string();
 
-    sqlx::query("INSERT INTO projects (id, path) VALUES (?, ?)")
+    sqlx::query("INSERT INTO projects (id, path, trusted) VALUES (?, ?, 0)")
         .bind(&id)
         .bind(&normalized_path)
         .execute(db)
@@ -110,6 +110,7 @@ pub async fn create_project(
     Ok(ProjectResponse {
         id: ProjectId(id),
         path: normalized_path,
+        trusted: false,
         git_summary: None,
         enabled_issue_source: None,
     })
@@ -117,9 +118,9 @@ pub async fn create_project(
 
 /// List all Projects.
 pub async fn list_projects(db: &Db) -> Result<Vec<ProjectResponse>, PersistenceError> {
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>)>(
         r#"
-        SELECT projects.id, projects.path, project_issue_sources.kind, project_issue_sources.locator
+        SELECT projects.id, projects.path, projects.trusted, project_issue_sources.kind, project_issue_sources.locator
         FROM projects
         LEFT JOIN project_issue_sources ON project_issue_sources.project_id = projects.id
         ORDER BY projects.path
@@ -130,9 +131,10 @@ pub async fn list_projects(db: &Db) -> Result<Vec<ProjectResponse>, PersistenceE
 
     Ok(rows
         .into_iter()
-        .map(|(id, path, kind, locator)| ProjectResponse {
+        .map(|(id, path, trusted, kind, locator)| ProjectResponse {
             id: ProjectId(id),
             path,
+            trusted: trusted != 0,
             git_summary: None,
             enabled_issue_source: issue_source_from_row(kind, locator),
         })
@@ -141,9 +143,9 @@ pub async fn list_projects(db: &Db) -> Result<Vec<ProjectResponse>, PersistenceE
 
 /// Get a single Project by ID.
 pub async fn get_project(db: &Db, id: &str) -> Result<ProjectResponse, PersistenceError> {
-    let row = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+    let row = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>)>(
         r#"
-        SELECT projects.id, projects.path, project_issue_sources.kind, project_issue_sources.locator
+        SELECT projects.id, projects.path, projects.trusted, project_issue_sources.kind, project_issue_sources.locator
         FROM projects
         LEFT JOIN project_issue_sources ON project_issue_sources.project_id = projects.id
         WHERE projects.id = ?
@@ -154,14 +156,32 @@ pub async fn get_project(db: &Db, id: &str) -> Result<ProjectResponse, Persisten
     .await?;
 
     match row {
-        Some((id, path, kind, locator)) => Ok(ProjectResponse {
+        Some((id, path, trusted, kind, locator)) => Ok(ProjectResponse {
             id: ProjectId(id),
             path,
+            trusted: trusted != 0,
             git_summary: None,
             enabled_issue_source: issue_source_from_row(kind, locator),
         }),
         None => Err(PersistenceError::NotFound(id.to_string())),
     }
+}
+
+/// Mark a Project as trusted for agent execution.
+pub async fn trust_project(
+    db: &Db,
+    project_id: &str,
+) -> Result<ProjectResponse, PersistenceError> {
+    let result = sqlx::query("UPDATE projects SET trusted = 1 WHERE id = ?")
+        .bind(project_id)
+        .execute(db)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(PersistenceError::NotFound(project_id.to_string()));
+    }
+
+    get_project(db, project_id).await
 }
 
 /// Deliberately enable or switch the single Issue Source for a Project.
@@ -215,18 +235,20 @@ pub async fn replace_planning_snapshot(
                 source_id,
                 title,
                 readiness,
+                lifecycle_status,
                 parent_issue,
                 issue_dependencies_json,
                 source_order,
                 raw_text
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(project_id)
         .bind(&issue.source_id)
         .bind(&issue.title)
         .bind(&issue.readiness)
+        .bind(&issue.lifecycle_status)
         .bind(&issue.parent_issue)
         .bind(dependencies_json)
         .bind(issue.source_order)
@@ -362,9 +384,9 @@ pub async fn get_planning_snapshot(
         return Err(PersistenceError::SnapshotNotFound(project_id.to_string()));
     };
 
-    let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String, i64, String)>(
+    let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, String, i64, String)>(
         r#"
-        SELECT source_id, title, readiness, parent_issue, issue_dependencies_json, source_order, raw_text
+        SELECT source_id, title, readiness, lifecycle_status, parent_issue, issue_dependencies_json, source_order, raw_text
         FROM planning_snapshot_issues
         WHERE project_id = ?
         ORDER BY source_order, source_id
@@ -381,6 +403,7 @@ pub async fn get_planning_snapshot(
                 source_id,
                 title,
                 readiness,
+                lifecycle_status,
                 parent_issue,
                 dependencies_json,
                 source_order,
@@ -392,6 +415,7 @@ pub async fn get_planning_snapshot(
                     source_id,
                     title,
                     readiness,
+                    lifecycle_status,
                     parent_issue,
                     issue_dependencies,
                     source_order,
@@ -408,11 +432,20 @@ pub async fn get_planning_snapshot(
         .collect::<std::collections::HashSet<_>>();
     let mut non_ready = Vec::new();
     let mut blocked = Vec::new();
+    let mut active = Vec::new();
+    let mut completed = Vec::new();
     let mut eligible = Vec::new();
 
     for issue in issues {
         if issue.readiness != "ready" {
             non_ready.push(issue);
+        } else if issue.lifecycle_status == "completed" {
+            completed.push(issue);
+        } else if matches!(
+            issue.lifecycle_status.as_str(),
+            "claimed" | "running" | "blocked"
+        ) {
+            active.push(issue);
         } else if issue
             .issue_dependencies
             .iter()
@@ -430,6 +463,8 @@ pub async fn get_planning_snapshot(
         last_failure,
         non_ready,
         blocked,
+        active,
+        completed,
         eligible,
     })
 }
@@ -462,22 +497,23 @@ pub async fn seed_dev_project(
 
     // Check if already seeded
     let existing =
-        sqlx::query_as::<_, (String, String)>("SELECT id, path FROM projects WHERE path = ?")
+        sqlx::query_as::<_, (String, String, i64)>("SELECT id, path, trusted FROM projects WHERE path = ?")
             .bind(&normalized_path)
             .fetch_optional(db)
             .await?;
 
-    if let Some((id, path)) = existing {
+    if let Some((id, path, trusted)) = existing {
         return Ok(ProjectResponse {
             id: ProjectId(id),
             path,
+            trusted: trusted != 0,
             git_summary: None,
             enabled_issue_source: None,
         });
     }
 
     let id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO projects (id, path) VALUES (?, ?)")
+    sqlx::query("INSERT INTO projects (id, path, trusted) VALUES (?, ?, 0)")
         .bind(&id)
         .bind(&normalized_path)
         .execute(db)
@@ -486,6 +522,7 @@ pub async fn seed_dev_project(
     Ok(ProjectResponse {
         id: ProjectId(id),
         path: normalized_path,
+        trusted: false,
         git_summary: None,
         enabled_issue_source: None,
     })
@@ -517,6 +554,7 @@ mod tests {
         let project = create_project(&db, &request).await.unwrap();
         Uuid::parse_str(&project.id.0).expect("Project ID should be a valid UUID");
         assert_eq!(project.path, "/tmp");
+        assert_eq!(project.trusted, false);
     }
 
     #[tokio::test]
@@ -561,6 +599,7 @@ mod tests {
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id, created.id);
         assert_eq!(projects[0].path, "/tmp");
+        assert_eq!(projects[0].trusted, false);
     }
 
     #[tokio::test]
@@ -597,5 +636,165 @@ mod tests {
         let db = setup_db().await;
         let result = seed_dev_project(&db, "/nonexistent/path").await;
         assert!(matches!(result, Err(PersistenceError::InvalidPath(_))));
+    }
+
+    #[tokio::test]
+    async fn create_project_defaults_to_untrusted() {
+        let db = setup_db().await;
+        let req = CreateProjectRequest {
+            path: "/tmp".to_string(),
+        };
+        let project = create_project(&db, &req).await.unwrap();
+        assert_eq!(project.trusted, false);
+        let fetched = get_project(&db, &project.id.0).await.unwrap();
+        assert_eq!(fetched.trusted, false);
+    }
+
+    #[tokio::test]
+    async fn trust_project_sets_trusted_true() {
+        let db = setup_db().await;
+        let req = CreateProjectRequest {
+            path: "/tmp".to_string(),
+        };
+        let created = create_project(&db, &req).await.unwrap();
+        assert_eq!(created.trusted, false);
+
+        let updated = trust_project(&db, &created.id.0).await.unwrap();
+        assert_eq!(updated.trusted, true);
+
+        let fetched = get_project(&db, &created.id.0).await.unwrap();
+        assert_eq!(fetched.trusted, true);
+    }
+
+    #[tokio::test]
+    async fn trust_project_is_idempotent() {
+        let db = setup_db().await;
+        let req = CreateProjectRequest {
+            path: "/tmp".to_string(),
+        };
+        let created = create_project(&db, &req).await.unwrap();
+        trust_project(&db, &created.id.0).await.unwrap();
+        let second = trust_project(&db, &created.id.0).await.unwrap();
+        assert_eq!(second.trusted, true);
+    }
+
+    #[tokio::test]
+    async fn trust_project_not_found() {
+        let db = setup_db().await;
+        let result = trust_project(&db, "nonexistent-id").await;
+        assert!(matches!(result, Err(PersistenceError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn get_planning_snapshot_lifecycle_status_precedes_dependencies() {
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let source = IssueSource {
+            kind: "local_markdown".to_string(),
+            locator: ".scratch/issues".to_string(),
+        };
+        enable_issue_source(&db, &project.id.0, &EnableIssueSourceRequest {
+            kind: source.kind.clone(),
+            locator: source.locator.clone(),
+        })
+        .await
+        .unwrap();
+
+        let issues = vec![
+            SourceIssueSnapshot {
+                source_id: "claimed-with-deps".to_string(),
+                title: "claimed".to_string(),
+                readiness: "ready".to_string(),
+                lifecycle_status: "claimed".to_string(),
+                parent_issue: None,
+                issue_dependencies: vec!["some-dep".to_string()],
+                source_order: 1,
+                raw_text: "raw".to_string(),
+            },
+        ];
+
+        replace_planning_snapshot(&db, &project.id.0, &source, &issues, "unix:1")
+            .await
+            .unwrap();
+
+        let snapshot = get_planning_snapshot(&db, &project.id.0).await.unwrap();
+        assert_eq!(snapshot.active.len(), 1);
+        assert_eq!(snapshot.active[0].source_id, "claimed-with-deps");
+        assert!(snapshot.blocked.is_empty());
+        assert!(snapshot.eligible.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_planning_snapshot_buckets_by_lifecycle_status() {
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let source = IssueSource {
+            kind: "local_markdown".to_string(),
+            locator: ".scratch/issues".to_string(),
+        };
+        enable_issue_source(&db, &project.id.0, &EnableIssueSourceRequest {
+            kind: source.kind.clone(),
+            locator: source.locator.clone(),
+        })
+        .await
+        .unwrap();
+
+        let issues = vec![
+            make_issue("ready-ready", "ready", "ready"),
+            make_issue("ready-claimed", "ready", "claimed"),
+            make_issue("ready-running", "ready", "running"),
+            make_issue("ready-blocked", "ready", "blocked"),
+            make_issue("ready-completed", "ready", "completed"),
+            make_issue("not-ready", "not-ready", "ready"),
+        ];
+
+        replace_planning_snapshot(&db, &project.id.0, &source, &issues, "unix:1")
+            .await
+            .unwrap();
+
+        let snapshot = get_planning_snapshot(&db, &project.id.0).await.unwrap();
+        assert_eq!(snapshot.non_ready.len(), 1);
+        assert_eq!(snapshot.non_ready[0].source_id, "not-ready");
+
+        assert_eq!(snapshot.active.len(), 3);
+        let active_ids: Vec<_> = snapshot.active.iter().map(|i| i.source_id.clone()).collect();
+        assert!(active_ids.contains(&"ready-claimed".to_string()));
+        assert!(active_ids.contains(&"ready-running".to_string()));
+        assert!(active_ids.contains(&"ready-blocked".to_string()));
+
+        assert_eq!(snapshot.completed.len(), 1);
+        assert_eq!(snapshot.completed[0].source_id, "ready-completed");
+
+        assert_eq!(snapshot.eligible.len(), 1);
+        assert_eq!(snapshot.eligible[0].source_id, "ready-ready");
+    }
+
+    fn make_issue(source_id: &str, readiness: &str, lifecycle_status: &str) -> SourceIssueSnapshot {
+        SourceIssueSnapshot {
+            source_id: source_id.to_string(),
+            title: source_id.to_string(),
+            readiness: readiness.to_string(),
+            lifecycle_status: lifecycle_status.to_string(),
+            parent_issue: None,
+            issue_dependencies: vec![],
+            source_order: 1,
+            raw_text: "raw".to_string(),
+        }
     }
 }
