@@ -84,6 +84,8 @@ fn setup_git_project_with_remote(name: &str) -> (PathBuf, PathBuf) {
         &project_path,
         &["config", "user.email", "agentic-afk@example.invalid"],
     );
+    run_git(&project_path, &["config", "commit.gpgsign", "false"]);
+    run_git(&project_path, &["config", "tag.gpgsign", "false"]);
     std::fs::write(project_path.join("README.md"), "test\n").unwrap();
     run_git(&project_path, &["add", "README.md"]);
     run_git(&project_path, &["commit", "-m", "initial"]);
