@@ -296,7 +296,7 @@ fn ProjectDetail(project: ProjectResponse) -> Element {
                 },
             }
             match &*assignment_state.read_unchecked() {
-                Some(Ok(state)) => rsx! { AssignmentState { state: state.clone() } },
+                Some(Ok(state)) => rsx! { AssignmentState { project_id: project.id.0.clone(), state: state.clone() } },
                 Some(Err(error)) => rsx! {
                     StatusPanel {
                         title: "Issue Assignment state unavailable".to_string(),
@@ -560,7 +560,7 @@ fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool
 }
 
 #[component]
-fn AssignmentState(state: ProjectAssignmentStateResponse) -> Element {
+fn AssignmentState(project_id: String, state: ProjectAssignmentStateResponse) -> Element {
     rsx! {
         section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
             h2 { class: "text-base font-semibold", "Issue Assignment" }
@@ -576,8 +576,11 @@ fn AssignmentState(state: ProjectAssignmentStateResponse) -> Element {
                         assignment.status.as_str(),
                         "proposal_pending" | "proposal_verified"
                     );
+                    let can_abandon = assignment.status == "blocked";
                     let refresh_project_id = assignment.project_id.0.clone();
                     let refresh_assignment_id = assignment.id.clone();
+                    let abandon_project_id = project_id.clone();
+                    let abandon_assignment_id = assignment.id.clone();
                     rsx! {
                         div { class: "mt-4 grid gap-2 text-sm",
                             p { class: "font-medium text-zinc-100", "{assignment.source_title}" }
@@ -608,6 +611,20 @@ fn AssignmentState(state: ProjectAssignmentStateResponse) -> Element {
                                         }
                                     },
                                     "Refresh Proposal State"
+                                }
+                            }
+                            if can_abandon {
+                                button {
+                                    class: "mt-2 w-fit rounded border border-rose-700 px-2.5 py-1.5 text-left text-xs font-medium text-rose-100 hover:border-rose-500 hover:bg-rose-950/45",
+                                    onclick: move |_| {
+                                        let project_id = abandon_project_id.clone();
+                                        let assignment_id = abandon_assignment_id.clone();
+                                        async move {
+                                            let _ = abandon_assignment(project_id, assignment_id).await;
+                                            reload_dashboard();
+                                        }
+                                    },
+                                    "Abandon Assignment"
                                 }
                             }
                             if let Some(budget) = assignment.repair_budget.clone() {
@@ -762,6 +779,21 @@ async fn start_assignment(
 ) -> Result<agentic_afk_contracts::IssueAssignmentResponse, String> {
     gloo_net::http::Request::post(&format!(
         "/api/projects/{project_id}/source-issues/{source_id}/assignment"
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?
+    .json()
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn abandon_assignment(
+    project_id: String,
+    assignment_id: String,
+) -> Result<agentic_afk_contracts::IssueAssignmentResponse, String> {
+    gloo_net::http::Request::post(&format!(
+        "/api/projects/{project_id}/assignments/{assignment_id}/abandon"
     ))
     .send()
     .await

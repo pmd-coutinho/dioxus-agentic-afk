@@ -18,13 +18,20 @@ use uuid::Uuid;
 
 pub mod verify;
 
-/// Public re-export of the internal assignment lookup, used by sibling modules.
-pub(crate) async fn get_issue_assignment_public(
+/// Public re-export of the internal assignment lookup, used by sibling modules and external callers.
+pub async fn get_issue_assignment_public(
     db: &Db,
     assignment_id: &str,
 ) -> Result<IssueAssignmentResponse, PersistenceError> {
     get_issue_assignment(db, assignment_id).await
 }
+
+mod abandon;
+
+pub use abandon::{
+    ProjectActivityEntry, abandon_blocked_assignment, get_project_assignment,
+    list_project_activity, record_project_activity,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
@@ -46,6 +53,8 @@ pub enum PersistenceError {
     NoChangeProposal(String),
     #[error("Repair budget exhausted for Issue Assignment: {0}")]
     RepairBudgetExhausted(String),
+    #[error("Issue Assignment is not in an abandonable state: {0}")]
+    AssignmentNotAbandonable(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }

@@ -28,6 +28,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use utoipa::OpenApi;
 use utoipa::ToSchema;
 
+mod abandon;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneConfig {
     pub bind_address: SocketAddr,
@@ -191,6 +193,10 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route(
             "/api/projects/{id}/assignments/{assignment_id}/repair",
             post(repair::repair_assignment),
+        )
+        .route(
+            "/api/projects/{id}/assignments/{assignment_id}/abandon",
+            post(abandon::abandon_assignment),
         )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
@@ -1238,6 +1244,23 @@ fn create_github_change_proposal(
     }
 }
 
+pub(crate) async fn refresh_local_markdown_after_change(
+    db: &Db,
+    project: &ProjectResponse,
+    source: &IssueSource,
+) -> Result<(), String> {
+    refresh_local_markdown_snapshot(db, project, source).await
+}
+
+pub(crate) fn write_assignment_lifecycle_for_abandon(
+    gh_binary_path: &std::path::Path,
+    project: &ProjectResponse,
+    source: &IssueSource,
+    source_id: &str,
+) -> Result<(), String> {
+    write_assignment_lifecycle(gh_binary_path, project, source, source_id, "ready")
+}
+
 async fn refresh_local_markdown_snapshot(
     db: &Db,
     project: &ProjectResponse,
@@ -1669,6 +1692,11 @@ pub(crate) fn persistence_error_to_response(err: PersistenceError) -> Response {
             StatusCode::CONFLICT,
             "urn:agentic-afk:repair-budget-exhausted",
             "Conflict",
+        ),
+        PersistenceError::AssignmentNotAbandonable(_) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:assignment-not-abandonable",
+            "Unprocessable Entity",
         ),
         PersistenceError::Database(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,

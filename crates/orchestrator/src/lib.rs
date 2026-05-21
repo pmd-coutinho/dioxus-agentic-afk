@@ -2,6 +2,10 @@
 
 pub mod verify;
 
+mod abandon;
+
+pub use abandon::remove_assignment_worktree;
+
 use agentic_afk_contracts::AssignmentTerminalOutcome;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
