@@ -1,7 +1,7 @@
 use agentic_afk_contracts::{
     AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueSourceCandidate,
     IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse,
-    ProjectResponse, SourceIssueSnapshot,
+    ProjectAssignmentStateResponse, ProjectResponse, SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
 
@@ -204,6 +204,9 @@ fn ProjectDetail(project: ProjectResponse) -> Element {
     let planning_project_id = project_id.clone();
     let planning_snapshot =
         use_resource(move || fetch_planning_snapshot(planning_project_id.clone()));
+    let assignment_project_id = project_id.clone();
+    let assignment_state =
+        use_resource(move || fetch_assignment_state(assignment_project_id.clone()));
     let candidate_project_id = project_id.clone();
     let issue_source_candidates =
         use_resource(move || fetch_issue_source_candidates(candidate_project_id.clone()));
@@ -292,8 +295,25 @@ fn ProjectDetail(project: ProjectResponse) -> Element {
                     }
                 },
             }
+            match &*assignment_state.read_unchecked() {
+                Some(Ok(state)) => rsx! { AssignmentState { state: state.clone() } },
+                Some(Err(error)) => rsx! {
+                    StatusPanel {
+                        title: "Issue Assignment state unavailable".to_string(),
+                        detail: error.clone(),
+                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                    }
+                },
+                None => rsx! {},
+            }
             match &*planning_snapshot.read_unchecked() {
-                Some(Ok(snapshot)) => rsx! { PlanningSnapshot { snapshot: snapshot.clone() } },
+                Some(Ok(snapshot)) => rsx! {
+                    PlanningSnapshot {
+                        project_id: project.id.0.clone(),
+                        trusted: project.trusted,
+                        snapshot: snapshot.clone(),
+                    }
+                },
                 Some(Err(error)) => rsx! {
                     StatusPanel {
                         title: "Planning snapshot unavailable".to_string(),
@@ -410,7 +430,11 @@ fn IssueSourceCandidateRow(project_id: String, candidate: IssueSourceCandidate) 
 }
 
 #[component]
-fn PlanningSnapshot(snapshot: PlanningSnapshotResponse) -> Element {
+fn PlanningSnapshot(
+    project_id: String,
+    trusted: bool,
+    snapshot: PlanningSnapshotResponse,
+) -> Element {
     let last_sync = snapshot
         .last_successful_sync_at
         .clone()
@@ -433,24 +457,34 @@ fn PlanningSnapshot(snapshot: PlanningSnapshotResponse) -> Element {
             }
             div { class: "mt-4 grid gap-4 lg:grid-cols-5",
                 PlanningGroup {
+                    project_id: project_id.clone(),
                     title: "Eligible Ready Issues".to_string(),
                     issues: snapshot.eligible,
+                    can_start: trusted && snapshot.source.kind == "local_markdown",
                 }
                 PlanningGroup {
+                    project_id: project_id.clone(),
                     title: "Active Issues".to_string(),
                     issues: snapshot.active,
+                    can_start: false,
                 }
                 PlanningGroup {
+                    project_id: project_id.clone(),
                     title: "Blocked Ready Issues".to_string(),
                     issues: snapshot.blocked,
+                    can_start: false,
                 }
                 PlanningGroup {
+                    project_id: project_id.clone(),
                     title: "Completed Issues".to_string(),
                     issues: snapshot.completed,
+                    can_start: false,
                 }
                 PlanningGroup {
+                    project_id,
                     title: "Non-ready Source Issues".to_string(),
                     issues: snapshot.non_ready,
+                    can_start: false,
                 }
             }
         }
@@ -458,7 +492,12 @@ fn PlanningSnapshot(snapshot: PlanningSnapshotResponse) -> Element {
 }
 
 #[component]
-fn PlanningGroup(title: String, issues: Vec<SourceIssueSnapshot>) -> Element {
+fn PlanningGroup(
+    project_id: String,
+    title: String,
+    issues: Vec<SourceIssueSnapshot>,
+    can_start: bool,
+) -> Element {
     rsx! {
         section { class: "min-w-0 rounded border border-zinc-800 bg-zinc-950/40 p-4",
             h3 { class: "text-sm font-semibold text-zinc-100", "{title}" }
@@ -467,7 +506,11 @@ fn PlanningGroup(title: String, issues: Vec<SourceIssueSnapshot>) -> Element {
             } else {
                 ul { class: "mt-3 grid gap-3",
                     for issue in issues {
-                        PlanningIssue { issue }
+                        PlanningIssue {
+                            project_id: project_id.clone(),
+                            issue,
+                            can_start,
+                        }
                     }
                 }
             }
@@ -476,7 +519,7 @@ fn PlanningGroup(title: String, issues: Vec<SourceIssueSnapshot>) -> Element {
 }
 
 #[component]
-fn PlanningIssue(issue: SourceIssueSnapshot) -> Element {
+fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool) -> Element {
     let dependencies = if issue.issue_dependencies.is_empty() {
         "No dependencies".to_string()
     } else {
@@ -486,6 +529,8 @@ fn PlanningIssue(issue: SourceIssueSnapshot) -> Element {
         .parent_issue
         .clone()
         .unwrap_or_else(|| "No parent".to_string());
+    let start_project_id = project_id.clone();
+    let start_source_id = issue.source_id.clone();
 
     rsx! {
         li { class: "grid gap-1 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
@@ -496,6 +541,50 @@ fn PlanningIssue(issue: SourceIssueSnapshot) -> Element {
             p { class: "break-words font-mono text-xs text-zinc-500", "{issue.source_id}" }
             p { class: "text-xs text-zinc-400", "Parent {parent}" }
             p { class: "text-xs text-zinc-400", "{dependencies}" }
+            if can_start {
+                button {
+                    class: "mt-2 rounded border border-emerald-700 px-2.5 py-1.5 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
+                    onclick: move |_| {
+                        let project_id = start_project_id.clone();
+                        let source_id = start_source_id.clone();
+                        async move {
+                            let _ = start_assignment(project_id, source_id).await;
+                            reload_dashboard();
+                        }
+                    },
+                    "Start Assignment"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AssignmentState(state: ProjectAssignmentStateResponse) -> Element {
+    rsx! {
+        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
+            h2 { class: "text-base font-semibold", "Issue Assignment" }
+            match state.active_assignment {
+                Some(assignment) => rsx! {
+                    div { class: "mt-4 grid gap-2 text-sm",
+                        p { class: "font-medium text-zinc-100", "{assignment.source_title}" }
+                        p { class: "font-mono text-xs text-zinc-400", "{assignment.source_id}" }
+                        p { class: "text-zinc-300", "State {assignment.status}" }
+                        p { class: "break-words font-mono text-xs text-zinc-500", "{assignment.branch}" }
+                        if let Some(detail) = assignment.status_detail {
+                            p { class: "text-zinc-300", "{detail}" }
+                        }
+                    }
+                    if state.waiting_ready_issue_count > 0 {
+                        p { class: "mt-4 border-t border-zinc-800 pt-3 text-sm text-zinc-300",
+                            "{state.waiting_ready_issue_count} eligible Ready Issue waiting for the Project assignment slot."
+                        }
+                    }
+                },
+                None => rsx! {
+                    p { class: "mt-3 text-sm text-zinc-500", "No active Issue Assignment" }
+                },
+            }
         }
     }
 }
@@ -558,6 +647,18 @@ async fn fetch_planning_snapshot(project_id: String) -> Result<PlanningSnapshotR
         .map_err(|error| error.to_string())
 }
 
+async fn fetch_assignment_state(
+    project_id: String,
+) -> Result<ProjectAssignmentStateResponse, String> {
+    gloo_net::http::Request::get(&format!("/api/projects/{project_id}/assignment-state"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .json()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 async fn fetch_issue_source_candidates(
     project_id: String,
 ) -> Result<Vec<IssueSourceCandidate>, String> {
@@ -596,6 +697,21 @@ async fn trust_project_api(project_id: String) -> Result<ProjectResponse, String
         .json()
         .await
         .map_err(|error| error.to_string())
+}
+
+async fn start_assignment(
+    project_id: String,
+    source_id: String,
+) -> Result<agentic_afk_contracts::IssueAssignmentResponse, String> {
+    gloo_net::http::Request::post(&format!(
+        "/api/projects/{project_id}/source-issues/{source_id}/assignment"
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?
+    .json()
+    .await
+    .map_err(|error| error.to_string())
 }
 
 async fn fetch_issue_source_sync_status(

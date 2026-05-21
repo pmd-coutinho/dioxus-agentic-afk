@@ -1,6 +1,7 @@
 use agentic_afk_contracts::{
-    CreateProjectRequest, EnableIssueSourceRequest, HealthResponse, PlanningSnapshotResponse,
-    ProblemDetail, ProjectResponse, SourceIssueSnapshot,
+    CreateProjectRequest, EnableIssueSourceRequest, HealthResponse, IssueAssignmentResponse,
+    PlanningSnapshotResponse, ProblemDetail, ProjectAssignmentStateResponse, ProjectResponse,
+    SourceIssueSnapshot,
 };
 use agentic_afk_control_plane_server::{ControlPlaneConfig, router};
 use agentic_afk_persistence::{self as persistence};
@@ -25,6 +26,8 @@ async fn test_router() -> axum::Router {
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
+        worktrunk_binary_path: "wt".into(),
+        codex_binary_path: "codex".into(),
     };
     router(config, db)
 }
@@ -37,23 +40,30 @@ async fn test_router_with_db() -> (axum::Router, persistence::Db) {
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
+        worktrunk_binary_path: "wt".into(),
+        codex_binary_path: "codex".into(),
     };
     (router(config, db.clone()), db)
 }
 
-async fn test_router_with_gh(gh_binary_path: PathBuf) -> (axum::Router, persistence::Db) {
+async fn test_router_with_execution(
+    worktrunk_binary_path: PathBuf,
+    codex_binary_path: PathBuf,
+) -> (axum::Router, persistence::Db) {
     let db = persistence::connect_in_memory().await.unwrap();
     persistence::migrate(&db).await.unwrap();
     let config = ControlPlaneConfig {
         bind_address: "127.0.0.1:0".parse().unwrap(),
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
-        gh_binary_path,
+        gh_binary_path: "gh".into(),
+        worktrunk_binary_path,
+        codex_binary_path,
     };
     (router(config, db.clone()), db)
 }
 
-fn write_fake_gh(name: &str, body: &str) -> PathBuf {
+fn write_fake_command(name: &str, body: &str) -> PathBuf {
     let path = temp_project_path(name);
     std::fs::write(&path, body).unwrap();
     #[cfg(unix)]
@@ -130,6 +140,8 @@ async fn dashboard_shell_loads_from_the_local_control_plane() {
         dashboard_asset_dir,
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
+        worktrunk_binary_path: "wt".into(),
+        codex_binary_path: "codex".into(),
     };
 
     let response = router(config, db)
@@ -158,6 +170,8 @@ async fn dashboard_browser_routes_fallback_without_claiming_api_paths() {
         dashboard_asset_dir,
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
+        worktrunk_binary_path: "wt".into(),
+        codex_binary_path: "codex".into(),
     };
     let app = router(config, db);
 
@@ -219,6 +233,11 @@ async fn openapi_document_describes_project_api_and_problem_responses() {
     assert!(openapi["paths"]["/api/projects/{id}/issue-source/sync"]["post"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/issue-source/sync-status"]["get"].is_object());
     assert!(openapi["paths"]["/api/projects/{id}/planning-snapshot"]["get"].is_object());
+    assert!(openapi["paths"]["/api/projects/{id}/assignment-state"]["get"].is_object());
+    assert!(
+        openapi["paths"]["/api/projects/{id}/source-issues/{source_id}/assignment"]["post"]
+            .is_object()
+    );
     assert!(openapi["components"]["schemas"]["CreateProjectRequest"].is_object());
     assert!(openapi["components"]["schemas"]["EnableIssueSourceRequest"].is_object());
     assert!(openapi["components"]["schemas"]["IssueSource"].is_object());
@@ -226,6 +245,8 @@ async fn openapi_document_describes_project_api_and_problem_responses() {
     assert!(openapi["components"]["schemas"]["IssueSourceSyncResponse"].is_object());
     assert!(openapi["components"]["schemas"]["IssueSourceSyncStatusResponse"].is_object());
     assert!(openapi["components"]["schemas"]["PlanningSnapshotResponse"].is_object());
+    assert!(openapi["components"]["schemas"]["IssueAssignmentResponse"].is_object());
+    assert!(openapi["components"]["schemas"]["ProjectAssignmentStateResponse"].is_object());
     assert!(openapi["components"]["schemas"]["SourceIssueSnapshot"].is_object());
     assert!(openapi["components"]["schemas"]["ProjectResponse"].is_object());
     assert!(openapi["components"]["schemas"]["ProblemDetail"].is_object());
@@ -547,7 +568,12 @@ async fn trust_project_via_api() {
         .unwrap();
 
     assert_eq!(trust_response.status(), StatusCode::OK);
-    let trust_body = trust_response.into_body().collect().await.unwrap().to_bytes();
+    let trust_body = trust_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
     let trusted_project: ProjectResponse = serde_json::from_slice(&trust_body).unwrap();
     assert_eq!(trusted_project.trusted, true);
     assert_eq!(trusted_project.id, project.id);
@@ -592,7 +618,12 @@ async fn trust_project_is_idempotent() {
             .await
             .unwrap();
         assert_eq!(trust_response.status(), StatusCode::OK);
-        let trust_body = trust_response.into_body().collect().await.unwrap().to_bytes();
+        let trust_body = trust_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
         let trusted_project: ProjectResponse = serde_json::from_slice(&trust_body).unwrap();
         assert_eq!(trusted_project.trusted, true);
     }
@@ -622,6 +653,489 @@ async fn trust_nonexistent_project_returns_404() {
     let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
     assert_eq!(problem.status, 404);
     assert_eq!(problem.problem_type, "urn:agentic-afk:not-found");
+}
+
+#[tokio::test]
+async fn start_assignment_rejects_untrusted_project() {
+    let app = test_router().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&CreateProjectRequest {
+                        path: "/tmp".to_string(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let project: ProjectResponse = serde_json::from_slice(&body).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/{}/source-issues/ready-issue/assignment",
+                    project.id.0
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem.problem_type, "urn:agentic-afk:project-untrusted");
+}
+
+#[tokio::test]
+async fn start_assignment_runs_local_markdown_issue_through_worktrunk_and_codex() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-start");
+    std::fs::create_dir_all(project_path.join(".git")).unwrap();
+    std::fs::write(
+        issues_dir.join("ready-issue.md"),
+        "# First assignment\n\nReadiness: ready\nSource Order: 1\n\n## Acceptance criteria\n- start it\n",
+    )
+    .unwrap();
+
+    let worktree_path = temp_project_path("assignment-worktree");
+    let fake_wt = write_fake_command(
+        "assignment-fake-wt",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nmkdir -p '{}'\nprintf '{{\"path\":\"{}\"}}\\n'\n",
+            worktree_path.display(),
+            worktree_path.display()
+        ),
+    );
+    let fake_codex = write_fake_command(
+        "assignment-fake-codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nlast=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output-last-message\" ]; then shift; last=\"$1\"; fi\n  shift\ndone\nprintf '{\"outcome\":\"Blocked\",\"summary\":\"need input\"}\\n' > \"$last\"\n",
+    );
+    let (app, _db) = test_router_with_execution(fake_wt, fake_codex).await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/{}/source-issues/ready-issue/assignment",
+                    project.id.0
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let assignment: IssueAssignmentResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(assignment.source_id, "ready-issue");
+    assert_eq!(assignment.branch, "agentic-afk/local-markdown-ready-issue");
+    assert_eq!(
+        assignment.worktree_path,
+        worktree_path.display().to_string()
+    );
+    assert_eq!(assignment.status, "blocked");
+    assert_eq!(
+        assignment
+            .latest_attempt
+            .unwrap()
+            .terminal_outcome
+            .unwrap()
+            .outcome,
+        "Blocked"
+    );
+    assert!(
+        std::fs::read_to_string(issues_dir.join("ready-issue.md"))
+            .unwrap()
+            .contains("Lifecycle Status: blocked")
+    );
+}
+
+#[tokio::test]
+async fn assignment_state_shows_waiting_ready_issues_and_rejects_second_start() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-waiting");
+    std::fs::create_dir_all(project_path.join(".git")).unwrap();
+    for (source_id, order) in [("first", 1), ("second", 2)] {
+        std::fs::write(
+            issues_dir.join(format!("{source_id}.md")),
+            format!("# {source_id}\n\nReadiness: ready\nSource Order: {order}\n"),
+        )
+        .unwrap();
+    }
+
+    let fake_wt = write_fake_command(
+        "assignment-waiting-fake-wt",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nworktree=\"/tmp/agentic-afk-waiting-worktree-$$\"\nmkdir -p \"$worktree\"\nprintf '{\"path\":\"%s\"}\\n' \"$worktree\"\n",
+    );
+    let fake_codex = write_fake_command(
+        "assignment-waiting-fake-codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output-last-message\" ]; then shift; last=\"$1\"; fi\n  shift\ndone\nprintf '{\"outcome\":\"Blocked\",\"summary\":\"still active\"}\\n' > \"$last\"\n",
+    );
+    let (app, _db) = test_router_with_execution(fake_wt, fake_codex).await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    let sync = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync.status(), StatusCode::OK);
+
+    let first_start = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/{}/source-issues/first/assignment",
+                    project.id.0
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_start.status(), StatusCode::CREATED);
+
+    let state = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/assignment-state", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state.status(), StatusCode::OK);
+    let body = state.into_body().collect().await.unwrap().to_bytes();
+    let state: ProjectAssignmentStateResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(state.active_assignment.unwrap().source_id, "first");
+    assert_eq!(state.waiting_ready_issue_count, 1);
+
+    let second_start = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/{}/source-issues/second/assignment",
+                    project.id.0
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_start.status(), StatusCode::CONFLICT);
+    let body = second_start.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem.problem_type, "urn:agentic-afk:active-assignment");
+}
+
+#[tokio::test]
+async fn local_markdown_ready_for_proposal_blocks_without_a_change_proposal_target() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-ready");
+    std::fs::create_dir_all(project_path.join(".git")).unwrap();
+    std::fs::write(
+        issues_dir.join("ready.md"),
+        "# Ready\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let fake_wt = write_fake_command(
+        "assignment-ready-fake-wt",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nworktree=\"/tmp/agentic-afk-ready-worktree-$$\"\nmkdir -p \"$worktree\"\nprintf '{\"path\":\"%s\"}\\n' \"$worktree\"\n",
+    );
+    let fake_codex = write_fake_command(
+        "assignment-ready-fake-codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output-last-message\" ]; then shift; last=\"$1\"; fi\n  shift\ndone\nprintf '{\"outcome\":\"ReadyForProposal\",\"summary\":\"checks passed\"}\\n' > \"$last\"\n",
+    );
+    let (app, _db) = test_router_with_execution(fake_wt, fake_codex).await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    sync_local_markdown_project(&app, &project).await;
+
+    let response = start_source_issue_assignment(&app, &project, "ready").await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let assignment: IssueAssignmentResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(assignment.status, "blocked");
+    assert_eq!(
+        assignment.status_detail.as_deref(),
+        Some("local markdown Issue Source has no Change Proposal target")
+    );
+    assert_eq!(
+        assignment
+            .latest_attempt
+            .unwrap()
+            .terminal_outcome
+            .unwrap()
+            .outcome,
+        "ReadyForProposal"
+    );
+    assert!(
+        std::fs::read_to_string(issues_dir.join("ready.md"))
+            .unwrap()
+            .contains("Lifecycle Status: blocked")
+    );
+}
+
+#[tokio::test]
+async fn codex_failed_outcome_persists_failed_assignment_and_blocks_source_issue() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-failed");
+    std::fs::create_dir_all(project_path.join(".git")).unwrap();
+    std::fs::write(
+        issues_dir.join("failed.md"),
+        "# Failed\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let fake_wt = write_fake_command(
+        "assignment-failed-fake-wt",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nworktree=\"/tmp/agentic-afk-failed-worktree-$$\"\nmkdir -p \"$worktree\"\nprintf '{\"path\":\"%s\"}\\n' \"$worktree\"\n",
+    );
+    let fake_codex = write_fake_command(
+        "assignment-failed-fake-codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output-last-message\" ]; then shift; last=\"$1\"; fi\n  shift\ndone\nprintf '{\"outcome\":\"Failed\",\"summary\":\"checks could not run\"}\\n' > \"$last\"\n",
+    );
+    let (app, _db) = test_router_with_execution(fake_wt, fake_codex).await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    sync_local_markdown_project(&app, &project).await;
+
+    let response = start_source_issue_assignment(&app, &project, "failed").await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let assignment: IssueAssignmentResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(assignment.status, "failed");
+    assert_eq!(
+        assignment.status_detail.as_deref(),
+        Some("checks could not run")
+    );
+    let attempt = assignment.latest_attempt.unwrap();
+    assert!(attempt.process_id.is_some());
+    assert_eq!(attempt.terminal_outcome.unwrap().outcome, "Failed");
+    assert!(
+        std::fs::read_to_string(issues_dir.join("failed.md"))
+            .unwrap()
+            .contains("Lifecycle Status: blocked")
+    );
+}
+
+#[tokio::test]
+async fn worktrunk_setup_failure_releases_claim_without_marking_source_issue_active() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-setup-failure");
+    std::fs::create_dir_all(project_path.join(".git")).unwrap();
+    std::fs::write(
+        issues_dir.join("setup.md"),
+        "# Setup\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let fake_wt = write_fake_command(
+        "assignment-setup-fake-wt",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nprintf 'branch exists\\n' >&2\nexit 9\n",
+    );
+    let fake_codex = write_fake_command("assignment-setup-fake-codex", "#!/bin/sh\nexit 0\n");
+    let (app, _db) = test_router_with_execution(fake_wt, fake_codex).await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    sync_local_markdown_project(&app, &project).await;
+
+    let response = start_source_issue_assignment(&app, &project, "setup").await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        problem.problem_type,
+        "urn:agentic-afk:assignment-setup-failed"
+    );
+    assert!(
+        !std::fs::read_to_string(issues_dir.join("setup.md"))
+            .unwrap()
+            .contains("Lifecycle Status:")
+    );
+
+    let state = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/assignment-state", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = state.into_body().collect().await.unwrap().to_bytes();
+    let state: ProjectAssignmentStateResponse = serde_json::from_slice(&body).unwrap();
+    assert!(state.active_assignment.is_none());
+}
+
+#[tokio::test]
+async fn non_git_project_fails_assignment_preflight_before_claim() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-preflight");
+    std::fs::write(
+        issues_dir.join("preflight.md"),
+        "# Preflight\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let fake_wt = write_fake_command("assignment-preflight-fake-wt", "#!/bin/sh\nexit 0\n");
+    let fake_codex = write_fake_command("assignment-preflight-fake-codex", "#!/bin/sh\nexit 0\n");
+    let (app, _db) = test_router_with_execution(fake_wt, fake_codex).await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    sync_local_markdown_project(&app, &project).await;
+
+    let response = start_source_issue_assignment(&app, &project, "preflight").await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        problem.problem_type,
+        "urn:agentic-afk:assignment-preflight-failed"
+    );
+    assert!(
+        !std::fs::read_to_string(issues_dir.join("preflight.md"))
+            .unwrap()
+            .contains("Lifecycle Status:")
+    );
+}
+
+#[tokio::test]
+async fn codex_spawn_failure_preserves_failed_assignment_and_blocks_source_issue() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-spawn-failure");
+    std::fs::create_dir_all(project_path.join(".git")).unwrap();
+    std::fs::write(
+        issues_dir.join("spawn.md"),
+        "# Spawn\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let worktree_path = temp_project_path("assignment-spawn-worktree");
+    let fake_wt = write_fake_command(
+        "assignment-spawn-fake-wt",
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nprintf '{{\"path\":\"{}\"}}\\n'\n",
+            worktree_path.display()
+        ),
+    );
+    let codex_preflight_only = write_fake_command(
+        "assignment-spawn-fake-codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nprintf 'exec unavailable\\n' >&2\nexit 11\n",
+    );
+    let (app, _db) = test_router_with_execution(fake_wt, codex_preflight_only).await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    sync_local_markdown_project(&app, &project).await;
+
+    let response = start_source_issue_assignment(&app, &project, "spawn").await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let assignment: IssueAssignmentResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(assignment.status, "failed");
+    assert!(
+        assignment
+            .status_detail
+            .as_deref()
+            .unwrap()
+            .contains("failed to spawn Codex")
+    );
+    assert_eq!(
+        assignment
+            .latest_attempt
+            .unwrap()
+            .terminal_outcome
+            .unwrap()
+            .outcome,
+        "Failed"
+    );
+    assert!(
+        std::fs::read_to_string(issues_dir.join("spawn.md"))
+            .unwrap()
+            .contains("Lifecycle Status: blocked")
+    );
+}
+
+#[tokio::test]
+async fn assignment_state_survives_control_plane_router_restart() {
+    let (project_path, issues_dir) = setup_local_markdown_project("assignment-restart");
+    std::fs::create_dir_all(project_path.join(".git")).unwrap();
+    std::fs::write(
+        issues_dir.join("restart.md"),
+        "# Restart\n\nReadiness: ready\nSource Order: 1\n",
+    )
+    .unwrap();
+    let fake_wt = write_fake_command(
+        "assignment-restart-fake-wt",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nworktree=\"/tmp/agentic-afk-restart-worktree-$$\"\nmkdir -p \"$worktree\"\nprintf '{\"path\":\"%s\"}\\n' \"$worktree\"\n",
+    );
+    let fake_codex = write_fake_command(
+        "assignment-restart-fake-codex",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output-last-message\" ]; then shift; last=\"$1\"; fi\n  shift\ndone\nprintf '{\"outcome\":\"Blocked\",\"summary\":\"persist me\"}\\n' > \"$last\"\n",
+    );
+    let (app, db) = test_router_with_execution(fake_wt.clone(), fake_codex.clone()).await;
+    let project = create_trusted_local_markdown_project(&app, &project_path).await;
+    sync_local_markdown_project(&app, &project).await;
+    let response = start_source_issue_assignment(&app, &project, "restart").await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let restarted = router(
+        ControlPlaneConfig {
+            bind_address: "127.0.0.1:0".parse().unwrap(),
+            dashboard_asset_dir: "apps/dashboard/dist".into(),
+            database_url: "sqlite::memory:".into(),
+            gh_binary_path: "gh".into(),
+            worktrunk_binary_path: fake_wt,
+            codex_binary_path: fake_codex,
+        },
+        db,
+    );
+    let state = restarted
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/projects/{}/assignment-state", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state.status(), StatusCode::OK);
+    let body = state.into_body().collect().await.unwrap().to_bytes();
+    let state: ProjectAssignmentStateResponse = serde_json::from_slice(&body).unwrap();
+    let assignment = state.active_assignment.unwrap();
+    assert_eq!(assignment.source_id, "restart");
+    assert_eq!(
+        assignment
+            .latest_attempt
+            .unwrap()
+            .terminal_outcome
+            .unwrap()
+            .summary,
+        "persist me"
+    );
 }
 
 #[tokio::test]
@@ -674,7 +1188,12 @@ async fn project_list_includes_trusted_field() {
         .await
         .unwrap();
     assert_eq!(list_response.status(), StatusCode::OK);
-    let list_body = list_response.into_body().collect().await.unwrap().to_bytes();
+    let list_body = list_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
     let projects: Vec<ProjectResponse> = serde_json::from_slice(&list_body).unwrap();
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].trusted, true);
@@ -733,7 +1252,12 @@ async fn git_summary_and_trust_are_both_returned() {
         .await
         .unwrap();
     assert_eq!(trust_response.status(), StatusCode::OK);
-    let trust_body = trust_response.into_body().collect().await.unwrap().to_bytes();
+    let trust_body = trust_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
     let trusted: ProjectResponse = serde_json::from_slice(&trust_body).unwrap();
     assert_eq!(trusted.trusted, true);
     assert_eq!(trusted.git_summary, None);
@@ -794,6 +1318,62 @@ async fn create_and_enable_local_markdown_project(
     project
 }
 
+async fn create_trusted_local_markdown_project(
+    app: &axum::Router,
+    project_path: &std::path::Path,
+) -> ProjectResponse {
+    let project = create_and_enable_local_markdown_project(app, project_path).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/trust", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn sync_local_markdown_project(app: &axum::Router, project: &ProjectResponse) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn start_source_issue_assignment(
+    app: &axum::Router,
+    project: &ProjectResponse,
+    source_id: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/{}/source-issues/{source_id}/assignment",
+                    project.id.0
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn lifecycle_status_write_back_updates_markdown_file() {
     let (project_path, issues_dir) = setup_local_markdown_project("lifecycle-write-back");
@@ -811,6 +1391,8 @@ async fn lifecycle_status_write_back_updates_markdown_file() {
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
+        worktrunk_binary_path: "wt".into(),
+        codex_binary_path: "codex".into(),
     };
     let app = router(config, db.clone());
 
@@ -894,6 +1476,8 @@ async fn planning_snapshot_reflects_lifecycle_status_exclusions() {
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
+        worktrunk_binary_path: "wt".into(),
+        codex_binary_path: "codex".into(),
     };
     let app = router(config, db.clone());
 
@@ -916,10 +1500,7 @@ async fn planning_snapshot_reflects_lifecycle_status_exclusions() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!(
-                    "/api/projects/{}/planning-snapshot",
-                    project.id.0
-                ))
+                .uri(format!("/api/projects/{}/planning-snapshot", project.id.0))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -927,13 +1508,34 @@ async fn planning_snapshot_reflects_lifecycle_status_exclusions() {
         .unwrap();
 
     assert_eq!(snapshot_response.status(), StatusCode::OK);
-    let body = snapshot_response.into_body().collect().await.unwrap().to_bytes();
+    let body = snapshot_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
     let snapshot: PlanningSnapshotResponse = serde_json::from_slice(&body).unwrap();
 
-    let eligible_ids: Vec<_> = snapshot.eligible.iter().map(|i| i.source_id.clone()).collect();
-    let active_ids: Vec<_> = snapshot.active.iter().map(|i| i.source_id.clone()).collect();
-    let completed_ids: Vec<_> = snapshot.completed.iter().map(|i| i.source_id.clone()).collect();
-    let non_ready_ids: Vec<_> = snapshot.non_ready.iter().map(|i| i.source_id.clone()).collect();
+    let eligible_ids: Vec<_> = snapshot
+        .eligible
+        .iter()
+        .map(|i| i.source_id.clone())
+        .collect();
+    let active_ids: Vec<_> = snapshot
+        .active
+        .iter()
+        .map(|i| i.source_id.clone())
+        .collect();
+    let completed_ids: Vec<_> = snapshot
+        .completed
+        .iter()
+        .map(|i| i.source_id.clone())
+        .collect();
+    let non_ready_ids: Vec<_> = snapshot
+        .non_ready
+        .iter()
+        .map(|i| i.source_id.clone())
+        .collect();
 
     assert!(eligible_ids.contains(&"eligible".to_string()));
     assert!(active_ids.contains(&"claimed".to_string()));
@@ -946,7 +1548,8 @@ async fn planning_snapshot_reflects_lifecycle_status_exclusions() {
 #[tokio::test]
 async fn lifecycle_status_write_back_preserves_raw_text() {
     let (project_path, issues_dir) = setup_local_markdown_project("lifecycle-preserve");
-    let original = "# Title\n\nReadiness: ready\nParent Issue: #5\n\nKeep this paragraph.\n\n- list item\n";
+    let original =
+        "# Title\n\nReadiness: ready\nParent Issue: #5\n\nKeep this paragraph.\n\n- list item\n";
     std::fs::write(issues_dir.join("preserve.md"), original).unwrap();
 
     let db = persistence::connect_in_memory().await.unwrap();
@@ -956,6 +1559,8 @@ async fn lifecycle_status_write_back_preserves_raw_text() {
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
+        worktrunk_binary_path: "wt".into(),
+        codex_binary_path: "codex".into(),
     };
     let app = router(config, db.clone());
 
@@ -1034,6 +1639,8 @@ async fn lifecycle_status_write_back_rejects_nonexistent_issue() {
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
+        worktrunk_binary_path: "wt".into(),
+        codex_binary_path: "codex".into(),
     };
     let app = router(config, db.clone());
 
@@ -1091,6 +1698,8 @@ async fn lifecycle_status_write_back_rejects_invalid_status() {
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
+        worktrunk_binary_path: "wt".into(),
+        codex_binary_path: "codex".into(),
     };
     let app = router(config, db.clone());
 
@@ -1128,7 +1737,10 @@ async fn lifecycle_status_write_back_rejects_invalid_status() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let problem: ProblemDetail = serde_json::from_slice(&body).unwrap();
     assert_eq!(problem.status, 422);
-    assert_eq!(problem.problem_type, "urn:agentic-afk:invalid-lifecycle-status");
+    assert_eq!(
+        problem.problem_type,
+        "urn:agentic-afk:invalid-lifecycle-status"
+    );
 
     std::fs::remove_dir_all(&project_path).unwrap();
 }
@@ -1144,6 +1756,8 @@ async fn lifecycle_status_write_back_rejects_github_source() {
         dashboard_asset_dir: "apps/dashboard/dist".into(),
         database_url: "sqlite::memory:".into(),
         gh_binary_path: "gh".into(),
+        worktrunk_binary_path: "wt".into(),
+        codex_binary_path: "codex".into(),
     };
     let app = router(config, db.clone());
 
@@ -1165,7 +1779,12 @@ async fn lifecycle_status_write_back_rejects_github_source() {
         .await
         .unwrap();
     assert_eq!(create_response.status(), StatusCode::CREATED);
-    let body = create_response.into_body().collect().await.unwrap().to_bytes();
+    let body = create_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
     let project: ProjectResponse = serde_json::from_slice(&body).unwrap();
 
     // Enable github source

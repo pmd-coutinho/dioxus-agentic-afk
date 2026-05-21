@@ -3,7 +3,8 @@
 //! Provides SQLite-backed storage for Projects.
 
 use agentic_afk_contracts::{
-    CreateProjectRequest, EnableIssueSourceRequest, IssueSource, IssueSourceSyncResponse,
+    AssignmentAttemptResponse, AssignmentTerminalOutcome, CreateProjectRequest,
+    EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource, IssueSourceSyncResponse,
     IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProjectId, ProjectResponse,
     SourceIssueSnapshot,
 };
@@ -25,6 +26,10 @@ pub enum PersistenceError {
     InvalidIssueSource(String),
     #[error("planning snapshot not found: {0}")]
     SnapshotNotFound(String),
+    #[error("Project already has an active Issue Assignment: {0}")]
+    ActiveAssignment(String),
+    #[error("Issue Assignment not found: {0}")]
+    AssignmentNotFound(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -168,10 +173,7 @@ pub async fn get_project(db: &Db, id: &str) -> Result<ProjectResponse, Persisten
 }
 
 /// Mark a Project as trusted for agent execution.
-pub async fn trust_project(
-    db: &Db,
-    project_id: &str,
-) -> Result<ProjectResponse, PersistenceError> {
+pub async fn trust_project(db: &Db, project_id: &str) -> Result<ProjectResponse, PersistenceError> {
     let result = sqlx::query("UPDATE projects SET trusted = 1 WHERE id = ?")
         .bind(project_id)
         .execute(db)
@@ -469,6 +471,211 @@ pub async fn get_planning_snapshot(
     })
 }
 
+pub async fn create_issue_assignment(
+    db: &Db,
+    project_id: &str,
+    source: &IssueSource,
+    issue: &SourceIssueSnapshot,
+    branch: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO issue_assignments (
+            id, project_id, source_kind, source_locator, source_id, source_title,
+            source_raw_text, branch, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'provisional')
+        "#,
+    )
+    .bind(&id)
+    .bind(project_id)
+    .bind(&source.kind)
+    .bind(&source.locator)
+    .bind(&issue.source_id)
+    .bind(&issue.title)
+    .bind(&issue.raw_text)
+    .bind(branch)
+    .execute(db)
+    .await
+    .map_err(|error| match &error {
+        sqlx::Error::Database(db_error) if db_error.is_unique_violation() => {
+            PersistenceError::ActiveAssignment(project_id.to_string())
+        }
+        _ => PersistenceError::Database(error),
+    })?;
+
+    get_issue_assignment(db, &id).await
+}
+
+pub async fn release_issue_assignment(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<(), PersistenceError> {
+    sqlx::query("DELETE FROM issue_assignments WHERE id = ?")
+        .bind(assignment_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_assignment_worktree(
+    db: &Db,
+    assignment_id: &str,
+    worktree_path: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    update_assignment(db, assignment_id, "claimed", None, Some(worktree_path)).await
+}
+
+pub async fn set_assignment_status(
+    db: &Db,
+    assignment_id: &str,
+    status: &str,
+    status_detail: Option<&str>,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    update_assignment(db, assignment_id, status, status_detail, None).await
+}
+
+pub async fn record_initial_attempt(
+    db: &Db,
+    assignment_id: &str,
+    process_id: Option<u32>,
+    terminal_outcome: Option<&AssignmentTerminalOutcome>,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    let id = Uuid::new_v4().to_string();
+    let terminal_outcome_json = terminal_outcome
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| PersistenceError::Database(sqlx::Error::Decode(Box::new(error))))?;
+    sqlx::query(
+        r#"
+        INSERT INTO assignment_attempts (
+            id, assignment_id, kind, process_id, terminal_outcome_json
+        )
+        VALUES (?, ?, 'initial', ?, ?)
+        "#,
+    )
+    .bind(id)
+    .bind(assignment_id)
+    .bind(process_id.map(i64::from))
+    .bind(terminal_outcome_json)
+    .execute(db)
+    .await?;
+    get_issue_assignment(db, assignment_id).await
+}
+
+pub async fn get_active_assignment(
+    db: &Db,
+    project_id: &str,
+) -> Result<Option<IssueAssignmentResponse>, PersistenceError> {
+    let id = sqlx::query_as::<_, (String,)>(
+        "SELECT id FROM issue_assignments WHERE project_id = ? AND status != 'abandoned' LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(db)
+    .await?
+    .map(|row| row.0);
+    match id {
+        Some(id) => get_issue_assignment(db, &id).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+async fn update_assignment(
+    db: &Db,
+    assignment_id: &str,
+    status: &str,
+    status_detail: Option<&str>,
+    worktree_path: Option<&str>,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    let result = if let Some(worktree_path) = worktree_path {
+        sqlx::query(
+            "UPDATE issue_assignments SET status = ?, status_detail = ?, worktree_path = ? WHERE id = ?",
+        )
+        .bind(status)
+        .bind(status_detail)
+        .bind(worktree_path)
+        .bind(assignment_id)
+        .execute(db)
+        .await?
+    } else {
+        sqlx::query("UPDATE issue_assignments SET status = ?, status_detail = ? WHERE id = ?")
+            .bind(status)
+            .bind(status_detail)
+            .bind(assignment_id)
+            .execute(db)
+            .await?
+    };
+    if result.rows_affected() == 0 {
+        return Err(PersistenceError::AssignmentNotFound(
+            assignment_id.to_string(),
+        ));
+    }
+    get_issue_assignment(db, assignment_id).await
+}
+
+async fn get_issue_assignment(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    let row = sqlx::query_as::<_, (String, String, String, String, String, String, String)>(
+        r#"
+        SELECT id, project_id, source_id, source_title, branch, worktree_path, status
+        FROM issue_assignments
+        WHERE id = ?
+        "#,
+    )
+    .bind(assignment_id)
+    .fetch_optional(db)
+    .await?;
+    let Some((id, project_id, source_id, source_title, branch, worktree_path, status)) = row else {
+        return Err(PersistenceError::AssignmentNotFound(
+            assignment_id.to_string(),
+        ));
+    };
+    let status_detail = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT status_detail FROM issue_assignments WHERE id = ?",
+    )
+    .bind(assignment_id)
+    .fetch_one(db)
+    .await?
+    .0;
+    let latest_attempt = sqlx::query_as::<_, (String, String, Option<i64>, Option<String>)>(
+        r#"
+        SELECT id, kind, process_id, terminal_outcome_json
+        FROM assignment_attempts
+        WHERE assignment_id = ?
+        ORDER BY rowid DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(assignment_id)
+    .fetch_optional(db)
+    .await?
+    .map(|(id, kind, process_id, terminal_outcome_json)| {
+        let terminal_outcome = terminal_outcome_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok());
+        AssignmentAttemptResponse {
+            id,
+            kind,
+            process_id: process_id.and_then(|id| u32::try_from(id).ok()),
+            terminal_outcome,
+        }
+    });
+    Ok(IssueAssignmentResponse {
+        id,
+        project_id: ProjectId(project_id),
+        source_id,
+        source_title,
+        branch,
+        worktree_path,
+        status,
+        status_detail,
+        latest_attempt,
+    })
+}
+
 fn validate_issue_source(request: &EnableIssueSourceRequest) -> Result<(), PersistenceError> {
     let supported_kind = matches!(request.kind.as_str(), "github" | "local_markdown");
     if !supported_kind || request.locator.trim().is_empty() {
@@ -496,11 +703,12 @@ pub async fn seed_dev_project(
     let normalized_path = normalize_project_path(dev_path)?;
 
     // Check if already seeded
-    let existing =
-        sqlx::query_as::<_, (String, String, i64)>("SELECT id, path, trusted FROM projects WHERE path = ?")
-            .bind(&normalized_path)
-            .fetch_optional(db)
-            .await?;
+    let existing = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT id, path, trusted FROM projects WHERE path = ?",
+    )
+    .bind(&normalized_path)
+    .fetch_optional(db)
+    .await?;
 
     if let Some((id, path, trusted)) = existing {
         return Ok(ProjectResponse {
@@ -701,25 +909,27 @@ mod tests {
             kind: "local_markdown".to_string(),
             locator: ".scratch/issues".to_string(),
         };
-        enable_issue_source(&db, &project.id.0, &EnableIssueSourceRequest {
-            kind: source.kind.clone(),
-            locator: source.locator.clone(),
-        })
+        enable_issue_source(
+            &db,
+            &project.id.0,
+            &EnableIssueSourceRequest {
+                kind: source.kind.clone(),
+                locator: source.locator.clone(),
+            },
+        )
         .await
         .unwrap();
 
-        let issues = vec![
-            SourceIssueSnapshot {
-                source_id: "claimed-with-deps".to_string(),
-                title: "claimed".to_string(),
-                readiness: "ready".to_string(),
-                lifecycle_status: "claimed".to_string(),
-                parent_issue: None,
-                issue_dependencies: vec!["some-dep".to_string()],
-                source_order: 1,
-                raw_text: "raw".to_string(),
-            },
-        ];
+        let issues = vec![SourceIssueSnapshot {
+            source_id: "claimed-with-deps".to_string(),
+            title: "claimed".to_string(),
+            readiness: "ready".to_string(),
+            lifecycle_status: "claimed".to_string(),
+            parent_issue: None,
+            issue_dependencies: vec!["some-dep".to_string()],
+            source_order: 1,
+            raw_text: "raw".to_string(),
+        }];
 
         replace_planning_snapshot(&db, &project.id.0, &source, &issues, "unix:1")
             .await
@@ -748,10 +958,14 @@ mod tests {
             kind: "local_markdown".to_string(),
             locator: ".scratch/issues".to_string(),
         };
-        enable_issue_source(&db, &project.id.0, &EnableIssueSourceRequest {
-            kind: source.kind.clone(),
-            locator: source.locator.clone(),
-        })
+        enable_issue_source(
+            &db,
+            &project.id.0,
+            &EnableIssueSourceRequest {
+                kind: source.kind.clone(),
+                locator: source.locator.clone(),
+            },
+        )
         .await
         .unwrap();
 
@@ -773,7 +987,11 @@ mod tests {
         assert_eq!(snapshot.non_ready[0].source_id, "not-ready");
 
         assert_eq!(snapshot.active.len(), 3);
-        let active_ids: Vec<_> = snapshot.active.iter().map(|i| i.source_id.clone()).collect();
+        let active_ids: Vec<_> = snapshot
+            .active
+            .iter()
+            .map(|i| i.source_id.clone())
+            .collect();
         assert!(active_ids.contains(&"ready-claimed".to_string()));
         assert!(active_ids.contains(&"ready-running".to_string()));
         assert!(active_ids.contains(&"ready-blocked".to_string()));

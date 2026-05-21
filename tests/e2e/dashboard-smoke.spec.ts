@@ -91,6 +91,13 @@ test('Project detail enables a discovered Issue Source candidate', async ({
   await expect(
     page.getByText('Eligible ready issue', { exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Start Assignment' }),
+  ).toBeHidden();
+  await page.getByRole('button', { name: 'Trust Project' }).click();
+  await expect(
+    page.getByRole('button', { name: 'Start Assignment' }),
+  ).toBeVisible();
   const blockedIssues = page
     .getByRole('heading', { name: 'Blocked Ready Issues' })
     .locator('..');

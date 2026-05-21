@@ -3,12 +3,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentic_afk_contracts::{
-    AppInfoResponse, CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest,
-    HealthResponse, IssueSource, IssueSourceCandidate, IssueSourceSyncResponse,
-    IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProblemDetail, ProjectResponse,
+    AppInfoResponse, AssignmentAttemptResponse, AssignmentTerminalOutcome, CreateProjectRequest,
+    EffectiveConfig, EnableIssueSourceRequest, HealthResponse, IssueAssignmentResponse,
+    IssueSource, IssueSourceCandidate, IssueSourceSyncResponse, IssueSourceSyncStatusResponse,
+    PlanningSnapshotResponse, ProblemDetail, ProjectAssignmentStateResponse, ProjectResponse,
     SourceIssueSnapshot,
 };
 use agentic_afk_git_summary::summarize_project_path;
+use agentic_afk_orchestrator::{create_assignment_worktree, preflight_binary, run_initial_codex};
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -16,10 +18,10 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use std::process::Command;
 use tower_http::services::{ServeDir, ServeFile};
 use utoipa::OpenApi;
+use utoipa::ToSchema;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneConfig {
@@ -27,6 +29,8 @@ pub struct ControlPlaneConfig {
     pub dashboard_asset_dir: PathBuf,
     pub database_url: String,
     pub gh_binary_path: PathBuf,
+    pub worktrunk_binary_path: PathBuf,
+    pub codex_binary_path: PathBuf,
 }
 
 impl ControlPlaneConfig {
@@ -42,12 +46,20 @@ impl ControlPlaneConfig {
         let gh_binary_path = std::env::var("AGENTIC_AFK_GH_BIN")
             .unwrap_or_else(|_| "gh".to_string())
             .into();
+        let worktrunk_binary_path = std::env::var("AGENTIC_AFK_WORKTRUNK_BIN")
+            .unwrap_or_else(|_| "wt".to_string())
+            .into();
+        let codex_binary_path = std::env::var("AGENTIC_AFK_CODEX_BIN")
+            .unwrap_or_else(|_| "codex".to_string())
+            .into();
 
         Ok(Self {
             bind_address,
             dashboard_asset_dir,
             database_url,
             gh_binary_path,
+            worktrunk_binary_path,
+            codex_binary_path,
         })
     }
 
@@ -85,7 +97,9 @@ pub struct SetLifecycleStatusRequest {
         get_issue_source_sync_status,
         sync_issue_source,
         get_planning_snapshot,
-        update_lifecycle_status
+        get_assignment_state,
+        update_lifecycle_status,
+        start_assignment
     ),
     components(schemas(
         HealthResponse,
@@ -100,6 +114,10 @@ pub struct SetLifecycleStatusRequest {
         IssueSourceSyncResponse,
         IssueSourceSyncStatusResponse,
         PlanningSnapshotResponse,
+        ProjectAssignmentStateResponse,
+        IssueAssignmentResponse,
+        AssignmentAttemptResponse,
+        AssignmentTerminalOutcome,
         SourceIssueSnapshot,
         ProblemDetail
     )),
@@ -144,8 +162,16 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
             get(get_planning_snapshot),
         )
         .route(
+            "/api/projects/{id}/assignment-state",
+            get(get_assignment_state),
+        )
+        .route(
             "/api/projects/{id}/source-issues/{source_id}/lifecycle-status",
             axum::routing::put(update_lifecycle_status),
+        )
+        .route(
+            "/api/projects/{id}/source-issues/{source_id}/assignment",
+            post(start_assignment),
         )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
@@ -268,10 +294,7 @@ async fn get_project(State(state): State<Arc<AppState>>, Path(id): Path<String>)
         (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
     )
 )]
-async fn trust_project(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Response {
+async fn trust_project(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match persistence::trust_project(&state.db, &id).await {
         Ok(project) => Json(with_git_summary(project)).into_response(),
         Err(e) => persistence_error_to_response(e),
@@ -422,6 +445,45 @@ async fn get_planning_snapshot(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/projects/{id}/assignment-state",
+    params(("id" = String, Path, description = "Project ID")),
+    responses(
+        (status = OK, body = ProjectAssignmentStateResponse),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn get_assignment_state(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let active_assignment = match persistence::get_active_assignment(&state.db, &id).await {
+        Ok(assignment) => assignment,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    let waiting_ready_issue_count = persistence::get_planning_snapshot(&state.db, &id)
+        .await
+        .map(|snapshot| {
+            snapshot
+                .eligible
+                .iter()
+                .filter(|issue| {
+                    active_assignment
+                        .as_ref()
+                        .is_none_or(|assignment| assignment.source_id != issue.source_id)
+                })
+                .count()
+        })
+        .unwrap_or_default();
+    Json(ProjectAssignmentStateResponse {
+        active_assignment,
+        waiting_ready_issue_count,
+    })
+    .into_response()
+}
+
+#[utoipa::path(
     put,
     path = "/api/projects/{id}/source-issues/{source_id}/lifecycle-status",
     params(
@@ -548,6 +610,252 @@ async fn update_lifecycle_status(
 
     let snapshot = parse_local_markdown_issue(source_id, updated_raw, 0);
     Json(snapshot).into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/projects/{id}/source-issues/{source_id}/assignment",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+        ("source_id" = String, Path, description = "Source Issue ID")
+    ),
+    responses(
+        (status = CREATED, body = IssueAssignmentResponse),
+        (status = UNPROCESSABLE_ENTITY, body = ProblemDetail, content_type = "application/problem+json"),
+        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json")
+    )
+)]
+async fn start_assignment(
+    State(state): State<Arc<AppState>>,
+    Path((id, source_id)): Path<(String, String)>,
+) -> Response {
+    let project = match persistence::get_project(&state.db, &id).await {
+        Ok(project) => project,
+        Err(error) => return persistence_error_to_response(error),
+    };
+
+    if !project.trusted {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:project-untrusted",
+            "Unprocessable Entity",
+            "Project must be trusted before an Issue Assignment can start".to_string(),
+        );
+    }
+
+    let Some(source) = project.enabled_issue_source.clone() else {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:issue-source-not-enabled",
+            "Unprocessable Entity",
+            "Project has no enabled Issue Source".to_string(),
+        );
+    };
+    if source.kind != "local_markdown" {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:assignment-source-not-supported",
+            "Unprocessable Entity",
+            "The first Issue Assignment tracer bullet supports local_markdown Issue Sources"
+                .to_string(),
+        );
+    }
+
+    let planning = match persistence::get_planning_snapshot(&state.db, &id).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    let Some(issue) = planning
+        .eligible
+        .into_iter()
+        .find(|issue| issue.source_id == source_id)
+    else {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:source-issue-not-eligible",
+            "Unprocessable Entity",
+            format!("Source Issue is not an eligible Ready Issue: {source_id}"),
+        );
+    };
+
+    if !PathBuf::from(&project.path).join(".git").exists() {
+        return assignment_problem(
+            "urn:agentic-afk:assignment-preflight-failed",
+            "Issue Assignment execution requires a Git-backed Project".to_string(),
+        );
+    }
+    for (binary_path, name) in [
+        (&state.config.worktrunk_binary_path, "Worktrunk"),
+        (&state.config.codex_binary_path, "Codex"),
+    ] {
+        if let Err(detail) = preflight_binary(binary_path, name) {
+            return assignment_problem("urn:agentic-afk:assignment-preflight-failed", detail);
+        }
+    }
+
+    let branch = assignment_branch(&source, &issue.source_id);
+    let mut assignment = match persistence::create_issue_assignment(
+        &state.db, &id, &source, &issue, &branch,
+    )
+    .await
+    {
+        Ok(assignment) => assignment,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    let worktree_path = match create_assignment_worktree(
+        &state.config.worktrunk_binary_path,
+        std::path::Path::new(&project.path),
+        &branch,
+    ) {
+        Ok(path) => path,
+        Err(detail) => {
+            let _ = persistence::release_issue_assignment(&state.db, &assignment.id).await;
+            return assignment_problem("urn:agentic-afk:assignment-setup-failed", detail);
+        }
+    };
+    assignment = match persistence::set_assignment_worktree(
+        &state.db,
+        &assignment.id,
+        &worktree_path.display().to_string(),
+    )
+    .await
+    {
+        Ok(assignment) => assignment,
+        Err(error) => return persistence_error_to_response(error),
+    };
+
+    if let Err(detail) = write_local_markdown_lifecycle(&project, &source, &source_id, "claimed") {
+        let _ = persistence::release_issue_assignment(&state.db, &assignment.id).await;
+        return assignment_problem("urn:agentic-afk:assignment-claim-failed", detail);
+    }
+    let _ = write_local_markdown_lifecycle(&project, &source, &source_id, "running");
+    let _ = persistence::set_assignment_status(&state.db, &assignment.id, "running", None).await;
+
+    let prompt = format!(
+        "Implement this Issue Assignment in the Assignment Worktree.\n\n{}",
+        issue.raw_text
+    );
+    let execution = run_initial_codex(&state.config.codex_binary_path, &worktree_path, &prompt);
+    assignment = match execution {
+        Ok(execution) => {
+            let _ = persistence::record_initial_attempt(
+                &state.db,
+                &assignment.id,
+                Some(execution.process_id),
+                Some(&execution.terminal_outcome),
+            )
+            .await;
+            let (status, detail) = match execution.terminal_outcome.outcome.as_str() {
+                "ReadyForProposal" => (
+                    "blocked",
+                    Some("local markdown Issue Source has no Change Proposal target"),
+                ),
+                "Failed" => ("failed", Some(execution.terminal_outcome.summary.as_str())),
+                _ => ("blocked", Some(execution.terminal_outcome.summary.as_str())),
+            };
+            let _ = write_local_markdown_lifecycle(&project, &source, &source_id, "blocked");
+            match persistence::set_assignment_status(&state.db, &assignment.id, status, detail)
+                .await
+            {
+                Ok(assignment) => assignment,
+                Err(error) => return persistence_error_to_response(error),
+            }
+        }
+        Err(detail) => {
+            let failed = agentic_afk_contracts::AssignmentTerminalOutcome {
+                outcome: "Failed".to_string(),
+                summary: detail.clone(),
+            };
+            let _ =
+                persistence::record_initial_attempt(&state.db, &assignment.id, None, Some(&failed))
+                    .await;
+            let _ = write_local_markdown_lifecycle(&project, &source, &source_id, "blocked");
+            match persistence::set_assignment_status(
+                &state.db,
+                &assignment.id,
+                "failed",
+                Some(&detail),
+            )
+            .await
+            {
+                Ok(assignment) => assignment,
+                Err(error) => return persistence_error_to_response(error),
+            }
+        }
+    };
+    let _ = refresh_local_markdown_snapshot(&state.db, &project, &source).await;
+
+    (StatusCode::CREATED, Json(assignment)).into_response()
+}
+
+fn assignment_problem(problem_type: &str, detail: String) -> Response {
+    sync_problem_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        problem_type,
+        "Unprocessable Entity",
+        detail,
+    )
+}
+
+fn assignment_branch(source: &IssueSource, source_id: &str) -> String {
+    let identity = format!("{}-{source_id}", source.kind.replace('_', "-"));
+    let identity = identity
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("agentic-afk/{identity}")
+}
+
+fn write_local_markdown_lifecycle(
+    project: &ProjectResponse,
+    source: &IssueSource,
+    source_id: &str,
+    lifecycle_status: &str,
+) -> Result<SourceIssueSnapshot, String> {
+    let project_root = std::fs::canonicalize(&project.path)
+        .map_err(|error| format!("failed to resolve Project path: {error}"))?;
+    let source_dir = std::fs::canonicalize(project_root.join(&source.locator))
+        .map_err(|error| format!("failed to read local markdown Issue Source: {error}"))?;
+    if !source_dir.starts_with(&project_root) {
+        return Err("local markdown Issue Source must be inside the Project path".to_string());
+    }
+    let issue_path = source_dir.join(format!("{source_id}.md"));
+    let raw_text = std::fs::read_to_string(&issue_path)
+        .map_err(|_| format!("Source Issue not found: {source_id}"))?;
+    let updated_text = update_markdown_lifecycle_status(raw_text, lifecycle_status);
+    std::fs::write(&issue_path, updated_text)
+        .map_err(|error| format!("failed to write Source Issue file: {error}"))?;
+    let updated_raw = std::fs::read_to_string(&issue_path)
+        .map_err(|error| format!("failed to read updated Source Issue file: {error}"))?;
+    Ok(parse_local_markdown_issue(
+        source_id.to_string(),
+        updated_raw,
+        0,
+    ))
+}
+
+async fn refresh_local_markdown_snapshot(
+    db: &Db,
+    project: &ProjectResponse,
+    source: &IssueSource,
+) -> Result<(), String> {
+    let issues = read_local_markdown_issues(&project.path, &source.locator)?;
+    persistence::replace_planning_snapshot(
+        db,
+        &project.id.0,
+        source,
+        &issues,
+        &current_sync_timestamp(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn read_local_markdown_issues(
@@ -770,10 +1078,7 @@ fn update_markdown_lifecycle_status(raw_text: String, lifecycle_status: &str) ->
         .lines()
         .map(|line| {
             let trimmed = line.trim_start();
-            if trimmed
-                .to_ascii_lowercase()
-                .starts_with("lifecycle status")
-                && trimmed.contains(':')
+            if trimmed.to_ascii_lowercase().starts_with("lifecycle status") && trimmed.contains(':')
             {
                 found = true;
                 let leading_ws = &line[..line.len() - line.trim_start().len()];
@@ -801,7 +1106,11 @@ fn update_markdown_lifecycle_status(raw_text: String, lifecycle_status: &str) ->
             .unwrap_or(0);
         let leading_ws = lines.get(insert_idx).map(|l| {
             let ws = &l[..l.len() - l.trim_start().len()];
-            if ws.is_empty() { "\n".to_string() } else { ws.to_string() }
+            if ws.is_empty() {
+                "\n".to_string()
+            } else {
+                ws.to_string()
+            }
         });
         let new_line = format!("Lifecycle Status: {}", lifecycle_status);
         if let Some(ws) = leading_ws {
@@ -926,6 +1235,16 @@ fn persistence_error_to_response(err: PersistenceError) -> Response {
         PersistenceError::SnapshotNotFound(_) => (
             StatusCode::NOT_FOUND,
             "urn:agentic-afk:planning-snapshot-not-found",
+            "Not Found",
+        ),
+        PersistenceError::ActiveAssignment(_) => (
+            StatusCode::CONFLICT,
+            "urn:agentic-afk:active-assignment",
+            "Conflict",
+        ),
+        PersistenceError::AssignmentNotFound(_) => (
+            StatusCode::NOT_FOUND,
+            "urn:agentic-afk:assignment-not-found",
             "Not Found",
         ),
         PersistenceError::Database(_) => (

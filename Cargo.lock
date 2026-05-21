@@ -17,6 +17,7 @@ version = "0.1.0"
 dependencies = [
  "agentic-afk-contracts",
  "agentic-afk-git-summary",
+ "agentic-afk-orchestrator",
  "agentic-afk-persistence",
  "anyhow",
  "axum",
@@ -52,6 +53,10 @@ dependencies = [
 [[package]]
 name = "agentic-afk-orchestrator"
 version = "0.1.0"
+dependencies = [
+ "agentic-afk-contracts",
+ "serde_json",
+]
 
 [[package]]
 name = "agentic-afk-persistence"

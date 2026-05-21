@@ -17,6 +17,7 @@ repository = "https://github.com/pmd-coutinho/dioxus-agentic-afk"
 [workspace.dependencies]
 agentic-afk-contracts = { path = "crates/contracts" }
 agentic-afk-git-summary = { path = "crates/git-summary" }
+agentic-afk-orchestrator = { path = "crates/orchestrator" }
 agentic-afk-persistence = { path = "crates/persistence" }
 anyhow = "1.0.100"
 axum = "0.8.7"

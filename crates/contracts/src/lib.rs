@@ -115,6 +115,43 @@ pub struct SourceIssueSnapshot {
     pub raw_text: String,
 }
 
+/// Durable view of one Issue Assignment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct IssueAssignmentResponse {
+    pub id: String,
+    pub project_id: ProjectId,
+    pub source_id: String,
+    pub source_title: String,
+    pub branch: String,
+    pub worktree_path: String,
+    pub status: String,
+    pub status_detail: Option<String>,
+    pub latest_attempt: Option<AssignmentAttemptResponse>,
+}
+
+/// Project detail Issue Assignment state for the first single-slot execution slice.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ProjectAssignmentStateResponse {
+    pub active_assignment: Option<IssueAssignmentResponse>,
+    pub waiting_ready_issue_count: usize,
+}
+
+/// One agent execution pass within an Issue Assignment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct AssignmentAttemptResponse {
+    pub id: String,
+    pub kind: String,
+    pub process_id: Option<u32>,
+    pub terminal_outcome: Option<AssignmentTerminalOutcome>,
+}
+
+/// Structured terminal outcome reported by the Codex backend.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct AssignmentTerminalOutcome {
+    pub outcome: String,
+    pub summary: String,
+}
+
 /// RFC 7807 problem+json error response.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct ProblemDetail {
