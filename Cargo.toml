@@ -28,7 +28,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "migrate"] }
 thiserror = "2"
-tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
 tower = { version = "0.5.2", features = ["util"] }
 tower-http = { version = "0.6.6", features = ["fs", "trace"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }

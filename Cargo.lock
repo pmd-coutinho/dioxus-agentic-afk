@@ -22,10 +22,12 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "futures-util",
  "http-body-util",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http",
  "tracing-subscriber",
@@ -4823,6 +4825,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
