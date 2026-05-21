@@ -11,7 +11,11 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Start the Local Control Plane server
-    Serve,
+    Serve {
+        /// Seed this repository as a development Project before serving
+        #[arg(long)]
+        seed_dev: bool,
+    },
     /// Apply database migrations
     Migrate,
     /// Seed this repository as a development Project (idempotent)
@@ -30,7 +34,13 @@ async fn main() -> anyhow::Result<()> {
     let config = ControlPlaneConfig::from_env()?;
 
     match Cli::parse().command {
-        Command::Serve => serve(config).await,
+        Command::Serve { seed_dev } => {
+            if seed_dev {
+                let dev_path = std::env::current_dir()?.to_string_lossy().to_string();
+                run_seed_dev(&config.database_url, &dev_path).await?;
+            }
+            serve(config).await
+        }
         Command::Migrate => run_migrate(&config.database_url).await,
         Command::SeedDev => {
             let dev_path = std::env::current_dir()?.to_string_lossy().to_string();
