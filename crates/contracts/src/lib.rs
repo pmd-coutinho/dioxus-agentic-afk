@@ -128,6 +128,41 @@ pub struct IssueAssignmentResponse {
     pub status_detail: Option<String>,
     pub change_proposal: Option<ChangeProposalResponse>,
     pub latest_attempt: Option<AssignmentAttemptResponse>,
+    #[serde(default)]
+    pub repair_budget: Option<RepairBudgetResponse>,
+}
+
+/// Bounded GitHub Change Proposal Repair Loop budget for an Issue Assignment.
+///
+/// `attempt_count` is incremented only by `repair` Assignment Attempts; recovery
+/// attempts never advance this budget. `window_started_at` stamps when the
+/// elapsed window began (unix seconds, recorded on the first repair attempt).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct RepairBudgetResponse {
+    pub attempt_count: i64,
+    pub max_attempts: i64,
+    pub window_seconds: i64,
+    pub window_started_at: Option<i64>,
+}
+
+/// Failed required GitHub check fact carried into a repair Assignment Attempt.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct FailedCheckFact {
+    pub name: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+/// Request body for starting a repair Assignment Attempt on a failed
+/// Change Proposal.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct RepairAssignmentRequest {
+    #[serde(default)]
+    pub failed_checks: Vec<FailedCheckFact>,
+    #[serde(default)]
+    pub verified_worktree_facts: Option<String>,
 }
 
 /// Hosted code proposal created from an Issue Assignment.

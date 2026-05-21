@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use agentic_afk_contracts::{
     AppInfoResponse, AssignmentAttemptResponse, AssignmentTerminalOutcome, ChangeProposalResponse,
-    CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest, HealthResponse,
-    IssueAssignmentResponse, IssueSource, IssueSourceCandidate, IssueSourceSyncResponse,
-    IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProblemDetail,
-    ProjectAssignmentStateResponse, ProjectResponse, SourceIssueSnapshot,
+    CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest, FailedCheckFact,
+    HealthResponse, IssueAssignmentResponse, IssueSource, IssueSourceCandidate,
+    IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse,
+    ProblemDetail, ProjectAssignmentStateResponse, ProjectResponse, RepairAssignmentRequest,
+    RepairBudgetResponse, SourceIssueSnapshot,
 };
 use agentic_afk_git_summary::summarize_project_path;
 use agentic_afk_orchestrator::{
@@ -75,10 +76,12 @@ impl ControlPlaneConfig {
 }
 
 #[derive(Clone)]
-struct AppState {
-    config: ControlPlaneConfig,
-    db: Db,
+pub(crate) struct AppState {
+    pub(crate) config: ControlPlaneConfig,
+    pub(crate) db: Db,
 }
+
+mod repair;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct SetLifecycleStatusRequest {
@@ -122,6 +125,9 @@ pub struct SetLifecycleStatusRequest {
         AssignmentAttemptResponse,
         AssignmentTerminalOutcome,
         SourceIssueSnapshot,
+        RepairBudgetResponse,
+        RepairAssignmentRequest,
+        FailedCheckFact,
         ProblemDetail
     )),
     tags((name = "Local Control Plane", description = "Local Control Plane API"))
@@ -175,6 +181,10 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route(
             "/api/projects/{id}/source-issues/{source_id}/assignment",
             post(start_assignment),
+        )
+        .route(
+            "/api/projects/{id}/assignments/{assignment_id}/repair",
+            post(repair::repair_assignment),
         )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
@@ -991,7 +1001,7 @@ fn write_local_markdown_lifecycle(
     ))
 }
 
-fn write_assignment_lifecycle(
+pub(crate) fn write_assignment_lifecycle(
     gh_binary_path: &std::path::Path,
     project: &ProjectResponse,
     source: &IssueSource,
@@ -1145,7 +1155,7 @@ fn ensure_github_lifecycle_labels(
     Ok(())
 }
 
-fn comment_github_issue(
+pub(crate) fn comment_github_issue(
     gh_binary_path: &std::path::Path,
     locator: &str,
     source_id: &str,
@@ -1598,7 +1608,7 @@ fn github_locator_from_url(url: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
-fn persistence_error_to_response(err: PersistenceError) -> Response {
+pub(crate) fn persistence_error_to_response(err: PersistenceError) -> Response {
     let (status, problem_type, title) = match &err {
         PersistenceError::NotFound(_) => (
             StatusCode::NOT_FOUND,
@@ -1634,6 +1644,16 @@ fn persistence_error_to_response(err: PersistenceError) -> Response {
             StatusCode::NOT_FOUND,
             "urn:agentic-afk:assignment-not-found",
             "Not Found",
+        ),
+        PersistenceError::NoChangeProposal(_) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:no-change-proposal",
+            "Unprocessable Entity",
+        ),
+        PersistenceError::RepairBudgetExhausted(_) => (
+            StatusCode::CONFLICT,
+            "urn:agentic-afk:repair-budget-exhausted",
+            "Conflict",
         ),
         PersistenceError::Database(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,

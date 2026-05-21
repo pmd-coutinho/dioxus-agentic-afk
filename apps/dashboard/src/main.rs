@@ -583,6 +583,11 @@ fn AssignmentState(state: ProjectAssignmentStateResponse) -> Element {
                                 "Change Proposal {proposal.status}"
                             }
                         }
+                        if let Some(budget) = assignment.repair_budget {
+                            p { class: "text-xs text-zinc-400",
+                                "Repair Loop {budget.attempt_count} of {budget.max_attempts} attempts within {budget.window_seconds}s window"
+                            }
+                        }
                     }
                     if state.waiting_ready_issue_count > 0 {
                         p { class: "mt-4 border-t border-zinc-800 pt-3 text-sm text-zinc-300",

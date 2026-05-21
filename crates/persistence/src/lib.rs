@@ -6,8 +6,10 @@ use agentic_afk_contracts::{
     AssignmentAttemptResponse, AssignmentTerminalOutcome, ChangeProposalResponse,
     CreateProjectRequest, EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource,
     IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProjectId,
-    ProjectResponse, SourceIssueSnapshot,
+    ProjectResponse, RepairBudgetResponse, SourceIssueSnapshot,
 };
+
+pub mod repair;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
 use std::path::Path;
@@ -30,6 +32,10 @@ pub enum PersistenceError {
     ActiveAssignment(String),
     #[error("Issue Assignment not found: {0}")]
     AssignmentNotFound(String),
+    #[error("Issue Assignment has no Change Proposal to repair: {0}")]
+    NoChangeProposal(String),
+    #[error("Repair budget exhausted for Issue Assignment: {0}")]
+    RepairBudgetExhausted(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -588,6 +594,30 @@ pub async fn record_initial_attempt(
     get_issue_assignment(db, assignment_id).await
 }
 
+/// Public accessor for fetching a single Issue Assignment by id.
+pub async fn get_assignment(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    get_issue_assignment(db, assignment_id).await
+}
+
+/// Fetch the persisted Source Issue raw text for an assignment, used when
+/// building repair prompts that need the original brief verbatim.
+pub async fn get_assignment_source_raw_text(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<String, PersistenceError> {
+    let row = sqlx::query_as::<_, (String,)>(
+        "SELECT source_raw_text FROM issue_assignments WHERE id = ?",
+    )
+    .bind(assignment_id)
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| PersistenceError::AssignmentNotFound(assignment_id.to_string()))?;
+    Ok(row.0)
+}
+
 pub async fn get_active_assignment(
     db: &Db,
     project_id: &str,
@@ -638,7 +668,7 @@ async fn update_assignment(
     get_issue_assignment(db, assignment_id).await
 }
 
-async fn get_issue_assignment(
+pub(crate) async fn get_issue_assignment(
     db: &Db,
     assignment_id: &str,
 ) -> Result<IssueAssignmentResponse, PersistenceError> {
@@ -703,6 +733,23 @@ async fn get_issue_assignment(
                 }
             },
         );
+    let repair_budget = sqlx::query_as::<_, (i64, Option<i64>, i64, i64)>(
+        r#"
+        SELECT repair_attempt_count, repair_window_started_at, repair_max_attempts, repair_window_seconds
+        FROM issue_assignments
+        WHERE id = ?
+        "#,
+    )
+    .bind(assignment_id)
+    .fetch_one(db)
+    .await
+    .ok()
+    .map(|(attempt_count, window_started_at, max_attempts, window_seconds)| RepairBudgetResponse {
+        attempt_count,
+        max_attempts,
+        window_seconds,
+        window_started_at,
+    });
     Ok(IssueAssignmentResponse {
         id,
         project_id: ProjectId(project_id),
@@ -714,6 +761,7 @@ async fn get_issue_assignment(
         status_detail,
         change_proposal,
         latest_attempt,
+        repair_budget,
     })
 }
 
