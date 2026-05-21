@@ -18,6 +18,10 @@ The planning slice is read-only with respect to Issue Sources. Lifecycle Status 
 
 This proves the source-authoritative planning model and scheduling view before adding worktrees, agent processes, Change Proposal creation, CI polling, or Repair Loops.
 
+The first execution slice built on this planning view starts only from an explicit `Start Assignment` action on an eligible Ready Issue. Blocked and non-ready Source Issues remain visible planning facts without execution actions.
+
+When local markdown Source Issues become executable, lifecycle write-back updates a canonical current lifecycle metadata field in the issue file while preserving the rest of the raw issue brief. Readiness remains separate: local markdown parsing excludes Source Issues with active `Claimed`, `Running`, or `Blocked` lifecycle status from eligible starts and keeps `Completed` status durable in the file because there is no host-native issue closure. The first local markdown execution slice does not add an append-only local lifecycle history format yet.
+
 **Considered Options**
 
 - Start by spawning agents from ready issues immediately.

@@ -60,6 +60,22 @@ _Avoid_: Infinite retry, new issue, manual-only fix
 The ownership of one **Ready Issue** by one agent while that issue is being implemented.
 _Avoid_: Shared issue work, automatic sub-agent split, pooled task
 
+**Assignment Attempt**:
+One agent execution pass within an **Issue Assignment**, such as the initial run, a recovery run, or a repair run.
+_Avoid_: Assignment, retry branch, agent log
+
+**Abandoned Assignment**:
+An **Issue Assignment** whose current work has been explicitly discarded so the same **Source Issue** may receive a fresh assignment. Its **Assignment Worktree** is removed when abandonment is accepted.
+_Avoid_: Silent retry, branch collision, automatic replacement
+
+**Recovered Assignment**:
+A **Blocked** **Issue Assignment** that continues in its existing **Assignment Worktree** under one replacement agent after any still-owned prior agent process is stopped.
+_Avoid_: Fresh retry, silent restart, parallel takeover
+
+**Assignment Worktree**:
+The isolated worktree created for one **Issue Assignment** from the **Project** default branch before the assigned agent starts. Its branch is derived from the **Source Issue** identity.
+_Avoid_: Project checkout, agent workspace, mutable Project path
+
 **Human Merge**:
 The rule that accepting a **Change Proposal** remains a human decision rather than an automatic **Control Plane** action.
 _Avoid_: Auto-merge, unattended acceptance
@@ -81,7 +97,7 @@ An issue that groups related **Ready Issues** into a larger body of work without
 _Avoid_: Epic, milestone, project
 
 **Activity**:
-A chronological record of noteworthy control-plane events for a **Project**.
+A chronological record of noteworthy control-plane events for a **Project**, including **Issue Assignment** and **Assignment Attempt** lifecycle changes.
 _Avoid_: Fake metrics, agent output
 
 **Local Control Plane**:
@@ -106,6 +122,10 @@ _Avoid_: afk, dioxus-agentic-afk
 - A **Source Issue** may have one **Lifecycle Status**
 - A **Source Issue** may have one or more **Change Proposals**
 - A **Ready Issue** may have at most one active **Issue Assignment**
+- An **Issue Assignment** may have one or more **Assignment Attempts**
+- An **Issue Assignment** may become an **Abandoned Assignment**
+- A **Blocked** **Issue Assignment** may become a **Recovered Assignment**
+- An **Issue Assignment** has one **Assignment Worktree**
 - A **Change Proposal** may become a **Verified Change Proposal**
 - A **Change Proposal** with failed checks may enter a **Repair Loop**
 - A **Change Proposal** requires **Human Merge** before it is accepted
@@ -153,6 +173,14 @@ _Avoid_: afk, dioxus-agentic-afk
 > **Domain expert:** "No - the blocker must be accepted through **Human Merge** before dependent work can start."
 > **Dev:** "Can agentic-afk split one large issue across multiple agents?"
 > **Domain expert:** "No - one active **Issue Assignment** owns one **Ready Issue**; parallelism happens across independent issues."
+> **Dev:** "Can an assigned agent edit the registered Project checkout directly?"
+> **Domain expert:** "No - the **Control Plane** creates an **Assignment Worktree** from the Project default branch before the assigned agent starts."
+> **Dev:** "Can a new agent replace the old branch for the same issue if it already exists?"
+> **Domain expert:** "Only after the current **Issue Assignment** becomes an **Abandoned Assignment** so its work is explicitly discarded."
+> **Dev:** "Is a repair pass a new assignment?"
+> **Domain expert:** "No - it is another **Assignment Attempt** in the same **Issue Assignment** and **Assignment Worktree**."
+> **Dev:** "If an agent process is lost, does recovery start from a fresh checkout?"
+> **Domain expert:** "No - a **Recovered Assignment** continues in the existing **Assignment Worktree** under one replacement agent."
 > **Dev:** "Can the **Control Plane** run two ready issues in parallel because their titles look unrelated?"
 > **Domain expert:** "Yes, if neither has an unresolved **Issue Dependency**; **Source Order** decides which eligible issues fill available assignments first."
 > **Dev:** "Does a parent issue decide which child issue runs first?"
@@ -177,6 +205,11 @@ _Avoid_: afk, dioxus-agentic-afk
 - "merge" was resolved as **Human Merge**, not automatic acceptance by the **Control Plane**.
 - "dependency resolved" was resolved as **Human Merge**, not a passing but unmerged **Change Proposal**.
 - "parallel work" was resolved as parallel **Issue Assignments** across different **Ready Issues**, not multiple agents collaborating on one issue.
+- "agent workspace" was resolved as an **Assignment Worktree** created before the assigned agent starts, not the mutable **Project** path.
+- "assignment branch" was resolved as a branch derived from the **Source Issue** identity, not a title-based or agent-invented branch name.
+- "agent retry" was resolved as another **Assignment Attempt** inside the existing **Issue Assignment**, not a new assignment branch.
+- "fresh retry" was resolved as a new assignment after an **Abandoned Assignment**, not silent replacement of an existing assignment branch.
+- "recover" was resolved as continuing a blocked assignment in its existing **Assignment Worktree** under one replacement agent, not a fresh retry.
 - "not blocked by each other" was resolved as no unresolved **Issue Dependency**, not inferred file-level or semantic independence.
 - "next issue" was resolved by **Source Order** among eligible **Ready Issues**, not by an internal priority model.
 - "parent issue" was resolved as grouping metadata, not execution order.
