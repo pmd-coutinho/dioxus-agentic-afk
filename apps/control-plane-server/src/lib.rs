@@ -29,6 +29,7 @@ use utoipa::OpenApi;
 use utoipa::ToSchema;
 
 mod abandon;
+mod recover;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneConfig {
@@ -197,6 +198,10 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
         .route(
             "/api/projects/{id}/assignments/{assignment_id}/abandon",
             post(abandon::abandon_assignment),
+        )
+        .route(
+            "/api/projects/{id}/assignments/{assignment_id}/recover",
+            post(recover::recover_assignment),
         )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
@@ -961,7 +966,7 @@ async fn start_assignment(
     (StatusCode::CREATED, Json(assignment)).into_response()
 }
 
-fn assignment_problem(problem_type: &str, detail: String) -> Response {
+pub(crate) fn assignment_problem(problem_type: &str, detail: String) -> Response {
     sync_problem_response(
         StatusCode::UNPROCESSABLE_ENTITY,
         problem_type,

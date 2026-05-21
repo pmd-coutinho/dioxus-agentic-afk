@@ -1,10 +1,15 @@
 //! Process adapters owned by the Orchestrator boundary.
 
 pub mod verify;
+pub mod recover;
 
 mod abandon;
 
 pub use abandon::remove_assignment_worktree;
+pub use recover::{
+    PriorProcessOutcome, RecoveryPromptFacts, build_recovery_prompt, run_recovery_codex,
+    stop_prior_codex_if_owned,
+};
 
 use agentic_afk_contracts::AssignmentTerminalOutcome;
 use serde_json::Value;

@@ -577,10 +577,13 @@ fn AssignmentState(project_id: String, state: ProjectAssignmentStateResponse) ->
                         "proposal_pending" | "proposal_verified"
                     );
                     let can_abandon = assignment.status == "blocked";
+                    let can_recover = assignment.status == "blocked";
                     let refresh_project_id = assignment.project_id.0.clone();
                     let refresh_assignment_id = assignment.id.clone();
                     let abandon_project_id = project_id.clone();
                     let abandon_assignment_id = assignment.id.clone();
+                    let recover_project_id = project_id.clone();
+                    let recover_assignment_id = assignment.id.clone();
                     rsx! {
                         div { class: "mt-4 grid gap-2 text-sm",
                             p { class: "font-medium text-zinc-100", "{assignment.source_title}" }
@@ -611,6 +614,20 @@ fn AssignmentState(project_id: String, state: ProjectAssignmentStateResponse) ->
                                         }
                                     },
                                     "Refresh Proposal State"
+                                }
+                            }
+                            if can_recover {
+                                button {
+                                    class: "mt-2 w-fit rounded border border-amber-700 px-2.5 py-1.5 text-left text-xs font-medium text-amber-100 hover:border-amber-500 hover:bg-amber-950/45",
+                                    onclick: move |_| {
+                                        let project_id = recover_project_id.clone();
+                                        let assignment_id = recover_assignment_id.clone();
+                                        async move {
+                                            let _ = recover_assignment(project_id, assignment_id).await;
+                                            reload_dashboard();
+                                        }
+                                    },
+                                    "Recover Assignment"
                                 }
                             }
                             if can_abandon {
@@ -794,6 +811,21 @@ async fn abandon_assignment(
 ) -> Result<agentic_afk_contracts::IssueAssignmentResponse, String> {
     gloo_net::http::Request::post(&format!(
         "/api/projects/{project_id}/assignments/{assignment_id}/abandon"
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?
+    .json()
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn recover_assignment(
+    project_id: String,
+    assignment_id: String,
+) -> Result<agentic_afk_contracts::IssueAssignmentResponse, String> {
+    gloo_net::http::Request::post(&format!(
+        "/api/projects/{project_id}/assignments/{assignment_id}/recover"
     ))
     .send()
     .await

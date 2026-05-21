@@ -27,11 +27,13 @@ pub async fn get_issue_assignment_public(
 }
 
 mod abandon;
+mod recover;
 
 pub use abandon::{
     ProjectActivityEntry, abandon_blocked_assignment, get_project_assignment,
     list_project_activity, record_project_activity,
 };
+pub use recover::{list_assignment_attempts, record_recovery_attempt};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
