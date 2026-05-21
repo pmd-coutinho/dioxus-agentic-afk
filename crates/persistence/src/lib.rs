@@ -14,6 +14,13 @@ use std::path::Path;
 use std::str::FromStr;
 use uuid::Uuid;
 
+mod abandon;
+
+pub use abandon::{
+    ProjectActivityEntry, abandon_blocked_assignment, get_project_assignment,
+    list_project_activity, record_project_activity,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
     #[error("project not found: {0}")]
@@ -30,6 +37,8 @@ pub enum PersistenceError {
     ActiveAssignment(String),
     #[error("Issue Assignment not found: {0}")]
     AssignmentNotFound(String),
+    #[error("Issue Assignment is not in an abandonable state: {0}")]
+    AssignmentNotAbandonable(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -635,6 +644,14 @@ async fn update_assignment(
             assignment_id.to_string(),
         ));
     }
+    get_issue_assignment(db, assignment_id).await
+}
+
+/// Look up an Issue Assignment by id, ignoring Project scope.
+pub async fn get_issue_assignment_public(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
     get_issue_assignment(db, assignment_id).await
 }
 
