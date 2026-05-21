@@ -3,44 +3,45 @@ codex = "latest"
 node = "26.1.0"
 rust = "1.94.1"
 "cargo:dioxus-cli" = "0.7.9"
+"cargo:bacon" = "latest"
+
+[tasks."dev:server"]
+description = "Run the Local Control Plane with bacon hot-restart"
+run = "bacon run"
+
+[tasks."dev:dashboard"]
+description = "Run the Dashboard Dioxus dev server"
+run = "dx serve --open false --package agentic-afk-dashboard"
 
 [tasks.dev]
-description = "Run the Local Control Plane from source"
-run = "cargo run -p agentic-afk-control-plane-server --bin agentic-afk -- serve"
-
-[tasks."dashboard:dev"]
-description = "Run the Dashboard Dioxus dev server"
-run = "dx serve --open false --platform web --package agentic-afk-dashboard"
-
-[tasks."dashboard:build"]
-description = "Build the Dashboard web assets"
-run = "rm -rf target/dx/agentic-afk-dashboard/release/web/public apps/dashboard/dist/assets && dx build --release --platform web --package agentic-afk-dashboard --debug-symbols false --locked && mkdir -p apps/dashboard/dist && cp -R target/dx/agentic-afk-dashboard/release/web/public/. apps/dashboard/dist/"
+description = "Run server and dashboard with hot reload in parallel"
+depends = ["dev:server", "dev:dashboard"]
 
 [tasks.check]
 description = "Check the Rust workspace"
-run = "cargo check --workspace --all-targets"
+run = "cargo check --workspace --all-targets --locked"
+
+[tasks.build]
+description = "Build runnable workspace artifacts (server + dashboard)"
+run = [
+    "cargo build --workspace --locked",
+    "dx build --release --package agentic-afk-dashboard --debug-symbols false --locked",
+]
 
 [tasks.test]
 description = "Run automated tests"
-run = "cargo test --workspace"
-
-[tasks.build]
-description = "Build runnable workspace artifacts"
-run = "cargo build --workspace"
+depends = ["build"]
+run = "cargo test --workspace --locked"
 
 [tasks."api-docs"]
 description = "Verify API documentation coverage"
-run = "cargo test -p agentic-afk-control-plane-server openapi_document_describes_project_api_and_problem_responses"
-
-[tasks."e2e:server"]
-description = "Run the seeded Local Control Plane for Playwright"
-run = "AGENTIC_AFK_BIND_ADDRESS=127.0.0.1:3637 AGENTIC_AFK_DATABASE_URL=sqlite://target/agentic-afk-playwright.db cargo run -p agentic-afk-control-plane-server --bin agentic-afk -- seed-dev && AGENTIC_AFK_BIND_ADDRESS=127.0.0.1:3637 AGENTIC_AFK_DATABASE_URL=sqlite://target/agentic-afk-playwright.db cargo run -p agentic-afk-control-plane-server --bin agentic-afk -- serve"
+run = "cargo test -p agentic-afk-control-plane-server openapi_document_describes_project_api_and_problem_responses --locked"
 
 [tasks.e2e]
 description = "Run Playwright Dashboard smoke tests"
-depends = ["dashboard:build"]
+depends = ["build"]
 run = "npm run e2e"
 
 [tasks.ci]
 description = "Run the complete validation workflow"
-depends = ["check", "test", "api-docs", "e2e", "build"]
+depends = ["check", "test", "api-docs", "e2e"]

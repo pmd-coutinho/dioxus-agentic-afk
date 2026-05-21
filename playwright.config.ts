@@ -8,10 +8,14 @@ export default defineConfig({
   },
   webServer: {
     command:
-      'AGENTIC_AFK_BIND_ADDRESS=127.0.0.1:3637 AGENTIC_AFK_DATABASE_URL=sqlite://target/agentic-afk-playwright.db cargo run -p agentic-afk-control-plane-server --bin agentic-afk -- seed-dev && AGENTIC_AFK_BIND_ADDRESS=127.0.0.1:3637 AGENTIC_AFK_DATABASE_URL=sqlite://target/agentic-afk-playwright.db cargo run -p agentic-afk-control-plane-server --bin agentic-afk -- serve',
+      'cargo run -p agentic-afk-control-plane-server --bin agentic-afk -- serve --seed-dev',
     url: 'http://127.0.0.1:3637/health',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
+    env: {
+      AGENTIC_AFK_BIND_ADDRESS: '127.0.0.1:3637',
+      AGENTIC_AFK_DATABASE_URL: 'sqlite://target/agentic-afk-playwright.db',
+    },
   },
   use: {
     baseURL: 'http://127.0.0.1:3637',
