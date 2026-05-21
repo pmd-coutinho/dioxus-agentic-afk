@@ -1,5 +1,7 @@
 use agentic_afk_contracts::{
-    AppInfoResponse, GitSummary, PlanningSnapshotResponse, ProjectResponse, SourceIssueSnapshot,
+    AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueSourceCandidate,
+    IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse,
+    ProjectResponse, SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
 
@@ -194,7 +196,12 @@ fn ProjectRow(project: ProjectResponse) -> Element {
 #[component]
 fn ProjectDetail(project: ProjectResponse) -> Element {
     let project_id = project.id.0.clone();
-    let planning_snapshot = use_resource(move || fetch_planning_snapshot(project_id.clone()));
+    let planning_project_id = project_id.clone();
+    let planning_snapshot =
+        use_resource(move || fetch_planning_snapshot(planning_project_id.clone()));
+    let candidate_project_id = project_id.clone();
+    let issue_source_candidates =
+        use_resource(move || fetch_issue_source_candidates(candidate_project_id.clone()));
 
     rsx! {
         div { class: "grid gap-4",
@@ -204,7 +211,7 @@ fn ProjectDetail(project: ProjectResponse) -> Element {
                 dl { class: "mt-4 grid gap-3 text-sm",
                     SettingRow { label: "Project path".to_string(), value: project.path.clone() }
                     SettingRow { label: "Project ID".to_string(), value: project.id.0.clone() }
-                    match project.enabled_issue_source {
+                    match project.enabled_issue_source.clone() {
                         Some(source) => rsx! {
                             SettingRow {
                                 label: "Issue Source".to_string(),
@@ -228,6 +235,31 @@ fn ProjectDetail(project: ProjectResponse) -> Element {
                     }
                 }
             }
+            if project.enabled_issue_source.is_some() {
+                IssueSourceSyncStatus { project_id: project_id.clone() }
+            }
+            match &*issue_source_candidates.read_unchecked() {
+                Some(Ok(candidates)) => rsx! {
+                    IssueSourceCandidates {
+                        project_id: project_id.clone(),
+                        candidates: candidates.clone(),
+                    }
+                },
+                Some(Err(error)) => rsx! {
+                    StatusPanel {
+                        title: "Issue Source candidates unavailable".to_string(),
+                        detail: error.clone(),
+                        tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
+                    }
+                },
+                None => rsx! {
+                    StatusPanel {
+                        title: "Loading Issue Source candidates".to_string(),
+                        detail: project.id.0.clone(),
+                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                    }
+                },
+            }
             match &*planning_snapshot.read_unchecked() {
                 Some(Ok(snapshot)) => rsx! { PlanningSnapshot { snapshot: snapshot.clone() } },
                 Some(Err(error)) => rsx! {
@@ -244,6 +276,102 @@ fn ProjectDetail(project: ProjectResponse) -> Element {
                         tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
                     }
                 },
+            }
+        }
+    }
+}
+
+#[component]
+fn IssueSourceSyncStatus(project_id: String) -> Element {
+    let sync_project_id = project_id.clone();
+    let sync_status = use_resource(move || fetch_issue_source_sync_status(sync_project_id.clone()));
+    let refresh_project_id = project_id.clone();
+
+    rsx! {
+        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
+            div { class: "flex flex-col gap-3 md:flex-row md:items-start md:justify-between",
+                div {
+                    h2 { class: "text-base font-semibold", "Last sync status" }
+                    match &*sync_status.read_unchecked() {
+                        Some(Ok(status)) => rsx! {
+                            p { class: "mt-2 font-mono text-sm text-zinc-300",
+                                {status.last_successful_sync_at.clone().unwrap_or_else(|| "Never synced".to_string())}
+                            }
+                            if let Some(failure) = status.last_failure.clone() {
+                                p { class: "mt-2 text-sm text-red-100", "{failure}" }
+                            }
+                        },
+                        Some(Err(error)) => rsx! {
+                            p { class: "mt-2 text-sm text-red-100", "{error}" }
+                        },
+                        None => rsx! {
+                            p { class: "mt-2 text-sm text-zinc-500", "Loading" }
+                        },
+                    }
+                }
+                button {
+                    class: "rounded border border-emerald-700 px-3 py-2 text-sm font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
+                    onclick: move |_| {
+                        let project_id = refresh_project_id.clone();
+                        async move {
+                            let _ = sync_issue_source(project_id).await;
+                            reload_dashboard();
+                        }
+                    },
+                    "Refresh Issue Source"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn IssueSourceCandidates(project_id: String, candidates: Vec<IssueSourceCandidate>) -> Element {
+    rsx! {
+        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
+            h2 { class: "text-base font-semibold", "Issue Source candidates" }
+            if candidates.is_empty() {
+                p { class: "mt-3 text-sm text-zinc-500", "None" }
+            } else {
+                ul { class: "mt-4 grid gap-3",
+                    for candidate in candidates {
+                        IssueSourceCandidateRow {
+                            project_id: project_id.clone(),
+                            candidate,
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn IssueSourceCandidateRow(project_id: String, candidate: IssueSourceCandidate) -> Element {
+    let enable_project_id = project_id.clone();
+    let enable_kind = candidate.kind.clone();
+    let enable_locator = candidate.locator.clone();
+
+    rsx! {
+        li { class: "flex flex-col gap-2 border-b border-zinc-800 pb-3 text-sm text-zinc-100 last:border-0 last:pb-0 md:flex-row md:items-center md:justify-between",
+            p { class: "break-words font-mono", "{candidate.kind} {candidate.locator}" }
+            if candidate.enabled {
+                p { class: "text-xs text-emerald-200", "Enabled" }
+            } else {
+                button {
+                    class: "rounded border border-emerald-700 px-3 py-2 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
+                    onclick: move |_| {
+                        let project_id = enable_project_id.clone();
+                        let kind = enable_kind.clone();
+                        let locator = enable_locator.clone();
+                        async move {
+                            if enable_issue_source(project_id, kind, locator).await.is_ok() {
+                                reload_dashboard();
+                            }
+                        }
+                    },
+                    "Enable {candidate.kind} {candidate.locator}"
+                }
             }
         }
     }
@@ -390,8 +518,66 @@ async fn fetch_planning_snapshot(project_id: String) -> Result<PlanningSnapshotR
         .map_err(|error| error.to_string())
 }
 
+async fn fetch_issue_source_candidates(
+    project_id: String,
+) -> Result<Vec<IssueSourceCandidate>, String> {
+    gloo_net::http::Request::get(&format!(
+        "/api/projects/{project_id}/issue-source-candidates"
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?
+    .json()
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn enable_issue_source(
+    project_id: String,
+    kind: String,
+    locator: String,
+) -> Result<ProjectResponse, String> {
+    gloo_net::http::Request::put(&format!("/api/projects/{project_id}/issue-source"))
+        .json(&EnableIssueSourceRequest { kind, locator })
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .json()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn fetch_issue_source_sync_status(
+    project_id: String,
+) -> Result<IssueSourceSyncStatusResponse, String> {
+    gloo_net::http::Request::get(&format!(
+        "/api/projects/{project_id}/issue-source/sync-status"
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?
+    .json()
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn sync_issue_source(project_id: String) -> Result<IssueSourceSyncResponse, String> {
+    gloo_net::http::Request::post(&format!("/api/projects/{project_id}/issue-source/sync"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .json()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 fn browser_pathname() -> String {
     web_sys::window()
         .and_then(|window| window.location().pathname().ok())
         .unwrap_or_else(|| "/".to_string())
+}
+
+fn reload_dashboard() {
+    let _ = web_sys::window().map(|window| window.location().reload());
 }
