@@ -503,7 +503,7 @@ fn PlanningSnapshot(
                     project_id: project_id.clone(),
                     title: "Eligible Ready Issues".to_string(),
                     issues: snapshot.eligible,
-                    can_start: trusted && snapshot.source.kind == "local_markdown",
+                    can_start: trusted,
                 }
                 PlanningGroup {
                     project_id: project_id.clone(),
