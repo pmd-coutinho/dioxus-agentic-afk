@@ -16,7 +16,14 @@ use agentic_afk_contracts::{
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 
+use crate::implementation_phase::{check_implementation_outcome, render_implementation_prompt};
+use crate::merge_phase::{
+    AssignmentMergeOutcome, MergeRejection, decide_merge_outcome, render_merge_prompt,
+};
+use crate::plan_run_finalize::{PlanRunFinalize, decide_plan_run_terminal};
 use crate::plan_run_status::{AssignmentStatus, transition_assignment};
+use crate::planning_phase::{PlannedClaim, render_planning_prompt, validate_planner_selection};
+use crate::review_loop::{ReviewLoopStep, decide_review_loop_step, render_review_prompt};
 use crate::plan_run::{
     AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, FakeAssignmentWorktreeCleaner,
     FakeImplementationPhaseRunner, FakeIntegrationBranchPusher, FakeLifecycleWriter,
@@ -403,7 +410,7 @@ pub async fn run_plan_run(
         project_id,
         plan_run,
         baseline,
-        &parsed.body,
+        &parsed,
     )
     .await
 }
@@ -442,27 +449,8 @@ async fn finalize_selection_planning(
     project_id: &str,
     plan_run: &PlanRunResponse,
     baseline: &RefreshedBaseline,
-    body: &serde_json::Value,
+    parsed: &crate::ParsedPlanningOutput,
 ) -> Result<PlanRunResponse, CoordinatorError> {
-    let parsed = crate::ParsedPlanningOutput {
-        is_empty: false,
-        body: body.clone(),
-    };
-    let selections = match crate::extract_planner_selections(&parsed) {
-        Ok(selections) => selections,
-        Err(error) => {
-            return Err(fail_planning_phase(
-                db,
-                events,
-                project_id,
-                &plan_run.id,
-                &error,
-                "urn:agentic-afk:planning-output-unparseable",
-            )
-            .await);
-        }
-    };
-
     let snapshot = match persistence::get_planning_snapshot(db, project_id).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -477,12 +465,6 @@ async fn finalize_selection_planning(
             .await);
         }
     };
-
-    let eligible_by_id: std::collections::HashMap<&str, &SourceIssueSnapshot> = snapshot
-        .eligible
-        .iter()
-        .map(|issue| (issue.source_id.as_str(), issue))
-        .collect();
 
     let exec_config_lookup =
         match persistence::get_project_execution_config(db, project_id).await {
@@ -501,66 +483,59 @@ async fn finalize_selection_planning(
             Err(error) => return Err(CoordinatorError::from_persistence(error)),
         };
 
-    // The Planning Phase may return up to Max Parallel Tasks selections for
-    // one Plan Run. Selections beyond the configured cap force the planner
-    // to converge for now rather than implicitly truncating the batch.
-    let max_parallel = exec_config_lookup.max_parallel_tasks.max(1) as usize;
-    if selections.len() > max_parallel {
-        return Err(fail_planning_phase(
-            db,
-            events,
-            project_id,
-            &plan_run.id,
-            &format!(
-                "Planning Phase returned {} issues but Project Max Parallel Tasks is {}",
-                selections.len(),
-                max_parallel
-            ),
-            "urn:agentic-afk:planning-exceeds-max-parallel",
-        )
-        .await);
-    }
-
-    let Some(source) = project.enabled_issue_source.clone() else {
-        return Err(fail_planning_phase(
-            db,
-            events,
-            project_id,
-            &plan_run.id,
-            "Project has no enabled Issue Source for claim write-back",
-            "urn:agentic-afk:issue-source-missing",
-        )
-        .await);
+    // Apply the pure `validate_planner_selection` decision. Typed
+    // rejections (Unparseable / ExceedsMaxParallel / IneligibleSelection /
+    // MissingIssueSource) carry their RFC-7807 problem-type URN via
+    // `From<PlanningRejection> for CoordinatorError`, so this single call
+    // replaces four inline guard branches the coordinator used to spell
+    // out by hand.
+    let claims = match validate_planner_selection(
+        parsed,
+        &snapshot.eligible,
+        exec_config_lookup.max_parallel_tasks,
+        project.enabled_issue_source.is_some(),
+    ) {
+        Ok(claims) => claims,
+        Err(rejection) => {
+            let err = CoordinatorError::from(rejection);
+            return Err(fail_planning_phase(
+                db,
+                events,
+                project_id,
+                &plan_run.id,
+                &err.detail,
+                &err.problem_type,
+            )
+            .await);
+        }
     };
+
+    // SAFETY: validate_planner_selection rejected with MissingIssueSource
+    // above if this was None. Cloning the source once for the loop is
+    // cheaper than threading it through the rejection arm.
+    let source = project
+        .enabled_issue_source
+        .clone()
+        .expect("validate_planner_selection ensured an enabled Issue Source");
 
     // Provision all assignments sequentially to preserve deterministic
     // ordering in Plan Run snapshots. Each row is created, worktree
     // provisioned, lifecycle written back, and an `AssignmentCreated`
     // event published before any implementation pass starts. This keeps
     // the parallel tranche observable from the Dashboard immediately.
-    let mut claimed: Vec<IssueAssignmentResponse> = Vec::with_capacity(selections.len());
+    let mut claimed: Vec<IssueAssignmentResponse> = Vec::with_capacity(claims.len());
     let project_path = std::path::Path::new(&project.path);
-    for selection in &selections {
-        let Some(issue) = eligible_by_id.get(selection.source_issue_id.as_str()).copied() else {
-            return Err(fail_planning_phase(
-                db,
-                events,
-                project_id,
-                &plan_run.id,
-                &format!(
-                    "Planning Phase selected Source Issue {} which is not in the eligible set",
-                    selection.source_issue_id
-                ),
-                "urn:agentic-afk:planning-selection-ineligible",
-            )
-            .await);
-        };
+    for claim in &claims {
+        let PlannedClaim {
+            selection,
+            eligible_issue,
+        } = claim;
         let assignment = persistence::create_plan_run_assignment(
             db,
             &plan_run.id,
             project_id,
             &source,
-            issue,
+            eligible_issue,
             &selection.branch,
             &selection.selection_summary,
         )
@@ -591,7 +566,7 @@ async fn finalize_selection_planning(
             .await
             .map_err(CoordinatorError::from_persistence)?;
 
-        if let Err(error) = deps.lifecycle.write_claimed(&issue.source_id) {
+        if let Err(error) = deps.lifecycle.write_claimed(&eligible_issue.source_id) {
             let _ = persistence::release_issue_assignment(db, &assignment.id).await;
             return Err(fail_planning_phase(
                 db,
@@ -613,7 +588,7 @@ async fn finalize_selection_planning(
         &plan_run.id,
         "planning",
         "succeeded",
-        body,
+        &parsed.body,
     )
     .await
     .map_err(CoordinatorError::from_persistence)?;
@@ -791,10 +766,7 @@ async fn run_assignment_implement_review(
         .map_err(CoordinatorError::from_persistence)?;
 
     let mut review_findings = String::new();
-    let mut loop_iteration: i64 = 0;
     loop {
-        loop_iteration += 1;
-
         transition_assignment(
             db,
             events,
@@ -844,18 +816,16 @@ async fn run_assignment_implement_review(
                 .await);
             }
         };
-        if impl_parsed.outcome != "ready_for_review" {
+        if let Err(rejection) = check_implementation_outcome(&impl_parsed.outcome) {
+            let err = CoordinatorError::from(rejection);
             return Err(fail_assignment_phase(
                 db,
                 events,
                 project_id,
                 assignment,
                 "implementation",
-                &format!(
-                    "implementation outcome `{}` does not enter Review Phase",
-                    impl_parsed.outcome
-                ),
-                "urn:agentic-afk:implementation-not-ready",
+                &err.detail,
+                &err.problem_type,
             )
             .await);
         }
@@ -932,54 +902,48 @@ async fn run_assignment_implement_review(
         .map_err(CoordinatorError::from_persistence)?;
         events.plan_run_phase_completed(project_id, &plan_run.id, review_output);
 
-        if review_parsed.outcome == "approved" {
-            transition_assignment(
-                db,
-                events,
-                project_id,
-                &assignment.id,
-                AssignmentStatus::Reviewed,
-            )
-            .await?;
-            return Ok(Some(review_parsed.body));
-        }
-
-        let rejection_count = persistence::increment_review_rejection(db, &assignment.id)
-            .await
-            .map_err(CoordinatorError::from_persistence)?;
-        review_findings = extract_review_findings(&review_parsed.body);
-
-        if rejection_count >= exec_config.review_retry_limit {
-            let reason = format!(
-                "Review Loop exhausted: {rejection_count} rejection(s) reached the Project Review Retry Limit ({}).",
-                exec_config.review_retry_limit
-            );
-            block_assignment_for_loop(
-                db,
-                events,
-                gh_binary_path,
-                project,
-                project_id,
-                assignment,
-                &reason,
-            )
-            .await?;
-            return Ok(None);
-        }
-        if loop_iteration > exec_config.review_retry_limit + 1 {
-            let reason =
-                format!("Review Loop ran {loop_iteration} iterations without converging; blocking.");
-            block_assignment_for_loop(
-                db,
-                events,
-                gh_binary_path,
-                project,
-                project_id,
-                assignment,
-                &reason,
-            )
-            .await?;
-            return Ok(None);
+        // Increment the persisted rejection counter *before* asking
+        // `decide_review_loop_step` what to do so the limit guard fires
+        // deterministically. Approved outcomes skip the increment.
+        let rejection_count = if review_parsed.outcome == "approved" {
+            0
+        } else {
+            persistence::increment_review_rejection(db, &assignment.id)
+                .await
+                .map_err(CoordinatorError::from_persistence)?
+        };
+        match decide_review_loop_step(
+            &review_parsed,
+            rejection_count,
+            exec_config.review_retry_limit,
+        ) {
+            ReviewLoopStep::Approved { review_body } => {
+                transition_assignment(
+                    db,
+                    events,
+                    project_id,
+                    &assignment.id,
+                    AssignmentStatus::Reviewed,
+                )
+                .await?;
+                return Ok(Some(review_body));
+            }
+            ReviewLoopStep::Retry { findings } => {
+                review_findings = findings;
+            }
+            ReviewLoopStep::Block { reason } => {
+                block_assignment_for_loop(
+                    db,
+                    events,
+                    gh_binary_path,
+                    project,
+                    project_id,
+                    assignment,
+                    &reason,
+                )
+                .await?;
+                return Ok(None);
+            }
         }
     }
 }
@@ -1074,143 +1038,88 @@ async fn finalize_parallel_plan_run(
     let project_instructions = load_project_instructions(&project.path);
     let project_path = std::path::Path::new(&project.path);
 
-    let mut merged_count = 0usize;
-    let mut reviewed_count = 0usize;
+    let mut merge_outcomes: Vec<AssignmentMergeOutcome> = Vec::with_capacity(outcomes.len());
     let mut blocked_assignments: Vec<IssueAssignmentResponse> = Vec::new();
     let mut merged_assignments: Vec<IssueAssignmentResponse> = Vec::new();
 
     for outcome in &outcomes {
-        match outcome.review_body.as_ref() {
-            Some(review_body) => {
-                reviewed_count += 1;
-                let merge_assignment = outcome.assignment.clone();
-                transition_assignment(
-                    db,
-                    events,
-                    project_id,
-                    &merge_assignment.id,
-                    AssignmentStatus::Merging,
-                )
-                .await?;
+        let Some(review_body) = outcome.review_body.as_ref() else {
+            blocked_assignments.push(outcome.assignment.clone());
+            merge_outcomes.push(AssignmentMergeOutcome::NotAttempted);
+            continue;
+        };
 
-                let prompt = render_merge_prompt(
-                    &project_instructions,
-                    project,
-                    plan_run,
-                    baseline,
-                    exec_config,
-                    &merge_assignment,
-                    review_body,
-                );
-                let merge_stdout = match deps.merger.run(&prompt) {
-                    Ok(stdout) => stdout,
-                    Err(error) => {
-                        let _ = persistence::record_assignment_phase_output(
-                            db,
-                            &plan_run.id,
-                            &merge_assignment.id,
-                            "merge",
-                            "failed",
-                            &serde_json::json!({ "error": error.to_string() }),
-                        )
-                        .await;
-                        let blocked = transition_assignment(
-                            db,
-                            events,
-                            project_id,
-                            &merge_assignment.id,
-                            AssignmentStatus::Blocked {
-                                reason: error.to_string(),
-                            },
-                        )
-                        .await?;
-                        blocked_assignments.push(blocked);
-                        continue;
-                    }
-                };
-                let merge_parsed = match crate::parse_merge_output(&merge_stdout) {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
-                        let _ = persistence::record_assignment_phase_output(
-                            db,
-                            &plan_run.id,
-                            &merge_assignment.id,
-                            "merge",
-                            "failed",
-                            &serde_json::json!({ "error": error }),
-                        )
-                        .await;
-                        let blocked = transition_assignment(
-                            db,
-                            events,
-                            project_id,
-                            &merge_assignment.id,
-                            AssignmentStatus::Blocked { reason: error },
-                        )
-                        .await?;
-                        blocked_assignments.push(blocked);
-                        continue;
-                    }
-                };
-                let merge_output = persistence::record_assignment_phase_output(
+        let merge_assignment = outcome.assignment.clone();
+        transition_assignment(
+            db,
+            events,
+            project_id,
+            &merge_assignment.id,
+            AssignmentStatus::Merging,
+        )
+        .await?;
+
+        let prompt = render_merge_prompt(
+            &project_instructions,
+            project,
+            plan_run,
+            baseline,
+            exec_config,
+            &merge_assignment,
+            review_body,
+        );
+
+        // Classify the merge attempt as one of Merged / Blocked. Runner
+        // failures and unparseable outputs collapse to Blocked with the
+        // surfaced error; a parsed merge body flows through the pure
+        // `decide_merge_outcome` for the Merged-vs-Blocked discriminator.
+        let merge_outcome: AssignmentMergeOutcome = match deps.merger.run(&prompt) {
+            Err(error) => {
+                let reason = error.to_string();
+                let _ = persistence::record_assignment_phase_output(
                     db,
                     &plan_run.id,
                     &merge_assignment.id,
                     "merge",
-                    &merge_parsed.outcome,
-                    &merge_parsed.body,
+                    "failed",
+                    &serde_json::json!({ "error": &reason }),
                 )
-                .await
-                .map_err(CoordinatorError::from_persistence)?;
-                events.plan_run_phase_completed(project_id, &plan_run.id, merge_output);
-
-                if merge_parsed.outcome == "blocked" {
-                    let reason = merge_parsed
-                        .body
-                        .get("block_reason")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| {
-                            merge_parsed
-                                .body
-                                .get("summary")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string)
-                                .unwrap_or_else(|| {
-                                    "Merge Phase blocked without an explicit reason".to_string()
-                                })
-                        });
-                    let blocked = transition_assignment(
+                .await;
+                AssignmentMergeOutcome::Blocked { reason }
+            }
+            Ok(merge_stdout) => match crate::parse_merge_output(&merge_stdout) {
+                Err(error) => {
+                    let _ = persistence::record_assignment_phase_output(
                         db,
-                        events,
-                        project_id,
+                        &plan_run.id,
                         &merge_assignment.id,
-                        AssignmentStatus::Blocked {
-                            reason: reason.clone(),
-                        },
+                        "merge",
+                        "failed",
+                        &serde_json::json!({ "error": &error }),
                     )
-                    .await?;
-                    if let Some(source) = project.enabled_issue_source.as_ref() {
-                        if let Err(error) = write_assignment_lifecycle(
-                            gh_binary_path,
-                            project,
-                            source,
-                            &merge_assignment.source_id,
-                            "blocked",
-                        ) {
-                            eprintln!(
-                                "warning: failed to write blocked Lifecycle Status back to Issue Source during Merge Phase: {error}"
-                            );
-                        }
-                    }
-                    blocked_assignments.push(blocked);
-                    continue;
+                    .await;
+                    let err = CoordinatorError::from(MergeRejection::Unparseable(error));
+                    AssignmentMergeOutcome::Blocked { reason: err.detail }
                 }
+                Ok(parsed) => {
+                    let merge_output = persistence::record_assignment_phase_output(
+                        db,
+                        &plan_run.id,
+                        &merge_assignment.id,
+                        "merge",
+                        &parsed.outcome,
+                        &parsed.body,
+                    )
+                    .await
+                    .map_err(CoordinatorError::from_persistence)?;
+                    events.plan_run_phase_completed(project_id, &plan_run.id, merge_output);
+                    decide_merge_outcome(&parsed)
+                }
+            },
+        };
 
-                // Merge succeeded: transition the assignment to `merged`
-                // and complete the Source Issue. The Integration Branch
-                // push happens once at the end so the upstream sees a
-                // single push for the whole merged set.
+        match &merge_outcome {
+            AssignmentMergeOutcome::Merged => {
                 let merged = transition_assignment(
                     db,
                     events,
@@ -1219,23 +1128,54 @@ async fn finalize_parallel_plan_run(
                     AssignmentStatus::Merged,
                 )
                 .await?;
-                // Source Issue completion only after the verified Integration
-                // Branch push. The completed lifecycle write-back is deferred
-                // until after `pusher.push` succeeds below.
-                merged_count += 1;
+                // Source Issue completion only after the verified
+                // Integration Branch push. The completed lifecycle
+                // write-back is deferred until after `pusher.push`
+                // succeeds below.
                 merged_assignments.push(merged);
             }
-            None => {
-                blocked_assignments.push(outcome.assignment.clone());
+            AssignmentMergeOutcome::Blocked { reason } => {
+                let blocked = transition_assignment(
+                    db,
+                    events,
+                    project_id,
+                    &merge_assignment.id,
+                    AssignmentStatus::Blocked {
+                        reason: reason.clone(),
+                    },
+                )
+                .await?;
+                if let Some(source) = project.enabled_issue_source.as_ref() {
+                    if let Err(error) = write_assignment_lifecycle(
+                        gh_binary_path,
+                        project,
+                        source,
+                        &merge_assignment.source_id,
+                        "blocked",
+                    ) {
+                        eprintln!(
+                            "warning: failed to write blocked Lifecycle Status back to Issue Source during Merge Phase: {error}"
+                        );
+                    }
+                }
+                blocked_assignments.push(blocked);
             }
+            AssignmentMergeOutcome::NotAttempted => unreachable!(
+                "NotAttempted is only produced by the no-review-body branch above"
+            ),
         }
+
+        merge_outcomes.push(merge_outcome);
     }
 
     // Push the Integration Branch once if at least one merge succeeded.
     // The push is part of the canonical merge boundary: blocked merges
     // never push, and the push happens after every merge attempt has
     // settled so the upstream only sees the final integrated tree.
-    if merged_count > 0 {
+    let any_merged = merge_outcomes
+        .iter()
+        .any(|o| matches!(o, AssignmentMergeOutcome::Merged));
+    if any_merged {
         if let Err(error) = deps
             .pusher
             .push(project_path, &exec_config.integration_branch)
@@ -1309,18 +1249,15 @@ async fn finalize_parallel_plan_run(
         }
     }
 
-    // Plan Run terminal state: any merged → succeeded (partial-success
-    // path). All-blocked / nothing reviewed → failed. Empty selections
-    // never reach this function (the empty-planning path returns earlier).
-    let terminal_state = if merged_count > 0 {
-        "succeeded"
-    } else if reviewed_count == 0 && outcomes.iter().all(|o| o.review_body.is_none()) {
-        "failed"
-    } else {
-        "failed"
-    };
-
-    let finished = persistence::finish_plan_run(db, &plan_run.id, terminal_state)
+    // Plan Run terminal state via the pure `decide_plan_run_terminal`
+    // decision. Empty-planning selections never reach this function (the
+    // empty-planning path returns earlier in `finalize_empty_planning`),
+    // so `planning_was_empty` is always `false` here.
+    let terminal = decide_plan_run_terminal(&PlanRunFinalize {
+        planning_was_empty: false,
+        outcomes: merge_outcomes,
+    });
+    let finished = persistence::finish_plan_run(db, &plan_run.id, terminal.as_str())
         .await
         .map_err(CoordinatorError::from_persistence)?;
     events.plan_run_completed(project_id, finished);
@@ -1353,52 +1290,6 @@ async fn fail_planning_phase(
     CoordinatorError::new(500, problem_type, error)
 }
 
-// --- Prompt rendering ---------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-fn render_merge_prompt(
-    project_instructions: &str,
-    project: &ProjectResponse,
-    plan_run: &PlanRunResponse,
-    baseline: &RefreshedBaseline,
-    config: &ProjectExecutionConfigResponse,
-    assignment: &IssueAssignmentResponse,
-    review_body: &serde_json::Value,
-) -> String {
-    let template = include_str!("../prompts/plan-run/merge.md");
-    let selection = assignment
-        .selection_summary
-        .clone()
-        .unwrap_or_else(|| "(no selection summary)".to_string());
-    template
-        .replace("{{PROJECT_INSTRUCTIONS}}", project_instructions)
-        .replace("{{PROJECT_NAME}}", &project.path)
-        .replace("{{PLAN_RUN_ID}}", &plan_run.id)
-        .replace("{{PLAN_RUN_BASELINE}}", &baseline.commit_sha)
-        .replace("{{INTEGRATION_BRANCH}}", &config.integration_branch)
-        .replace("{{SOURCE_ISSUE_ID}}", &assignment.source_id)
-        .replace("{{SOURCE_ISSUE_TITLE}}", &assignment.source_title)
-        .replace("{{ISSUE_BRANCH}}", &assignment.branch)
-        .replace("{{SELECTION_SUMMARY}}", &selection)
-        .replace(
-            "{{REVIEW_PHASE_OUTPUT}}",
-            &serde_json::to_string_pretty(review_body).unwrap_or_default(),
-        )
-}
-
-fn extract_review_findings(body: &serde_json::Value) -> String {
-    body.get("findings")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(|text| format!("- {text}")))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
-}
-
 pub(crate) fn load_project_instructions(project_path: &str) -> String {
     for candidate in ["AGENTS.md", "CLAUDE.md", "PROJECT.md"] {
         if let Ok(text) =
@@ -1408,108 +1299,6 @@ pub(crate) fn load_project_instructions(project_path: &str) -> String {
         }
     }
     String::new()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_implementation_prompt(
-    project_instructions: &str,
-    project: &ProjectResponse,
-    plan_run: &PlanRunResponse,
-    baseline: &RefreshedBaseline,
-    config: &ProjectExecutionConfigResponse,
-    assignment: &IssueAssignmentResponse,
-    source_issue_brief: &str,
-    review_findings: &str,
-) -> String {
-    let template = include_str!("../prompts/plan-run/implement.md");
-    template
-        .replace("{{PROJECT_INSTRUCTIONS}}", project_instructions)
-        .replace("{{PROJECT_NAME}}", &project.path)
-        .replace("{{PLAN_RUN_ID}}", &plan_run.id)
-        .replace("{{PLAN_RUN_BASELINE}}", &baseline.commit_sha)
-        .replace("{{INTEGRATION_BRANCH}}", &config.integration_branch)
-        .replace("{{SOURCE_ISSUE_ID}}", &assignment.source_id)
-        .replace("{{SOURCE_ISSUE_TITLE}}", &assignment.source_title)
-        .replace("{{ISSUE_BRANCH}}", &assignment.branch)
-        .replace("{{SOURCE_ISSUE_BRIEF}}", source_issue_brief)
-        .replace("{{REVIEW_FINDINGS}}", review_findings)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_review_prompt(
-    project_instructions: &str,
-    project: &ProjectResponse,
-    plan_run: &PlanRunResponse,
-    baseline: &RefreshedBaseline,
-    config: &ProjectExecutionConfigResponse,
-    assignment: &IssueAssignmentResponse,
-    source_issue_brief: &str,
-    impl_body: &serde_json::Value,
-) -> String {
-    let template = include_str!("../prompts/plan-run/review.md");
-    template
-        .replace("{{PROJECT_INSTRUCTIONS}}", project_instructions)
-        .replace("{{PROJECT_NAME}}", &project.path)
-        .replace("{{PLAN_RUN_ID}}", &plan_run.id)
-        .replace("{{PLAN_RUN_BASELINE}}", &baseline.commit_sha)
-        .replace("{{INTEGRATION_BRANCH}}", &config.integration_branch)
-        .replace("{{SOURCE_ISSUE_ID}}", &assignment.source_id)
-        .replace("{{SOURCE_ISSUE_TITLE}}", &assignment.source_title)
-        .replace("{{ISSUE_BRANCH}}", &assignment.branch)
-        .replace("{{SOURCE_ISSUE_BRIEF}}", source_issue_brief)
-        .replace(
-            "{{IMPLEMENTATION_PHASE_OUTPUT}}",
-            &serde_json::to_string_pretty(impl_body).unwrap_or_default(),
-        )
-}
-
-pub fn render_planning_prompt(
-    project_instructions: &str,
-    project: &ProjectResponse,
-    config: &ProjectExecutionConfigResponse,
-    baseline: &RefreshedBaseline,
-    eligible: &[SourceIssueSnapshot],
-) -> String {
-    let template = include_str!("../prompts/plan-run/plan.md");
-    template
-        .replace("{{PROJECT_INSTRUCTIONS}}", project_instructions)
-        .replace("{{PROJECT_NAME}}", &project.path)
-        .replace("{{INTEGRATION_BRANCH}}", &config.integration_branch)
-        .replace("{{PLAN_RUN_BASELINE}}", &baseline.commit_sha)
-        .replace(
-            "{{MAX_PARALLEL_TASKS}}",
-            &config.max_parallel_tasks.to_string(),
-        )
-        .replace(
-            "{{ELIGIBLE_SOURCE_ISSUES}}",
-            &render_eligible_source_issues(eligible),
-        )
-}
-
-fn render_eligible_source_issues(eligible: &[SourceIssueSnapshot]) -> String {
-    if eligible.is_empty() {
-        return "(no eligible Source Issues)".to_string();
-    }
-    eligible
-        .iter()
-        .map(|issue| {
-            format!(
-                "- source_id: {}\n  title: {}\n  raw:\n{}",
-                issue.source_id,
-                issue.title,
-                indent_lines(&issue.raw_text, 4)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn indent_lines(text: &str, spaces: usize) -> String {
-    let pad = " ".repeat(spaces);
-    text.lines()
-        .map(|line| format!("{pad}{line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 // --- Issue Source lifecycle write-back ---------------------------------

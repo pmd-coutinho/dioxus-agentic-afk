@@ -6,15 +6,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub mod coordinator;
+pub mod implementation_phase;
+pub mod merge_phase;
 pub mod plan_run;
+pub mod plan_run_finalize;
 pub mod plan_run_status;
+pub mod planning_phase;
 pub mod production;
+pub mod review_loop;
 
 pub use coordinator::{
-    CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs,
-    render_planning_prompt, run_plan_run, update_markdown_lifecycle_status,
-    write_assignment_lifecycle,
+    CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs, run_plan_run,
+    update_markdown_lifecycle_status, write_assignment_lifecycle,
 };
+pub use planning_phase::{PlannedClaim, PlanningRejection, render_planning_prompt};
 
 pub use plan_run_status::{AssignmentStatus, transition_assignment};
 
