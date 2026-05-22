@@ -41,56 +41,72 @@ An issue as represented in its **Issue Source**. A **Source Issue** remains the 
 _Avoid_: Control-plane issue, copied issue, internal ticket
 
 **Lifecycle Status**:
-The current implementation state of a **Source Issue** as reported by the **Control Plane** back to the **Issue Source**. The minimal statuses are Ready, Claimed, Running, Blocked, and Completed.
+The coarse implementation state of a **Source Issue** as reported by the **Control Plane** back to the **Issue Source**. The minimal statuses are Ready, Claimed, Running, Blocked, and Completed.
 _Avoid_: Local-only status, dashboard state, hidden progress
 
-**Change Proposal**:
-A proposed code change produced for a **Source Issue** and linked back to that issue so the issue can close when the change is accepted.
-_Avoid_: Local patch, hidden branch, untracked work
-
-**Verified Change Proposal**:
-A **Change Proposal** whose required checks have succeeded and no longer needs active agent work.
-_Avoid_: Open pull request, unchecked proposal, local success
-
-**Repair Loop**:
-The continuation of agent work on a **Change Proposal** after required checks fail, bounded by both retry count and elapsed time.
-_Avoid_: Infinite retry, new issue, manual-only fix
-
 **Issue Assignment**:
-The ownership of one **Ready Issue** by one agent while that issue is being implemented.
+One selected **Ready Issue** and its issue branch as it moves through implementation and the **Review Phase** within a **Plan Run**.
 _Avoid_: Shared issue work, automatic sub-agent split, pooled task
 
+**Plan Run**:
+One manually started **Planning Phase** and the parallel issue work it selects through **Review Phase** and **Merge Phase**, all based on one refreshed **Integration Branch** baseline.
+_Avoid_: Backlog, queue drain, individual assignment
+
 **Assignment Attempt**:
-One agent execution pass within an **Issue Assignment**, such as the initial run, a recovery run, or a repair run.
+One agent execution pass within an **Issue Assignment**, such as an implementation pass, review pass, or later implementation pass in a **Review Loop**.
 _Avoid_: Assignment, retry branch, agent log
 
-**Abandoned Assignment**:
-An **Issue Assignment** whose current work has been explicitly discarded so the same **Source Issue** may receive a fresh assignment. Its **Assignment Worktree** is removed when abandonment is accepted.
-_Avoid_: Silent retry, branch collision, automatic replacement
-
-**Recovered Assignment**:
-A **Blocked** **Issue Assignment** that continues in its existing **Assignment Worktree** under one replacement agent after any still-owned prior agent process is stopped.
-_Avoid_: Fresh retry, silent restart, parallel takeover
-
 **Assignment Worktree**:
-The isolated worktree created for one **Issue Assignment** from the **Project** default branch before the assigned agent starts. Its branch is derived from the **Source Issue** identity.
+The isolated worktree created for one **Issue Assignment** from the **Plan Run** integration baseline. Its branch is derived from the **Source Issue** identity.
 _Avoid_: Project checkout, agent workspace, mutable Project path
 
-**Human Merge**:
-The rule that accepting a **Change Proposal** remains a human decision rather than an automatic **Control Plane** action.
-_Avoid_: Auto-merge, unattended acceptance
+**Planning Phase**:
+The manually started agent pass that inspects the **Project** and its issue descriptions to select `ready-for-agent` **Ready Issues** and issue branches that can start together without editing project files.
+_Avoid_: Automatic queue drain, manual issue start, planning snapshot
+
+**Max Parallel Tasks**:
+The per-**Project** cap on issue tasks that may run in parallel after the **Planning Phase** selects work. It does not govern the **Planning Phase**, which has at most one active run for a **Project**.
+_Avoid_: Planner count, global worker count, source order
+
+**Integration Branch**:
+The per-**Project** branch that a successful **Merge Phase** updates and pushes with the merged result of a **Plan Run**. It defaults from the **Project** detected default branch when first configured.
+_Avoid_: Pull request branch, issue branch, implicit default branch
+
+**Review Retry Limit**:
+The per-**Project** cap on how many review rejections may return one **Issue Assignment** through its **Review Loop** before it blocks. It has a platform default.
+_Avoid_: Infinite review loop, global retry budget, merge retry
+
+**Review Phase**:
+The agent pass that approves or rejects implemented issue work with findings before it may enter the **Merge Phase**. It may run verification needed for that decision, but it does not edit project files.
+_Avoid_: Implementation self-check, human review, merge check
+
+**Review Loop**:
+The return of one **Issue Assignment** from the **Review Phase** to another implementation pass before it can be reviewed again.
+_Avoid_: New assignment, whole-plan restart, human-only repair
+
+**Phase Prompt**:
+The task brief for one Sandcastle-style phase in a **Plan Run**. The initial **Phase Prompts** adapt Sandcastle's planning, implementation, review, and merge prompts and include **Project** instructions in every phase.
+_Avoid_: Generic agent prompt, issue template, project instructions
+
+**Phase Output**:
+The durable result recorded for a **Plan Run** phase or **Assignment Attempt**, including planning selection, review findings, merge verification, and block reasons.
+_Avoid_: Ephemeral terminal text, worktree artifact, source issue body
+
+**Merge Phase**:
+The agent-owned acceptance step that integrates issue work after the **Review Phase**, resolves integration problems it can, and verifies the integrated result before push.
+_Avoid_: Human merge, unattended acceptance
 
 **Ready Issue**:
-An issue from an **Issue Source** that has been explicitly marked as suitable for unattended agent implementation.
+An issue from an **Issue Source** that has been explicitly marked `ready-for-agent` for unattended agent implementation.
 _Avoid_: Open issue, available issue, backlog item
 
 **Issue Dependency**:
-A relationship showing that one **Ready Issue** must wait for another issue before it can be implemented.
+A blocker recorded in a **Source Issue** description showing that one **Ready Issue** must wait for another issue before it can be implemented.
 _Avoid_: Guess, similarity, priority
 
 **Source Order**:
-The ordering of **Source Issues** as provided by the **Issue Source** for choosing the next eligible **Ready Issue**.
-_Avoid_: Inferred priority, dashboard order, random queue
+The ordering of **Source Issues** as provided by the **Issue Source** for display and source reconciliation.
+_Avoid_: Planner priority, batch selection, random queue
 
 **Parent Issue**:
 An issue that groups related **Ready Issues** into a larger body of work without itself defining the execution order.
@@ -120,18 +136,43 @@ _Avoid_: afk, dioxus-agentic-afk
 - An **Issue Source** may provide zero or more **Source Issues**
 - A **Source Issue** may be a **Ready Issue**
 - A **Source Issue** may have one **Lifecycle Status**
-- A **Source Issue** may have one or more **Change Proposals**
+- A **Plan Run** may contain one or more **Issue Assignments**
 - A **Ready Issue** may have at most one active **Issue Assignment**
 - An **Issue Assignment** may have one or more **Assignment Attempts**
-- An **Issue Assignment** may become an **Abandoned Assignment**
-- A **Blocked** **Issue Assignment** may become a **Recovered Assignment**
 - An **Issue Assignment** has one **Assignment Worktree**
-- A **Change Proposal** may become a **Verified Change Proposal**
-- A **Change Proposal** with failed checks may enter a **Repair Loop**
-- A **Change Proposal** requires **Human Merge** before it is accepted
+- The **Planning Phase** chooses eligible **Ready Issues** that can start together as parallel issue work
+- A **Project** may run issue tasks in parallel up to its **Max Parallel Tasks**
+- A **Project** may have at most one active **Plan Run**
+- A **Project** has one **Integration Branch** for successful **Plan Runs**
+- Selected **Issue Assignments** are claimed before their implementation passes start
+- A **Plan Run** starts from the latest fetched and pulled **Integration Branch** baseline
+- The **Planning Phase** and selected **Issue Assignments** share the **Plan Run** integration baseline
+- A failed **Planning Phase** leaves its **Plan Run** visible for diagnosis
+- A **Planning Phase** may finish with an empty successful **Plan Run** when no eligible work is selected
+- The **Planning Phase** may choose a **Ready Issue** only when its **Issue Dependencies** are resolved
+- Implemented issue work enters the **Review Phase** before it may enter the **Merge Phase**
+- An **Issue Assignment** rejected in the **Review Phase** enters a **Review Loop**
+- A **Review Loop** is bounded by the **Project** **Review Retry Limit** before its **Issue Assignment** blocks
+- Reviewed issue work enters the **Merge Phase** before it is accepted
+- The **Merge Phase** attempts to resolve conflicts while integrating reviewed issue work
+- The **Merge Phase** verifies the integrated result before it pushes the **Integration Branch**
+- The **Merge Phase** may fix integration verification failures before it blocks
+- A failed **Merge Phase** blocks its **Plan Run**
+- A successful **Merge Phase** updates and pushes the **Project** **Integration Branch**
+- A successful **Merge Phase** completes the merged **Source Issues**
+- Finished **Plan Runs** clean up merged **Issue Assignment** worktrees and issue branches
+- Blocked **Issue Assignments** stay outside the **Merge Phase**
+- A **Plan Run** may finish after merging reviewed work while blocked **Issue Assignments** remain
+- Dormant blocked **Issue Assignments** do not consume **Max Parallel Tasks**
+- Blocked issue work must be re-enabled by a human before a later **Plan Run** may select it again
+- Finished **Plan Runs** clean up blocked **Issue Assignment** worktrees and issue branches
+- Human re-enable clears the blocked **Lifecycle Status** without redefining **Ready Issue** readiness
+- A **Plan Run** uses **Phase Prompts** for planning, implementation, review, and merge
+- A **Plan Run** preserves **Phase Outputs** after worktrees and issue branches are cleaned up
+- Finishing one **Plan Run** does not automatically start another **Planning Phase**
 - A **Ready Issue** may have zero or more **Issue Dependencies**
-- An **Issue Dependency** is resolved by **Human Merge**, not by a **Verified Change Proposal**
-- **Source Order** decides which eligible **Ready Issues** fill available **Issue Assignments**
+- An **Issue Dependency** is resolved by the accepted result of the **Merge Phase**
+- **Source Order** preserves source ordering without deciding **Planning Phase** batch selection
 - A **Ready Issue** may belong to one **Parent Issue**
 - A **Project** may have zero or more **Activity** entries
 - A **Local Control Plane** is operated by one developer on their own machine
@@ -141,6 +182,8 @@ _Avoid_: afk, dioxus-agentic-afk
 
 > **Dev:** "Are we wrapping another orchestrator and adding a dashboard?"
 > **Domain expert:** "No - this is a Rust-native **Orchestrator**, and the **Dashboard** is the primary way to operate its **Control Plane**."
+> **Dev:** "Does the dashboard center the single active assignment?"
+> **Domain expert:** "No - the **Dashboard** centers **Plan Runs** and shows their **Issue Assignments** inside them."
 > **Dev:** "Does the **Boilerplate** need to run agents?"
 > **Domain expert:** "No - the **Boilerplate** only needs the runnable foundation where agent-work features will be added later."
 > **Dev:** "Is a **Project** the same thing as a Git repository?"
@@ -159,30 +202,76 @@ _Avoid_: afk, dioxus-agentic-afk
 > **Domain expert:** "No - GitHub Issues can be an **Issue Source**, but a **Project** may use local markdown or another configured source."
 > **Dev:** "Can the **Control Plane** implement any open issue it finds?"
 > **Domain expert:** "No - only a **Ready Issue** is suitable for unattended agent implementation."
+> **Dev:** "Does starting one issue by hand decide what runs next?"
+> **Domain expert:** "No - the developer starts the **Planning Phase**, and it selects the **Ready Issues** for parallel issue work."
+> **Dev:** "Does planner concurrency use the same cap as issue work?"
+> **Domain expert:** "No - a **Project** may have only one active **Plan Run**, while **Max Parallel Tasks** caps parallel issue tasks after planning."
+> **Dev:** "Can implementers start before selected issues are claimed?"
+> **Domain expert:** "No - selected **Issue Assignments** are claimed before their implementation passes start."
+> **Dev:** "Can planning inspect a stale integration checkout?"
+> **Domain expert:** "No - the **Plan Run** starts from the latest fetched and pulled **Integration Branch** baseline."
+> **Dev:** "Should implementation pull again after planning selects a batch?"
+> **Domain expert:** "No - selected **Issue Assignments** branch from the same **Plan Run** integration baseline so the plan does not drift."
+> **Dev:** "Can the planner edit project files while it chooses the batch?"
+> **Domain expert:** "No - the **Planning Phase** inspects the **Project** and issue descriptions but does not edit project files."
+> **Dev:** "If the planner fails, does the plan run disappear?"
+> **Domain expert:** "No - the failed **Planning Phase** leaves its **Plan Run** visible for diagnosis."
+> **Dev:** "If the planner finds no eligible work, is that a failure?"
+> **Domain expert:** "No - the **Planning Phase** may finish with an empty successful **Plan Run**."
+> **Dev:** "Does one finished batch automatically plan the next batch?"
+> **Domain expert:** "No - each **Plan Run** starts from an explicit manual planning trigger for now."
 > **Dev:** "If the dashboard disagrees with GitHub about whether an issue is blocked, which wins?"
 > **Domain expert:** "The **Source Issue** wins because it is authoritative for issue-work planning."
 > **Dev:** "Can implementation progress live only in the local dashboard?"
 > **Domain expert:** "No - **Lifecycle Status** should be written back to the **Issue Source** so progress is visible there too."
-> **Dev:** "Is an issue completed when the agent finishes editing files locally?"
-> **Domain expert:** "No - completion requires a **Verified Change Proposal** so the **Source Issue** can close when the change is accepted."
-> **Dev:** "If CI fails, is the issue done from the agent's point of view?"
-> **Domain expert:** "No - failed checks put the **Change Proposal** into a bounded **Repair Loop**."
-> **Dev:** "Can agentic-afk merge its own pull request when checks pass?"
-> **Domain expert:** "No - **Human Merge** keeps acceptance of a **Change Proposal** under developer control."
-> **Dev:** "Can a dependent issue start after its blocker has a passing pull request?"
-> **Domain expert:** "No - the blocker must be accepted through **Human Merge** before dependent work can start."
-> **Dev:** "Can agentic-afk split one large issue across multiple agents?"
-> **Domain expert:** "No - one active **Issue Assignment** owns one **Ready Issue**; parallelism happens across independent issues."
+> **Dev:** "Does the **Issue Source** need a label for every internal phase?"
+> **Domain expert:** "No - **Lifecycle Status** stays coarse while the **Control Plane** shows plan and phase detail."
+> **Dev:** "Is an issue completed when the implementer finishes editing files locally?"
+> **Domain expert:** "No - implemented work enters the **Review Phase** before reviewed work may be accepted through the **Merge Phase**."
+> **Dev:** "If review rejects one issue branch, is the issue task replaced?"
+> **Domain expert:** "No - the same **Issue Assignment** enters a **Review Loop** and returns for another implementation pass."
+> **Dev:** "Can the reviewer patch the branch directly?"
+> **Domain expert:** "No - the **Review Phase** approves or rejects with findings; implementation passes make project edits."
+> **Dev:** "Can review run checks before approval?"
+> **Domain expert:** "Yes - the **Review Phase** may run verification needed for its approval decision."
+> **Dev:** "If reviewed branches conflict during merge, does the plan stop immediately?"
+> **Domain expert:** "No - the **Merge Phase** attempts to resolve conflicts while integrating the reviewed work."
+> **Dev:** "Can merge push reviewed branches without checking the integrated result?"
+> **Domain expert:** "No - the **Merge Phase** verifies the integrated result before it pushes the **Integration Branch**."
+> **Dev:** "If integrated verification fails, does merge block immediately?"
+> **Domain expert:** "No - the **Merge Phase** may fix integration verification failures before it blocks."
+> **Dev:** "If the merger still cannot finish, does it retry automatically?"
+> **Domain expert:** "No - a failed **Merge Phase** blocks its **Plan Run**."
+> **Dev:** "Does a successful merge stop at a reviewable proposal branch?"
+> **Domain expert:** "No - the successful **Merge Phase** updates and pushes the **Project** **Integration Branch** directly."
+> **Dev:** "Do selected issues stay open after a successful merge?"
+> **Domain expert:** "No - a successful **Merge Phase** completes the merged **Source Issues**."
+> **Dev:** "Do merged issue branches stay around after the plan finishes?"
+> **Domain expert:** "No - finished **Plan Runs** clean up merged **Issue Assignment** worktrees and issue branches."
+> **Dev:** "If one issue task blocks, does its branch get merged with the reviewed work?"
+> **Domain expert:** "No - the **Merge Phase** may accept reviewed work from the **Plan Run** while blocked **Issue Assignments** stay outside the merge."
+> **Dev:** "Does one blocked issue task keep the plan slot forever after the reviewed work merges?"
+> **Domain expert:** "No - the **Plan Run** may finish while blocked **Issue Assignments** remain outside the merge."
+> **Dev:** "Do dormant blocked assignments prevent new planned work from running?"
+> **Domain expert:** "No - only running issue tasks consume **Max Parallel Tasks**."
+> **Dev:** "Does blocked issue work automatically return to the next plan?"
+> **Domain expert:** "No - blocked issue work must be re-enabled by a human before a later **Plan Run** may select it again."
+> **Dev:** "Do blocked issue branches stay around after the plan finishes?"
+> **Domain expert:** "No - finished **Plan Runs** clean up blocked **Issue Assignment** worktrees and issue branches."
+> **Dev:** "Does cleanup erase planner and reviewer evidence?"
+> **Domain expert:** "No - the **Plan Run** preserves **Phase Outputs** after worktrees and issue branches are cleaned up."
+> **Dev:** "Does re-enable mean reapplying readiness too?"
+> **Domain expert:** "No - human re-enable clears blocked **Lifecycle Status** while **Ready Issue** readiness stays separate."
+> **Dev:** "Can agentic-afk accept reviewed issue work itself?"
+> **Domain expert:** "Yes - reviewed issue work enters the **Merge Phase** for acceptance."
+> **Dev:** "Can a dependent issue start after its blocker has passing checks?"
+> **Domain expert:** "No - the blocker must be accepted through the **Merge Phase** before dependent work can start."
+> **Dev:** "Can agentic-afk split one large issue across multiple issue tasks?"
+> **Domain expert:** "No - one active **Issue Assignment** carries one **Ready Issue** through implementation and the **Review Phase**; parallelism happens across independent issues."
 > **Dev:** "Can an assigned agent edit the registered Project checkout directly?"
-> **Domain expert:** "No - the **Control Plane** creates an **Assignment Worktree** from the Project default branch before the assigned agent starts."
-> **Dev:** "Can a new agent replace the old branch for the same issue if it already exists?"
-> **Domain expert:** "Only after the current **Issue Assignment** becomes an **Abandoned Assignment** so its work is explicitly discarded."
-> **Dev:** "Is a repair pass a new assignment?"
-> **Domain expert:** "No - it is another **Assignment Attempt** in the same **Issue Assignment** and **Assignment Worktree**."
-> **Dev:** "If an agent process is lost, does recovery start from a fresh checkout?"
-> **Domain expert:** "No - a **Recovered Assignment** continues in the existing **Assignment Worktree** under one replacement agent."
+> **Domain expert:** "No - the **Control Plane** creates an **Assignment Worktree** from the **Plan Run** integration baseline before implementation starts."
 > **Dev:** "Can the **Control Plane** run two ready issues in parallel because their titles look unrelated?"
-> **Domain expert:** "Yes, if neither has an unresolved **Issue Dependency**; **Source Order** decides which eligible issues fill available assignments first."
+> **Domain expert:** "Yes, if neither has an unresolved **Issue Dependency**; the **Planning Phase** decides which eligible issues enter the batch."
 > **Dev:** "Does a parent issue decide which child issue runs first?"
 > **Domain expert:** "No - a **Parent Issue** groups related work; **Issue Dependencies** determine what must wait."
 
@@ -192,24 +281,55 @@ _Avoid_: afk, dioxus-agentic-afk
 - "boilerplate" was resolved to mean the runnable project foundation, not the first agent-execution feature slice.
 - "project" was resolved to mean a local codebase root, not a Git repository, workspace, or agent task.
 - "activity" was reserved for real control-plane events, not fabricated dashboard content.
+- "dashboard execution view" was resolved around **Plan Runs** with nested **Issue Assignments**, not a single active assignment panel.
 - "local only" was resolved as a **Local Control Plane** constraint, not merely an unauthenticated deployment choice.
 - "afk" was rejected as too generic for the CLI; **agentic-afk** is the canonical entrypoint name.
 - "project identity" was resolved as a stable **Project ID**, not a database row ID or filesystem path.
 - "git metadata" was resolved as a derived **Git Summary**, not persisted **Project** state.
 - "project repo issues" was resolved as an **Issue Source** for a **Project**, not as part of the **Project** identity.
-- "available issues" was resolved to mean issues visible from an **Issue Source**; only **Ready Issues** may be scheduled for agent implementation.
+- "available issues" was resolved to mean issues visible from an **Issue Source**; only `ready-for-agent` **Ready Issues** may be scheduled for agent implementation.
+- "plan" was resolved as a manually started **Planning Phase** that selects one immediately runnable parallel issue batch, not a single-issue start action or a waiting backlog.
+- "max parallel tasks" was resolved as per-**Project** **Max Parallel Tasks** for parallel issue work, excluding the single active **Plan Run** planner step.
+- "review retry bound" was resolved as the per-**Project** **Review Retry Limit** with a platform default.
+- "batch" was resolved as a **Plan Run** that owns one Sandcastle-style plan, implementation, review, and merge flow across selected **Issue Assignments**.
+- "claim" was resolved as a prerequisite for implementation passes selected by a **Plan Run**.
+- "planning baseline" was resolved as one latest fetched and pulled **Integration Branch** baseline shared by the **Planning Phase** and its selected **Issue Assignments**.
+- "planner edits" were rejected; the **Planning Phase** inspects project state and issue descriptions to select work.
+- "planner failure" was resolved as a visible failed **Plan Run**, not a disappearing attempt.
+- "empty plan" was resolved as a successful empty **Plan Run**, not a blocked or failed planner result.
+- "next plan" was resolved as another manual trigger, not an automatic planning cycle.
 - "control plane issue" was rejected; a **Source Issue** remains authoritative instead of being copied into a separate planning model.
 - "lifecycle status" was resolved as status written back to the **Issue Source**, not hidden local dashboard state.
-- "completed issue" was resolved as having a linked **Verified Change Proposal**, not merely finished local edits or an unchecked pull request.
-- "failed CI" was resolved as a bounded **Repair Loop**, not immediate completion or an unrelated new issue.
-- "merge" was resolved as **Human Merge**, not automatic acceptance by the **Control Plane**.
-- "dependency resolved" was resolved as **Human Merge**, not a passing but unmerged **Change Proposal**.
-- "parallel work" was resolved as parallel **Issue Assignments** across different **Ready Issues**, not multiple agents collaborating on one issue.
-- "agent workspace" was resolved as an **Assignment Worktree** created before the assigned agent starts, not the mutable **Project** path.
+- "phase status" was resolved as control-plane detail, not extra **Lifecycle Status** churn in the **Issue Source**.
+- "completed issue" was resolved as reviewed issue work accepted through the **Merge Phase**, not merely finished local edits.
+- "change proposal" was removed from the issue flow so acceptance has one canonical path.
+- "review" was resolved as the agent-owned **Review Phase**, not an implementer self-check or a human-only step.
+- "review edits" were rejected; the **Review Phase** approves or rejects with findings.
+- "review verification" was resolved as checks the **Review Phase** may run to decide approval.
+- "review rejection" was resolved as a **Review Loop** on the same **Issue Assignment**, not a new assignment or whole-plan restart.
+- "phase prompts" was resolved as adapting Sandcastle's prompts for planning, implementation, review, and merge with **Project** instructions in every phase.
+- "phase outputs" were resolved as durable plan-run evidence after branch and worktree cleanup.
+- "merge conflict" was resolved as work for the **Merge Phase** to attempt before the **Plan Run** blocks.
+- "merge verification" was resolved as verification of the integrated result before the **Integration Branch** is pushed.
+- "merge verification failure" was resolved as an integration problem the **Merge Phase** may fix before blocking.
+- "merge failure" was resolved as blocking the **Plan Run** after the failed **Merge Phase**, not an automatic merge retry loop.
+- "merge target" was resolved as the pushed per-**Project** **Integration Branch**, defaulted from the detected default branch rather than left implicit or replaced by a reviewable proposal branch.
+- "completion boundary" was resolved as a merged **Source Issue** accepted by a successful **Merge Phase** into the **Integration Branch**.
+- "merged artifacts" were resolved as cleaned up with the finished **Plan Run**, not preserved issue branches or worktrees.
+- "blocked work in a batch" was resolved as blocked **Issue Assignments** outside the **Merge Phase**, while reviewed work from the same **Plan Run** may still merge.
+- "partial plan success" was resolved as a finished **Plan Run** with merged reviewed work and blocked **Issue Assignments** left outside that merge.
+- "blocked capacity" was resolved so dormant blocked **Issue Assignments** do not consume **Max Parallel Tasks**.
+- "blocked requeue" was rejected; blocked issue work requires human re-enable before later planning.
+- "blocked artifacts" were resolved as cleaned up with the finished **Plan Run**, not preserved branches or worktrees for recovery.
+- "re-enable" was resolved as clearing blocked **Lifecycle Status**, not redefining `ready-for-agent` readiness.
+- "merge" was resolved as the agent-owned **Merge Phase**.
+- "dependency resolved" was resolved as acceptance through the **Merge Phase**, not merely successful implementation or review.
+- "parallel work" was resolved as parallel **Issue Assignments** across different **Ready Issues**, not multiple issue tasks for one issue.
+- "agent workspace" was resolved as an **Assignment Worktree** created from the **Plan Run** integration baseline, not the mutable **Project** path.
 - "assignment branch" was resolved as a branch derived from the **Source Issue** identity, not a title-based or agent-invented branch name.
 - "agent retry" was resolved as another **Assignment Attempt** inside the existing **Issue Assignment**, not a new assignment branch.
-- "fresh retry" was resolved as a new assignment after an **Abandoned Assignment**, not silent replacement of an existing assignment branch.
-- "recover" was resolved as continuing a blocked assignment in its existing **Assignment Worktree** under one replacement agent, not a fresh retry.
-- "not blocked by each other" was resolved as no unresolved **Issue Dependency**, not inferred file-level or semantic independence.
-- "next issue" was resolved by **Source Order** among eligible **Ready Issues**, not by an internal priority model.
+- "fresh retry" was resolved as human re-enable followed by a later **Plan Run**, not assignment abandonment.
+- "recover" was removed from the core flow in favor of later Sandcastle-style **Plan Runs** starting fresh from eligible source issues.
+- "blocker" was resolved as an explicit **Issue Dependency** recorded in the **Source Issue** description, not a GitHub blocked-by relationship or inferred file-level independence.
+- "next issue" was resolved by the **Planning Phase** among eligible **Ready Issues**, not by **Source Order** alone.
 - "parent issue" was resolved as grouping metadata, not execution order.

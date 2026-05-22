@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0034
+---
+
 # Build Issue Source planning before agent execution
 
 The next product slice will make Issue Source configuration, Source Issue sync, readiness parsing, dependency parsing, parent grouping, Source Order, and Dashboard queue visibility real before spawning agents. GitHub Issues and local markdown Issue Sources will both be supported in this planning slice so the Issue Source abstraction is exercised immediately instead of being a GitHub-only shape.

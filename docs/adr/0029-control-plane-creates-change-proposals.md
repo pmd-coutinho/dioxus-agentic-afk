@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0034
+---
+
 # Control Plane creates Change Proposals
 
 The Control Plane will create and link Change Proposals for completed Issue Assignment work instead of relying on the assigned agent to open and wire them up. Agents produce the branch state inside the Assignment Worktree; the Control Plane owns the proposal lifecycle boundary so Source Issue links and completion semantics do not depend on prompt compliance.

@@ -1,6 +1,6 @@
 # Use Project instructions for agent execution policy
 
-Issue Assignments will be executed using the Project's own agent instructions first, including a TDD skill when one is available. When a Project does not provide explicit instructions, the Control Plane may supply conservative defaults such as behavior-first tests, vertical implementation slices, Change Proposal creation with source issue links, and bounded Repair Loops for failed checks.
+Plan Run phase prompts will include the Project's own agent instructions in planning, implementation, review, and merge, including a TDD skill when one is available. When a Project does not provide explicit instructions, the Control Plane may supply conservative defaults such as behavior-first tests, vertical implementation slices, review findings that return to bounded implementation loops, and integrated-result verification before the Integration Branch is pushed.
 
 **Considered Options**
 

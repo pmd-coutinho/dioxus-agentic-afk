@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0034
+---
+
 # Start with Project-focused dashboard routes
 
 The dashboard boilerplate will start with Project-focused routes: `/`, `/projects`, `/projects/:id`, and `/settings`. Agent execution concepts such as runs, agents, and tasks should not appear as top-level navigation until their domain behavior is defined.

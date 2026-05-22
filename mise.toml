@@ -1,7 +1,7 @@
 [tools]
 codex = "latest"
-node = "26.1.0"
-rust = "1.94.1"
+node = "26.2.0"
+rust = "1.95.0"
 "cargo:dioxus-cli" = "0.7.9"
 "cargo:bacon" = "latest"
 
