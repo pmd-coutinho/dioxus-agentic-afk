@@ -174,7 +174,7 @@ test('Start Assignment: 422 validation error renders inline, no reload', async (
   const button = page.getByTestId('start-assignment-button').first();
   await button.click();
 
-  const inlineError = page.locator('[data-start-assignment-error="true"]').first();
+  const inlineError = page.locator('[data-error-marker="start-assignment"]').first();
   await expect(inlineError).toBeVisible();
   await expect(inlineError).toContainText('Untrusted Project');
 
@@ -227,7 +227,7 @@ test('Abandon Assignment: pending state, success refetches Assignment panel, no 
     ...assignmentResponse('assn-1', 'abandoned', projectId),
   });
 
-  await expect(page.getByText('No active Issue Assignment')).toBeVisible();
+  await expect(page.getByText('No active Assignment')).toBeVisible();
   expect(postCalls).toBe(1);
   await expectNoReload(page);
 });
@@ -266,7 +266,7 @@ test('Abandon Assignment: 422 validation error renders inline, no reload', async
 
   await page.getByTestId('abandon-assignment-button').click();
 
-  const inlineError = page.locator('[data-lifecycle-error="abandon-assignment"]');
+  const inlineError = page.locator('[data-error-marker="abandon-assignment"]');
   await expect(inlineError).toBeVisible();
   await expect(inlineError).toContainText('Not abandonable');
 
@@ -317,7 +317,7 @@ test('Recover Assignment: pending state, success refetches, no reload', async ({
     ...assignmentResponse('assn-1', 'proposal_pending', projectId),
   });
 
-  await expect(page.getByText('Change Proposal awaiting checks')).toBeVisible();
+  await expect(page.getByText('Awaiting checks')).toBeVisible();
   await expect(page.getByTestId('recover-assignment-button')).toHaveCount(0);
   expect(postCalls).toBe(1);
   await expectNoReload(page);
@@ -410,7 +410,7 @@ test('Refresh Proposal State: pending state, success refetches, no reload', asyn
     ...assignmentResponse('assn-1', 'proposal_verified', projectId),
   });
 
-  await expect(page.getByText('Verified — awaiting human merge')).toBeVisible();
+  await expect(page.getByText('Verified')).toBeVisible();
   expect(postCalls).toBe(1);
   await expectNoReload(page);
 });
@@ -449,7 +449,7 @@ test('Refresh Proposal State: 422 validation error renders inline, no reload', a
 
   await page.getByTestId('refresh-proposal-state-button').click();
 
-  const inlineError = page.locator('[data-lifecycle-error="refresh-proposal"]');
+  const inlineError = page.locator('[data-error-marker="refresh-proposal"]');
   await expect(inlineError).toBeVisible();
   await expect(inlineError).toContainText('No Change Proposal');
 

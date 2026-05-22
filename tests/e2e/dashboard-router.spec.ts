@@ -64,7 +64,10 @@ test('Dashboard navigates between Project sub-routes without a full page reload'
   const projectId = await createBareProject(request, 'spa-nav');
 
   await page.goto(`/projects/${projectId}`);
-  await expect(page.getByRole('heading', { name: 'Project detail' })).toBeVisible();
+  // CardHead renders the Overview metadata card title as <h2>Project</h2>.
+  await expect(
+    page.getByRole('heading', { level: 2, name: 'Project' }).first(),
+  ).toBeVisible();
 
   // Tag the document so we can detect a full reload (would clear the marker).
   await page.evaluate(() => {

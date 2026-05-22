@@ -255,28 +255,51 @@ fn ProjectLayout(id: String) -> Element {
     use_project_live_subscription(store, id.clone());
 
     rsx! {
-        div { class: "flex flex-col gap-4",
+        div { class: "flex flex-col gap-6",
             match &*project.read_unchecked() {
                 Some(Ok(project)) => rsx! {
-                    ProjectHeader { project: project.clone() }
+                    ProjectCrumb { project: project.clone() }
                     ProjectSubNav { id: id.clone() }
                     Outlet::<Route> {}
                 },
                 Some(Err(error)) => rsx! {
-                    StatusPanel {
+                    ErrorState {
                         title: "Project unavailable".to_string(),
                         detail: error.clone(),
-                        tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
+                        problem_json: None,
                     }
                 },
                 None => rsx! {
-                    StatusPanel {
-                        title: "Loading Project".to_string(),
-                        detail: id.clone(),
-                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                    Card {
+                        CardHead {
+                            title: "Loading Project".to_string(),
+                            id_text: Some(short_project_id(&id)),
+                        }
+                        CardBody {
+                            SkeletonHeading {}
+                            SkeletonLine { width_percent: 60 }
+                            SkeletonLine { width_percent: 40 }
+                        }
                     }
                 },
             }
+        }
+    }
+}
+
+/// Slim breadcrumb above the sub-nav: back link + project path. Heavier
+/// metadata lives in `ProjectOverview`.
+#[component]
+fn ProjectCrumb(project: ProjectResponse) -> Element {
+    rsx! {
+        div { class: "flex flex-wrap items-baseline gap-x-4 gap-y-1",
+            Link {
+                to: Route::ProjectList {},
+                class: "font-display text-[11px] uppercase tracking-[0.22em] text-ink-2 hover:text-cyan",
+                "← Projects"
+            }
+            p { class: "break-words font-mono text-[13px] text-cyan", "{project.path}" }
+            p { class: "font-mono text-[11px] text-ink-dim", "{short_project_id(&project.id.0)}" }
         }
     }
 }
@@ -321,142 +344,54 @@ fn use_project_live_subscription(store: ProjectStore, project_id: String) {
 
 #[component]
 fn ProjectSubNav(id: String) -> Element {
+    let link_class = "border border-stroke px-3 py-1.5 font-display text-[11px] uppercase tracking-[0.22em] text-ink-2 hover:border-cyan hover:text-cyan";
     rsx! {
-        nav { class: "flex flex-wrap gap-3 border-b border-zinc-800 pb-3 text-sm",
-            Link {
-                to: Route::ProjectOverview { id: id.clone() },
-                class: "text-emerald-200 hover:text-emerald-100",
-                "Overview"
-            }
-            Link {
-                to: Route::ProjectPlanning { id: id.clone() },
-                class: "text-emerald-200 hover:text-emerald-100",
-                "Planning"
-            }
-            Link {
-                to: Route::ProjectAssignment { id: id.clone() },
-                class: "text-emerald-200 hover:text-emerald-100",
-                "Assignment"
-            }
-            Link {
-                to: Route::ProjectIssueSource { id: id.clone() },
-                class: "text-emerald-200 hover:text-emerald-100",
-                "Issue Source"
-            }
-            Link {
-                to: Route::ProjectActivity { id: id.clone() },
-                class: "text-emerald-200 hover:text-emerald-100",
-                "Activity"
-            }
+        nav { class: "flex flex-wrap gap-2",
+            Link { to: Route::ProjectOverview { id: id.clone() }, class: link_class, "Overview" }
+            Link { to: Route::ProjectPlanning { id: id.clone() }, class: link_class, "Planning" }
+            Link { to: Route::ProjectAssignment { id: id.clone() }, class: link_class, "Assignment" }
+            Link { to: Route::ProjectIssueSource { id: id.clone() }, class: link_class, "Issue Source" }
+            Link { to: Route::ProjectActivity { id: id.clone() }, class: link_class, "Activity" }
         }
     }
 }
 
-#[component]
-fn ProjectHeader(project: ProjectResponse) -> Element {
-    let project_id = project.id.0.clone();
-    rsx! {
-        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-            Link {
-                to: Route::ProjectList {},
-                class: "text-sm text-emerald-200 hover:text-emerald-100",
-                "Projects"
-            }
-            h2 { class: "mt-4 text-base font-semibold", "Project detail" }
-            dl { class: "mt-4 grid gap-3 text-sm",
-                SettingRow { label: "Project path".to_string(), value: project.path.clone() }
-                SettingRow { label: "Project ID".to_string(), value: project.id.0.clone() }
-                div { class: "grid gap-1 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
-                    dt { class: "text-zinc-400", "Trust" }
-                    dd { class: "break-words font-mono text-zinc-100",
-                        if project.trusted {
-                            span { class: "text-emerald-300", "Trusted for agent execution" }
-                        } else {
-                            TrustProjectButton { project_id: project_id.clone() }
-                        }
-                    }
-                }
-                match project.enabled_issue_source.clone() {
-                    Some(source) => rsx! {
-                        SettingRow {
-                            label: "Issue Source".to_string(),
-                            value: format!("{} {}", source.kind, source.locator),
-                        }
-                    },
-                    None => rsx! {
-                        SettingRow {
-                            label: "Issue Source".to_string(),
-                            value: "Not enabled".to_string(),
-                        }
-                    },
-                }
-            }
-            div { class: "mt-4",
-                match project.git_summary.clone() {
-                    Some(summary) => rsx! { GitSummaryRow { summary } },
-                    None => rsx! {
-                        p { class: "text-sm text-zinc-500", "No Git Summary" }
-                    },
-                }
-            }
-        }
-    }
-}
-
+/// Trust button bound to `ActionButton`. Pending/disabled/error wiring is
+/// owned by `ActionButton`; this component only knows the mutation future
+/// to invoke on press and the post-success toast to announce.
 #[component]
 fn TrustProjectButton(project_id: String) -> Element {
-    use project_store::{MutationCategory, MutationKey, MutationState};
-
     let store = use_context::<ProjectStore>();
-    let key = MutationKey::TrustProject(agentic_afk_contracts::ProjectId(project_id.clone()));
-    let pending = store.is_pending(&key);
-    let inline_error = match store.state(&key) {
-        Some(MutationState::Error {
-            category: MutationCategory::Validation,
-            title,
-            detail,
-        }) => Some((title, detail)),
-        _ => None,
-    };
-
+    let key = MutationKey::TrustProject(ProjectId(project_id.clone()));
     rsx! {
-        div { class: "flex flex-col gap-1",
-            div { class: "flex items-center gap-3",
-                span { class: "text-zinc-400", "Not trusted" }
-                button {
-                    class: "rounded border border-emerald-700 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45 disabled:cursor-not-allowed disabled:opacity-50",
-                    disabled: pending,
-                    "data-testid": "trust-project-button",
-                    "data-mutation-pending": if pending { "true" } else { "false" },
-                    onclick: {
-                        let project_id = project_id.clone();
-                        let key = key.clone();
-                        move |_| {
-                            let project_id = project_id.clone();
-                            let key = key.clone();
-                            async move {
-                                let result = store
-                                    .mutate(key, trust_project_api(project_id.clone()))
-                                    .await;
-                                if result.is_ok() {
-                                    store.push_success(
-                                        "Project trusted",
-                                        "Agent execution is now allowed",
-                                    );
-                                }
-                            }
+        ActionButton {
+            mutation_key: key.clone(),
+            variant: ButtonVariant::Primary,
+            testid: "trust-project-button".to_string(),
+            error_marker: "trust-project".to_string(),
+            on_press: {
+                let key = key.clone();
+                let project_id = project_id.clone();
+                move |_| {
+                    let key = key.clone();
+                    let project_id = project_id.clone();
+                    // `wasm_bindgen_futures::spawn_local` is unbound to the
+                    // ActionButton's scope, so the post-success toast still
+                    // fires after the button unmounts on trust=true.
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let result = store
+                            .mutate(key, trust_project_api(project_id.clone()))
+                            .await;
+                        if result.is_ok() {
+                            store.push_success(
+                                "Project trusted",
+                                "Agent execution is now allowed",
+                            );
                         }
-                    },
-                    if pending { "Trusting…" } else { "Trust Project" }
+                    });
                 }
-            }
-            if let Some((title, detail)) = inline_error {
-                p {
-                    class: "text-xs text-red-300",
-                    "data-trust-error": "true",
-                    "{title}: {detail}"
-                }
-            }
+            },
+            "Trust Project"
         }
     }
 }
@@ -492,14 +427,6 @@ impl AssignmentLifecycle {
         }
     }
 
-    fn pending_label(self) -> &'static str {
-        match self {
-            Self::RefreshProposal => "Refreshing…",
-            Self::Recover => "Recovering…",
-            Self::Abandon => "Abandoning…",
-        }
-    }
-
     fn testid(self) -> &'static str {
         match self {
             Self::RefreshProposal => "refresh-proposal-state-button",
@@ -518,17 +445,11 @@ impl AssignmentLifecycle {
         }
     }
 
-    fn button_class(self) -> &'static str {
+    fn variant(self) -> ButtonVariant {
         match self {
-            Self::RefreshProposal => {
-                "mt-2 w-fit rounded border border-emerald-700 px-2.5 py-1.5 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45 disabled:cursor-not-allowed disabled:opacity-50"
-            }
-            Self::Recover => {
-                "mt-2 w-fit rounded border border-amber-700 px-2.5 py-1.5 text-left text-xs font-medium text-amber-100 hover:border-amber-500 hover:bg-amber-950/45 disabled:cursor-not-allowed disabled:opacity-50"
-            }
-            Self::Abandon => {
-                "mt-2 w-fit rounded border border-rose-700 px-2.5 py-1.5 text-left text-xs font-medium text-rose-100 hover:border-rose-500 hover:bg-rose-950/45 disabled:cursor-not-allowed disabled:opacity-50"
-            }
+            Self::RefreshProposal => ButtonVariant::Primary,
+            Self::Recover => ButtonVariant::Default,
+            Self::Abandon => ButtonVariant::Destructive,
         }
     }
 
@@ -567,46 +488,96 @@ fn AssignmentLifecycleButton(
     project_id: String,
     assignment_id: String,
 ) -> Element {
-    use project_store::{MutationCategory, MutationState};
-
     let store = use_context::<ProjectStore>();
     let key = kind.key(&project_id, &assignment_id);
-    let pending = store.is_pending(&key);
-    let inline_error = match store.state(&key) {
-        Some(MutationState::Error {
-            category: MutationCategory::Validation,
-            title,
-            detail,
-        }) => Some((title, detail)),
-        _ => None,
-    };
     rsx! {
-        div { class: "flex flex-col gap-1",
-            button {
-                class: kind.button_class(),
-                disabled: pending,
-                "data-testid": kind.testid(),
-                "data-mutation-pending": if pending { "true" } else { "false" },
-                onclick: {
+        ActionButton {
+            mutation_key: key.clone(),
+            variant: kind.variant(),
+            testid: kind.testid().to_string(),
+            error_marker: kind.error_marker().to_string(),
+            on_press: {
+                let key = key.clone();
+                let project_id = project_id.clone();
+                let assignment_id = assignment_id.clone();
+                move |_| {
                     let key = key.clone();
                     let project_id = project_id.clone();
                     let assignment_id = assignment_id.clone();
-                    move |_| {
-                        let key = key.clone();
-                        let project_id = project_id.clone();
-                        let assignment_id = assignment_id.clone();
-                        async move {
-                            let _ = store.mutate(key, kind.invoke(project_id, assignment_id)).await;
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let _ = store.mutate(key, kind.invoke(project_id, assignment_id)).await;
+                    });
+                }
+            },
+            "{kind.label()}"
+        }
+    }
+}
+
+#[component]
+fn ProjectOverview(id: String) -> Element {
+    let state_sig = use_context::<ProjectStore>().state_signal();
+    let s = state_sig.read();
+    let project = s.project.clone();
+    let assignment_state = s.assignment_state.clone();
+    drop(s);
+
+    rsx! {
+        match project {
+            Some(project) => rsx! {
+                div { class: "grid gap-6 lg:grid-cols-2",
+                    ProjectMetaCard { project: project.clone() }
+                    AssignmentSummaryCard { assignment_state: assignment_state.clone() }
+                }
+                GitSummaryCard { git_summary: project.git_summary.clone() }
+            },
+            None => rsx! {
+                Card {
+                    CardHead {
+                        title: "Project".to_string(),
+                        id_text: Some(short_project_id(&id)),
+                    }
+                    CardBody {
+                        SkeletonHeading {}
+                        SkeletonLine { width_percent: 70 }
+                        SkeletonLine { width_percent: 40 }
+                    }
+                }
+            },
+        }
+    }
+}
+
+#[component]
+fn ProjectMetaCard(project: ProjectResponse) -> Element {
+    let (trust_tone, trust_label) = derive_trust_pill(project.trusted);
+    let issue_source_label = project
+        .enabled_issue_source
+        .clone()
+        .map(|s| format!("{} {}", s.kind, s.locator))
+        .unwrap_or_else(|| "Not enabled".to_string());
+    rsx! {
+        Card {
+            CardHead {
+                title: "Project".to_string(),
+                id_text: Some(short_project_id(&project.id.0)),
+            }
+            CardBody {
+                div { class: "flex flex-col gap-4",
+                    div { class: "flex flex-wrap items-center gap-2",
+                        StatusPill { tone: trust_tone, label: trust_label.to_string() }
+                        if !project.trusted {
+                            TrustProjectButton { project_id: project.id.0.clone() }
                         }
                     }
-                },
-                if pending { "{kind.pending_label()}" } else { "{kind.label()}" }
-            }
-            if let Some((title, detail)) = inline_error {
-                p {
-                    class: "text-xs text-red-300",
-                    "data-lifecycle-error": kind.error_marker(),
-                    "{title}: {detail}"
+                    KeyValueList {
+                        KeyValueRow { label: "Path".to_string(), value: project.path.clone() }
+                        KeyValueRow { label: "Project ID".to_string(), value: project.id.0.clone() }
+                        KeyValueRow {
+                            label: "Issue Source".to_string(),
+                            value: issue_source_label,
+                        }
+                    }
                 }
             }
         }
@@ -614,12 +585,81 @@ fn AssignmentLifecycleButton(
 }
 
 #[component]
-fn ProjectOverview(id: String) -> Element {
+fn AssignmentSummaryCard(
+    assignment_state: Option<ProjectAssignmentStateResponse>,
+) -> Element {
+    let active = assignment_state
+        .as_ref()
+        .and_then(|s| s.active_assignment.clone());
     rsx! {
-        IssueSourcePanels { id: id.clone() }
-        AssignmentPanel { id: id.clone() }
-        PlanningPanel { id: id.clone() }
-        ActivitySection { id }
+        Card {
+            CardHead {
+                title: "Issue Assignment".to_string(),
+                id_text: active.as_ref().map(|a| a.id.chars().take(8).collect::<String>()),
+            }
+            CardBody {
+                match active {
+                    Some(assignment) => {
+                        let (tone, label) = derive_assignment_lifecycle_pill(&assignment.status);
+                        rsx! {
+                            div { class: "flex flex-col gap-3",
+                                StatusPill { tone, label }
+                                p { class: "font-display text-[13px] text-ink", "{assignment.source_title}" }
+                                p { class: "font-mono text-[11px] text-ink-dim", "{assignment.source_id}" }
+                                p { class: "break-words font-mono text-[11px] text-ink-2", "{assignment.branch}" }
+                            }
+                        }
+                    },
+                    None => rsx! {
+                        EmptyState {
+                            title: "No active Assignment".to_string(),
+                            body: "Start an Assignment from Planning to boot an agent.".to_string(),
+                            accent: EmptyStateAccent::Cyan,
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn GitSummaryCard(git_summary: Option<GitSummary>) -> Element {
+    let (tone, label) = derive_git_pill(git_summary.as_ref());
+    rsx! {
+        Card {
+            CardHead { title: "Git Summary".to_string(), id_text: None }
+            CardBody {
+                match git_summary {
+                    Some(summary) => {
+                        let branch = summary.branch.clone().unwrap_or_else(|| "detached".to_string());
+                        let head = summary
+                            .head
+                            .clone()
+                            .map(|h| h.chars().take(12).collect::<String>())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let state = if summary.dirty { "dirty" } else { "clean" };
+                        rsx! {
+                            div { class: "flex flex-col gap-4",
+                                StatusPill { tone, label: label.clone() }
+                                KeyValueList {
+                                    KeyValueRow { label: "Branch".to_string(), value: branch }
+                                    KeyValueRow { label: "Head".to_string(), value: head }
+                                    KeyValueRow { label: "State".to_string(), value: state.to_string() }
+                                }
+                            }
+                        }
+                    },
+                    None => rsx! {
+                        EmptyState {
+                            title: "No Git Summary".to_string(),
+                            body: "Initialize a Git repository at the Project path to populate this card.".to_string(),
+                            accent: EmptyStateAccent::Cyan,
+                        }
+                    },
+                }
+            }
+        }
     }
 }
 
@@ -679,10 +719,13 @@ fn AssignmentPanel(id: String) -> Element {
         match assignment_state {
             Some(s) => rsx! { AssignmentState { project_id: id.clone(), state: s } },
             None => rsx! {
-                StatusPanel {
-                    title: "Issue Assignment".to_string(),
-                    detail: "Loading".to_string(),
-                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                Card {
+                    CardHead { title: "Issue Assignment".to_string(), id_text: None }
+                    CardBody {
+                        SkeletonHeading {}
+                        SkeletonLine { width_percent: 70 }
+                        SkeletonLine { width_percent: 45 }
+                    }
                 }
             },
         }
@@ -721,8 +764,27 @@ fn PlanningPanel(id: String) -> Element {
 fn ActivitySection(id: String) -> Element {
     let _ = id;
     let state = use_context::<ProjectStore>().state_signal();
-    let entries = state.read().activity.clone();
-    rsx! { ActivityPanel { entries } }
+    let s = state.read();
+    let entries = s.activity.clone();
+    // The store is fully hydrated once `project` is set; before that the
+    // empty `activity` slice is "still loading", not "no entries". Render a
+    // LoadingSkeleton until hydrate completes.
+    let hydrated = s.project.is_some();
+    drop(s);
+    if !hydrated {
+        rsx! {
+            Card {
+                CardHead { title: "Activity".to_string(), id_text: None }
+                CardBody {
+                    SkeletonHeading {}
+                    SkeletonLine { width_percent: 70 }
+                    SkeletonLine { width_percent: 55 }
+                }
+            }
+        }
+    } else {
+        rsx! { ActivityPanel { entries } }
+    }
 }
 
 #[component]
@@ -835,6 +897,25 @@ fn short_project_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+fn derive_trust_pill(trusted: bool) -> (PillTone, &'static str) {
+    if trusted {
+        (PillTone::Verified, "Trusted")
+    } else {
+        (PillTone::Stale, "Untrusted")
+    }
+}
+
+fn derive_assignment_lifecycle_pill(status: &str) -> (PillTone, String) {
+    match status {
+        "proposal_pending" => (PillTone::Running, "Awaiting checks".to_string()),
+        "proposal_verified" => (PillTone::Verified, "Verified".to_string()),
+        "completed" => (PillTone::Verified, "Completed".to_string()),
+        "blocked" => (PillTone::Failed, "Blocked".to_string()),
+        "abandoned" => (PillTone::Idle, "Abandoned".to_string()),
+        other => (PillTone::Pending, other.to_string()),
+    }
+}
+
 fn derive_git_pill(summary: Option<&GitSummary>) -> (PillTone, String) {
     match summary {
         None => (PillTone::Idle, "No Git".to_string()),
@@ -852,23 +933,32 @@ fn derive_git_pill(summary: Option<&GitSummary>) -> (PillTone, String) {
 #[component]
 fn ActivityPanel(entries: Vec<ProjectActivityEntryResponse>) -> Element {
     rsx! {
-        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-            h2 { class: "text-base font-semibold", "Activity" }
-            if entries.is_empty() {
-                p { class: "mt-3 text-sm text-zinc-500", "No Activity recorded yet." }
-            } else {
-                ul { class: "mt-4 grid gap-2",
-                    for entry in entries {
-                        li { class: "flex flex-col gap-1 border-b border-zinc-800 pb-2 text-sm last:border-0 last:pb-0",
-                            div { class: "flex items-baseline justify-between gap-3",
-                                span { class: "font-mono text-emerald-200", "{entry.kind}" }
-                                span { class: "font-mono text-xs text-zinc-500", "{entry.recorded_at}" }
-                            }
-                            if let Some(detail) = entry.detail.clone() {
-                                p { class: "break-words text-xs text-zinc-300", "{detail}" }
-                            }
-                            if let Some(assignment_id) = entry.assignment_id.clone() {
-                                p { class: "font-mono text-[10px] text-zinc-500", "assignment {assignment_id}" }
+        Card {
+            CardHead {
+                title: "Activity".to_string(),
+                id_text: Some(format!("{}", entries.len())),
+            }
+            CardBody {
+                if entries.is_empty() {
+                    EmptyState {
+                        title: "No Activity recorded yet.".to_string(),
+                        body: "Project Activity entries appear here as the Control Plane records lifecycle transitions.".to_string(),
+                        accent: EmptyStateAccent::Cyan,
+                    }
+                } else {
+                    ul { class: "grid gap-2",
+                        for entry in entries {
+                            li { class: "flex flex-col gap-1 border-b border-stroke pb-2 last:border-0 last:pb-0",
+                                div { class: "flex items-baseline justify-between gap-3",
+                                    span { class: "font-mono text-[12px] text-cyan", "{entry.kind}" }
+                                    span { class: "font-mono text-[11px] text-ink-dim", "{entry.recorded_at}" }
+                                }
+                                if let Some(detail) = entry.detail.clone() {
+                                    p { class: "break-words font-mono text-[12px] text-ink-2", "{detail}" }
+                                }
+                                if let Some(assignment_id) = entry.assignment_id.clone() {
+                                    p { class: "font-mono text-[10px] text-ink-dim", "assignment {assignment_id}" }
+                                }
                             }
                         }
                     }
@@ -880,8 +970,6 @@ fn ActivityPanel(entries: Vec<ProjectActivityEntryResponse>) -> Element {
 
 #[component]
 fn IssueSourceSyncStatus(project_id: String) -> Element {
-    use project_store::{MutationCategory, MutationKey, MutationState};
-
     let store = use_context::<ProjectStore>();
     let store_state = store.state_signal();
     let s = store_state.read();
@@ -895,71 +983,63 @@ fn IssueSourceSyncStatus(project_id: String) -> Element {
         .and_then(|p| p.last_failure.clone());
     let sync_in_progress = s.sync_in_progress;
     drop(s);
-    let refresh_project_id = project_id.clone();
 
-    let key = MutationKey::SyncIssueSource(agentic_afk_contracts::ProjectId(project_id.clone()));
-    let pending = store.is_pending(&key) || sync_in_progress;
-    let inline_error = match store.state(&key) {
-        Some(MutationState::Error {
-            category: MutationCategory::Validation,
-            title,
-            detail,
-        }) => Some((title, detail)),
-        _ => None,
+    let key = MutationKey::SyncIssueSource(ProjectId(project_id.clone()));
+    let sync_label = last_successful_sync_at
+        .clone()
+        .unwrap_or_else(|| "Never synced".to_string());
+    let (status_tone, status_label) = if sync_in_progress {
+        (PillTone::Running, "Syncing".to_string())
+    } else if last_failure.is_some() {
+        (PillTone::Failed, "Failed".to_string())
+    } else if last_successful_sync_at.is_some() {
+        (PillTone::Verified, "Synced".to_string())
+    } else {
+        (PillTone::Idle, "Never synced".to_string())
     };
 
     rsx! {
-        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-            div { class: "flex flex-col gap-3 md:flex-row md:items-start md:justify-between",
-                div {
-                    h2 { class: "text-base font-semibold", "Last sync status" }
-                    p { class: "mt-2 font-mono text-sm text-zinc-300",
-                        {last_successful_sync_at.clone().unwrap_or_else(|| "Never synced".to_string())}
-                    }
+        Card {
+            CardHead {
+                title: "Last sync status".to_string(),
+                id_text: Some(sync_label),
+            }
+            CardBody {
+                div { class: "flex flex-col gap-4",
+                    StatusPill { tone: status_tone, label: status_label }
                     if let Some(failure) = last_failure.clone() {
-                        p { class: "mt-2 text-sm text-red-100", "{failure}" }
+                        ErrorState {
+                            title: "Issue Source sync failed".to_string(),
+                            detail: failure,
+                            problem_json: None,
+                        }
                     }
-                }
-                div { class: "flex flex-col items-end gap-1",
-                    button {
-                        class: if pending {
-                            "rounded border border-emerald-700 px-3 py-2 text-sm font-medium text-emerald-100 cursor-not-allowed opacity-50"
-                        } else {
-                            "rounded border border-emerald-700 px-3 py-2 text-sm font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45"
-                        },
-                        "aria-disabled": if pending { "true" } else { "false" },
-                        "data-testid": "refresh-issue-source-button",
-                        "data-mutation-pending": if pending { "true" } else { "false" },
-                        onclick: {
-                            let project_id = refresh_project_id.clone();
-                            let key = key.clone();
-                            move |_| {
-                                let project_id = project_id.clone();
+                    div {
+                        ActionButton {
+                            mutation_key: key.clone(),
+                            variant: ButtonVariant::Primary,
+                            testid: "refresh-issue-source-button".to_string(),
+                            error_marker: "refresh-issue-source".to_string(),
+                            on_press: {
                                 let key = key.clone();
-                                let already_pending = pending;
-                                async move {
-                                    if already_pending {
-                                        return;
-                                    }
-                                    let result = store
-                                        .mutate(key, sync_issue_source(project_id.clone()))
-                                        .await;
-                                    if result.is_ok() {
-                                        // The SSE `IssueSourceSyncCompleted` /
-                                        // `PlanningSnapshotChanged` deltas
-                                        // refresh the panel without a fetch.
-                                        store.push_success("Issue Source synced", String::new());
-                                    }
+                                let project_id = project_id.clone();
+                                move |_| {
+                                    let key = key.clone();
+                                    let project_id = project_id.clone();
+                                    wasm_bindgen_futures::spawn_local(async move {
+                                        let result = store
+                                            .mutate(key, sync_issue_source(project_id.clone()))
+                                            .await;
+                                        if result.is_ok() {
+                                            store.push_success(
+                                                "Issue Source synced",
+                                                String::new(),
+                                            );
+                                        }
+                                    });
                                 }
-                            }
-                        },
-                        if pending { "Refreshing…" } else { "Refresh Issue Source" }
-                    }
-                    if let Some((title, detail)) = inline_error {
-                        p {
-                            class: "text-xs text-red-300",
-                            "data-sync-error": "true",
-                            "{title}: {detail}"
+                            },
+                            "Refresh Issue Source"
                         }
                     }
                 }
@@ -971,16 +1051,25 @@ fn IssueSourceSyncStatus(project_id: String) -> Element {
 #[component]
 fn IssueSourceCandidates(project_id: String, candidates: Vec<IssueSourceCandidate>) -> Element {
     rsx! {
-        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-            h2 { class: "text-base font-semibold", "Issue Source candidates" }
-            if candidates.is_empty() {
-                p { class: "mt-3 text-sm text-zinc-500", "None" }
-            } else {
-                ul { class: "mt-4 grid gap-3",
-                    for candidate in candidates {
-                        IssueSourceCandidateRow {
-                            project_id: project_id.clone(),
-                            candidate,
+        Card {
+            CardHead {
+                title: "Issue Source candidates".to_string(),
+                id_text: Some(format!("{}", candidates.len())),
+            }
+            CardBody {
+                if candidates.is_empty() {
+                    EmptyState {
+                        title: "No candidates".to_string(),
+                        body: "The Local Control Plane discovered no Issue Source candidates from the Project evidence.".to_string(),
+                        accent: EmptyStateAccent::Cyan,
+                    }
+                } else {
+                    ul { class: "grid gap-3",
+                        for candidate in candidates {
+                            IssueSourceCandidateRow {
+                                project_id: project_id.clone(),
+                                candidate,
+                            }
                         }
                     }
                 }
@@ -991,89 +1080,54 @@ fn IssueSourceCandidates(project_id: String, candidates: Vec<IssueSourceCandidat
 
 #[component]
 fn IssueSourceCandidateRow(project_id: String, candidate: IssueSourceCandidate) -> Element {
-    use project_store::{MutationCategory, MutationKey, MutationState};
-
     let store = use_context::<ProjectStore>();
     let enable_project_id = project_id.clone();
     let enable_kind = candidate.kind.clone();
     let enable_locator = candidate.locator.clone();
 
     let key = MutationKey::EnableIssueSource(
-        agentic_afk_contracts::ProjectId(project_id.clone()),
+        ProjectId(project_id.clone()),
         candidate.kind.clone(),
         candidate.locator.clone(),
     );
-    let pending = store.is_pending(&key);
-    let inline_error = match store.state(&key) {
-        Some(MutationState::Error {
-            category: MutationCategory::Validation,
-            title,
-            detail,
-        }) => Some((title, detail)),
-        _ => None,
-    };
     let testid = format!(
         "enable-issue-source-{}-{}",
         candidate.kind, candidate.locator
     );
+    let error_marker = format!("enable-issue-source-{}-{}", candidate.kind, candidate.locator);
 
     rsx! {
-        li { class: "flex flex-col gap-2 border-b border-zinc-800 pb-3 text-sm text-zinc-100 last:border-0 last:pb-0 md:flex-row md:items-center md:justify-between",
-            p { class: "break-words font-mono", "{candidate.kind} {candidate.locator}" }
+        li { class: "flex flex-col gap-2 border-b border-stroke pb-3 last:border-0 last:pb-0 md:flex-row md:items-center md:justify-between",
+            p { class: "break-words font-mono text-[13px] text-ink", "{candidate.kind} {candidate.locator}" }
             if candidate.enabled {
-                p {
-                    class: "text-xs text-emerald-200",
-                    "data-candidate-enabled": "true",
-                    "Enabled"
-                }
+                StatusPill { tone: PillTone::Verified, label: "Enabled".to_string() }
             } else {
-                div { class: "flex flex-col items-start gap-1 md:items-end",
-                    button {
-                        class: if pending {
-                            "rounded border border-emerald-700 px-3 py-2 text-left text-xs font-medium text-emerald-100 cursor-not-allowed opacity-50"
-                        } else {
-                            "rounded border border-emerald-700 px-3 py-2 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45"
-                        },
-                        "aria-disabled": if pending { "true" } else { "false" },
-                        "data-testid": testid,
-                        "data-mutation-pending": if pending { "true" } else { "false" },
-                        onclick: {
-                            let project_id = enable_project_id.clone();
-                            let kind = enable_kind.clone();
-                            let locator = enable_locator.clone();
+                ActionButton {
+                    mutation_key: key.clone(),
+                    variant: ButtonVariant::Primary,
+                    testid: testid,
+                    error_marker: error_marker,
+                    on_press: {
+                        let key = key.clone();
+                        let project_id = enable_project_id.clone();
+                        let kind = enable_kind.clone();
+                        let locator = enable_locator.clone();
+                        move |_| {
                             let key = key.clone();
-                            move |_| {
-                                let project_id = project_id.clone();
-                                let kind = kind.clone();
-                                let locator = locator.clone();
-                                let key = key.clone();
-                                let already_pending = pending;
-                                async move {
-                                    if already_pending {
-                                        return;
-                                    }
-                                    let _ = store
-                                        .mutate(
-                                            key,
-                                            enable_issue_source(project_id, kind, locator),
-                                        )
-                                        .await;
-                                }
-                            }
-                        },
-                        if pending {
-                            "Enabling…"
-                        } else {
-                            "Enable {candidate.kind} {candidate.locator}"
+                            let project_id = project_id.clone();
+                            let kind = kind.clone();
+                            let locator = locator.clone();
+                            wasm_bindgen_futures::spawn_local(async move {
+                                let _ = store
+                                    .mutate(
+                                        key,
+                                        enable_issue_source(project_id, kind, locator),
+                                    )
+                                    .await;
+                            });
                         }
-                    }
-                    if let Some((title, detail)) = inline_error {
-                        p {
-                            class: "text-xs text-red-300",
-                            "data-enable-error": "true",
-                            "{title}: {detail}"
-                        }
-                    }
+                    },
+                    "Enable {candidate.kind} {candidate.locator}"
                 }
             }
         }
@@ -1090,52 +1144,56 @@ fn PlanningSnapshot(
         .last_successful_sync_at
         .clone()
         .unwrap_or_else(|| "Never synced".to_string());
+    let source_label = format!("{} {}", snapshot.source.kind, snapshot.source.locator);
 
     rsx! {
-        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-            div { class: "flex flex-col gap-2 border-b border-zinc-800 pb-4 md:flex-row md:items-start md:justify-between",
-                div {
-                    h2 { class: "text-base font-semibold", "Planning snapshot" }
-                    p { class: "mt-1 font-mono text-xs text-zinc-500", "{snapshot.source.kind} {snapshot.source.locator}" }
-                }
-                p { class: "font-mono text-xs text-zinc-400", "{last_sync}" }
+        Card {
+            CardHead {
+                title: "Planning snapshot".to_string(),
+                id_text: Some(last_sync),
             }
-            match snapshot.last_failure {
-                Some(failure) => rsx! {
-                    p { class: "mt-4 rounded border border-red-800 bg-red-950/35 px-3 py-2 text-sm text-red-100", "{failure}" }
-                },
-                None => rsx! {},
-            }
-            div { class: "mt-4 grid gap-4 lg:grid-cols-5",
-                PlanningGroup {
-                    project_id: project_id.clone(),
-                    title: "Eligible Ready Issues".to_string(),
-                    issues: snapshot.eligible,
-                    can_start: trusted,
-                }
-                PlanningGroup {
-                    project_id: project_id.clone(),
-                    title: "Active Issues".to_string(),
-                    issues: snapshot.active,
-                    can_start: false,
-                }
-                PlanningGroup {
-                    project_id: project_id.clone(),
-                    title: "Blocked Ready Issues".to_string(),
-                    issues: snapshot.blocked,
-                    can_start: false,
-                }
-                PlanningGroup {
-                    project_id: project_id.clone(),
-                    title: "Completed Issues".to_string(),
-                    issues: snapshot.completed,
-                    can_start: false,
-                }
-                PlanningGroup {
-                    project_id,
-                    title: "Non-ready Source Issues".to_string(),
-                    issues: snapshot.non_ready,
-                    can_start: false,
+            CardBody {
+                div { class: "flex flex-col gap-4",
+                    p { class: "font-mono text-[11px] text-ink-dim", "{source_label}" }
+                    if let Some(failure) = snapshot.last_failure.clone() {
+                        ErrorState {
+                            title: "Issue Source sync failed".to_string(),
+                            detail: failure,
+                            problem_json: None,
+                        }
+                    }
+                    div { class: "grid gap-4 lg:grid-cols-5",
+                        PlanningGroup {
+                            project_id: project_id.clone(),
+                            title: "Eligible Ready Issues".to_string(),
+                            issues: snapshot.eligible,
+                            can_start: trusted,
+                        }
+                        PlanningGroup {
+                            project_id: project_id.clone(),
+                            title: "Active Issues".to_string(),
+                            issues: snapshot.active,
+                            can_start: false,
+                        }
+                        PlanningGroup {
+                            project_id: project_id.clone(),
+                            title: "Blocked Ready Issues".to_string(),
+                            issues: snapshot.blocked,
+                            can_start: false,
+                        }
+                        PlanningGroup {
+                            project_id: project_id.clone(),
+                            title: "Completed Issues".to_string(),
+                            issues: snapshot.completed,
+                            can_start: false,
+                        }
+                        PlanningGroup {
+                            project_id,
+                            title: "Non-ready Source Issues".to_string(),
+                            issues: snapshot.non_ready,
+                            can_start: false,
+                        }
+                    }
                 }
             }
         }
@@ -1150,10 +1208,10 @@ fn PlanningGroup(
     can_start: bool,
 ) -> Element {
     rsx! {
-        section { class: "min-w-0 rounded border border-zinc-800 bg-zinc-950/40 p-4",
-            h3 { class: "text-sm font-semibold text-zinc-100", "{title}" }
+        section { class: "min-w-0 border border-stroke bg-panel/40 p-4",
+            h3 { class: "font-display text-[11px] uppercase tracking-[0.18em] text-ink-2", "{title}" }
             if issues.is_empty() {
-                p { class: "mt-3 text-sm text-zinc-500", "None" }
+                p { class: "mt-3 font-mono text-[11px] uppercase tracking-[0.18em] text-ink-dim", "None" }
             } else {
                 ul { class: "mt-3 grid gap-3",
                     for issue in issues {
@@ -1171,7 +1229,7 @@ fn PlanningGroup(
 
 #[component]
 fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool) -> Element {
-    use project_store::{MutationCategory, MutationKey, MutationState, SourceIssueId};
+    use project_store::SourceIssueId;
 
     let dependencies = if issue.issue_dependencies.is_empty() {
         "No dependencies".to_string()
@@ -1184,56 +1242,42 @@ fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool
         .unwrap_or_else(|| "No parent".to_string());
     let store = use_context::<ProjectStore>();
     let key = MutationKey::StartAssignment(
-        agentic_afk_contracts::ProjectId(project_id.clone()),
+        ProjectId(project_id.clone()),
         SourceIssueId(issue.source_id.clone()),
     );
-    let pending = store.is_pending(&key);
-    let inline_error = match store.state(&key) {
-        Some(MutationState::Error {
-            category: MutationCategory::Validation,
-            title,
-            detail,
-        }) => Some((title, detail)),
-        _ => None,
-    };
     let start_project_id = project_id.clone();
     let start_source_id = issue.source_id.clone();
 
     rsx! {
-        li { class: "grid gap-1 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
+        li { class: "grid gap-1 border-b border-stroke pb-3 text-[12px] text-ink-2 last:border-0 last:pb-0",
             div { class: "flex items-baseline justify-between gap-3",
-                p { class: "min-w-0 break-words text-sm font-medium text-zinc-100", "{issue.title}" }
-                p { class: "shrink-0 font-mono text-xs text-zinc-500", "#{issue.source_order}" }
+                p { class: "min-w-0 break-words font-display text-[13px] text-ink", "{issue.title}" }
+                p { class: "shrink-0 font-mono text-[11px] text-ink-dim", "#{issue.source_order}" }
             }
-            p { class: "break-words font-mono text-xs text-zinc-500", "{issue.source_id}" }
-            p { class: "text-xs text-zinc-400", "Parent {parent}" }
-            p { class: "text-xs text-zinc-400", "{dependencies}" }
+            p { class: "break-words font-mono text-[11px] text-ink-dim", "{issue.source_id}" }
+            p { class: "font-mono text-[11px] text-ink-2", "Parent {parent}" }
+            p { class: "font-mono text-[11px] text-ink-2", "{dependencies}" }
             if can_start {
-                button {
-                    class: "mt-2 rounded border border-emerald-700 px-2.5 py-1.5 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45 disabled:cursor-not-allowed disabled:opacity-50",
-                    disabled: pending,
-                    "data-testid": "start-assignment-button",
-                    "data-mutation-pending": if pending { "true" } else { "false" },
-                    onclick: {
-                        let key = key.clone();
-                        move |_| {
-                            let project_id = start_project_id.clone();
-                            let source_id = start_source_id.clone();
+                div { class: "mt-2",
+                    ActionButton {
+                        mutation_key: key.clone(),
+                        variant: ButtonVariant::Primary,
+                        testid: "start-assignment-button".to_string(),
+                        error_marker: "start-assignment".to_string(),
+                        on_press: {
                             let key = key.clone();
-                            async move {
-                                let _ = store
-                                    .mutate(key, start_assignment_api(project_id, source_id))
-                                    .await;
+                            move |_| {
+                                let key = key.clone();
+                                let project_id = start_project_id.clone();
+                                let source_id = start_source_id.clone();
+                                wasm_bindgen_futures::spawn_local(async move {
+                                    let _ = store
+                                        .mutate(key, start_assignment_api(project_id, source_id))
+                                        .await;
+                                });
                             }
-                        }
-                    },
-                    if pending { "Starting…" } else { "Start Assignment" }
-                }
-                if let Some((title, detail)) = inline_error {
-                    p {
-                        class: "text-xs text-red-300",
-                        "data-start-assignment-error": "true",
-                        "{title}: {detail}"
+                        },
+                        "Start Assignment"
                     }
                 }
             }
@@ -1244,75 +1288,96 @@ fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool
 #[component]
 fn AssignmentState(project_id: String, state: ProjectAssignmentStateResponse) -> Element {
     rsx! {
-        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-            h2 { class: "text-base font-semibold", "Issue Assignment" }
-            match state.active_assignment {
-                Some(assignment) => {
-                    let lifecycle_label = match assignment.status.as_str() {
-                        "proposal_pending" => "Change Proposal awaiting checks",
-                        "proposal_verified" => "Verified — awaiting human merge",
-                        "completed" => "Completed",
-                        other => other,
-                    };
-                    let can_refresh_proposal = matches!(
-                        assignment.status.as_str(),
-                        "proposal_pending" | "proposal_verified"
-                    );
-                    let can_abandon = assignment.status == "blocked";
-                    let can_recover = assignment.status == "blocked";
-                    let assignment_id = assignment.id.clone();
-                    rsx! {
-                        div { class: "mt-4 grid gap-2 text-sm",
-                            p { class: "font-medium text-zinc-100", "{assignment.source_title}" }
-                            p { class: "font-mono text-xs text-zinc-400", "{assignment.source_id}" }
-                            p { class: "text-zinc-300", "State {lifecycle_label}" }
-                            p { class: "break-words font-mono text-xs text-zinc-500", "{assignment.branch}" }
-                            if let Some(detail) = assignment.status_detail.clone() {
-                                p { class: "text-zinc-300", "{detail}" }
-                            }
-                            if let Some(proposal) = assignment.change_proposal.clone() {
-                                a {
-                                    class: "w-fit text-emerald-300 underline decoration-emerald-800 underline-offset-4 hover:text-emerald-200",
-                                    href: "{proposal.url}",
-                                    target: "_blank",
-                                    rel: "noreferrer",
-                                    "Change Proposal {proposal.status}"
+        Card {
+            CardHead {
+                title: "Issue Assignment".to_string(),
+                id_text: state
+                    .active_assignment
+                    .as_ref()
+                    .map(|a| a.id.chars().take(8).collect::<String>()),
+            }
+            CardBody {
+                match state.active_assignment {
+                    Some(assignment) => {
+                        let (lifecycle_tone, lifecycle_label) =
+                            derive_assignment_lifecycle_pill(&assignment.status);
+                        let can_refresh_proposal = matches!(
+                            assignment.status.as_str(),
+                            "proposal_pending" | "proposal_verified"
+                        );
+                        let can_abandon = assignment.status == "blocked";
+                        let can_recover = assignment.status == "blocked";
+                        let assignment_id = assignment.id.clone();
+                        rsx! {
+                            div { class: "flex flex-col gap-4",
+                                div { class: "flex flex-wrap items-center gap-3",
+                                    StatusPill { tone: lifecycle_tone, label: lifecycle_label }
+                                    if let Some(budget) = assignment.repair_budget.clone() {
+                                        StatusPill {
+                                            tone: PillTone::Pending,
+                                            label: format!(
+                                                "Repair {}/{}",
+                                                budget.attempt_count, budget.max_attempts,
+                                            ),
+                                        }
+                                    }
                                 }
-                            }
-                            if can_refresh_proposal {
-                                RefreshProposalStateButton {
-                                    project_id: project_id.clone(),
-                                    assignment_id: assignment_id.clone(),
+                                p { class: "font-display text-[14px] text-ink", "{assignment.source_title}" }
+                                KeyValueList {
+                                    KeyValueRow { label: "Source ID".to_string(), value: assignment.source_id.clone() }
+                                    KeyValueRow { label: "Branch".to_string(), value: assignment.branch.clone() }
                                 }
-                            }
-                            if can_recover {
-                                RecoverAssignmentButton {
-                                    project_id: project_id.clone(),
-                                    assignment_id: assignment_id.clone(),
+                                if let Some(detail) = assignment.status_detail.clone() {
+                                    p { class: "font-mono text-[12px] text-ink-2", "{detail}" }
                                 }
-                            }
-                            if can_abandon {
-                                AbandonAssignmentButton {
-                                    project_id: project_id.clone(),
-                                    assignment_id: assignment_id.clone(),
+                                if let Some(proposal) = assignment.change_proposal.clone() {
+                                    a {
+                                        class: "w-fit font-display text-[11px] uppercase tracking-[0.18em] text-cyan hover:text-ink",
+                                        href: "{proposal.url}",
+                                        target: "_blank",
+                                        rel: "noreferrer",
+                                        "Change Proposal {proposal.status}"
+                                    }
                                 }
-                            }
-                            if let Some(budget) = assignment.repair_budget.clone() {
-                                p { class: "text-xs text-zinc-400",
-                                    "Repair Loop {budget.attempt_count} of {budget.max_attempts} attempts within {budget.window_seconds}s window"
+                                div { class: "flex flex-wrap gap-3",
+                                    if can_refresh_proposal {
+                                        AssignmentLifecycleButton {
+                                            kind: AssignmentLifecycle::RefreshProposal,
+                                            project_id: project_id.clone(),
+                                            assignment_id: assignment_id.clone(),
+                                        }
+                                    }
+                                    if can_recover {
+                                        AssignmentLifecycleButton {
+                                            kind: AssignmentLifecycle::Recover,
+                                            project_id: project_id.clone(),
+                                            assignment_id: assignment_id.clone(),
+                                        }
+                                    }
+                                    if can_abandon {
+                                        AssignmentLifecycleButton {
+                                            kind: AssignmentLifecycle::Abandon,
+                                            project_id: project_id.clone(),
+                                            assignment_id: assignment_id.clone(),
+                                        }
+                                    }
+                                }
+                                if state.waiting_ready_issue_count > 0 {
+                                    p { class: "border-t border-stroke pt-3 font-mono text-[12px] text-ink-2",
+                                        "{state.waiting_ready_issue_count} eligible Ready Issue waiting for the Project assignment slot."
+                                    }
                                 }
                             }
                         }
-                        if state.waiting_ready_issue_count > 0 {
-                            p { class: "mt-4 border-t border-zinc-800 pt-3 text-sm text-zinc-300",
-                                "{state.waiting_ready_issue_count} eligible Ready Issue waiting for the Project assignment slot."
-                            }
+                    },
+                    None => rsx! {
+                        EmptyState {
+                            title: "No active Assignment".to_string(),
+                            body: "Start an Assignment from Planning to boot an agent against this Project.".to_string(),
+                            accent: EmptyStateAccent::Cyan,
                         }
-                    }
-                },
-                None => rsx! {
-                    p { class: "mt-3 text-sm text-zinc-500", "No active Issue Assignment" }
-                },
+                    },
+                }
             }
         }
     }
@@ -1761,5 +1826,54 @@ mod tests {
     fn short_project_id_truncates_to_eight_chars() {
         assert_eq!(short_project_id("0123456789abcdef"), "01234567");
         assert_eq!(short_project_id("abc"), "abc");
+    }
+
+    #[test]
+    fn trust_pill_trusted_is_verified() {
+        let (tone, label) = derive_trust_pill(true);
+        assert_eq!(tone, PillTone::Verified);
+        assert_eq!(label, "Trusted");
+    }
+
+    #[test]
+    fn trust_pill_untrusted_is_stale() {
+        let (tone, label) = derive_trust_pill(false);
+        assert_eq!(tone, PillTone::Stale);
+        assert_eq!(label, "Untrusted");
+    }
+
+    #[test]
+    fn lifecycle_pill_proposal_pending_is_running() {
+        let (tone, label) = derive_assignment_lifecycle_pill("proposal_pending");
+        assert_eq!(tone, PillTone::Running);
+        assert_eq!(label, "Awaiting checks");
+    }
+
+    #[test]
+    fn lifecycle_pill_proposal_verified_is_verified() {
+        let (tone, label) = derive_assignment_lifecycle_pill("proposal_verified");
+        assert_eq!(tone, PillTone::Verified);
+        assert_eq!(label, "Verified");
+    }
+
+    #[test]
+    fn lifecycle_pill_completed_is_verified() {
+        let (tone, label) = derive_assignment_lifecycle_pill("completed");
+        assert_eq!(tone, PillTone::Verified);
+        assert_eq!(label, "Completed");
+    }
+
+    #[test]
+    fn lifecycle_pill_blocked_is_failed() {
+        let (tone, label) = derive_assignment_lifecycle_pill("blocked");
+        assert_eq!(tone, PillTone::Failed);
+        assert_eq!(label, "Blocked");
+    }
+
+    #[test]
+    fn lifecycle_pill_unknown_status_is_pending() {
+        let (tone, label) = derive_assignment_lifecycle_pill("queued");
+        assert_eq!(tone, PillTone::Pending);
+        assert_eq!(label, "queued");
     }
 }

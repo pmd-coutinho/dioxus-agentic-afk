@@ -52,10 +52,11 @@ test('Refresh Issue Source shows pending, announces success via toast, no page r
   await expect(button).toHaveText('Refresh Issue Source');
   await button.click();
 
-  // Mid-flight: button shows pending state (aria-disabled, label, marker).
+  // Mid-flight: ActionButton swaps to its Pending render-state (disabled
+  // attribute + `data-mutation-pending="true"`). Label text stays stable —
+  // the pending visual is the shimmer treatment on the same element.
   await expect(button).toHaveAttribute('data-mutation-pending', 'true');
-  await expect(button).toHaveAttribute('aria-disabled', 'true');
-  await expect(button).toContainText('Refreshing');
+  await expect(button).toBeDisabled();
 
   // Settled: success toast appears.
   await expect(
@@ -66,7 +67,7 @@ test('Refresh Issue Source shows pending, announces success via toast, no page r
 
   // Button returns to idle state.
   await expect(button).toHaveAttribute('data-mutation-pending', 'false');
-  await expect(button).toHaveAttribute('aria-disabled', 'false');
+  await expect(button).toBeEnabled();
 
   // No full page reload happened.
   const mark = await page.evaluate(
@@ -106,7 +107,7 @@ test('Refresh Issue Source surfaces inline error on validation failure', async (
   await button.click();
 
   // Inline error shows next to the button.
-  await expect(page.locator('[data-sync-error="true"]')).toContainText(
+  await expect(page.locator('[data-error-marker="refresh-issue-source"]')).toContainText(
     'Sync failed',
   );
 

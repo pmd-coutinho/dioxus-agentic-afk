@@ -54,23 +54,42 @@ pub fn ActionButton(
     mutation_key: MutationKey,
     #[props(default = ButtonVariant::Default)] variant: ButtonVariant,
     #[props(default)] disabled: bool,
+    #[props(default)] testid: Option<String>,
+    #[props(default)] error_marker: Option<String>,
     on_press: EventHandler<()>,
     children: Element,
 ) -> Element {
     let store = use_context::<ProjectStore>();
     let render_state = derive_button_render_state(store.state(&mutation_key));
+    let pending_attr = matches!(render_state, ButtonRenderState::Pending);
 
     match render_state {
         ButtonRenderState::Pending => rsx! {
-            button { class: PENDING_BTN, r#type: "button", {children} }
+            button {
+                class: PENDING_BTN,
+                r#type: "button",
+                disabled: true,
+                "data-testid": testid.clone(),
+                "data-mutation-pending": "true",
+                {children}
+            }
         },
         ButtonRenderState::Idle if disabled => rsx! {
-            button { class: DISABLED_BTN, r#type: "button", disabled: true, {children} }
+            button {
+                class: DISABLED_BTN,
+                r#type: "button",
+                disabled: true,
+                "data-testid": testid.clone(),
+                "data-mutation-pending": "false",
+                {children}
+            }
         },
         ButtonRenderState::Idle => rsx! {
             button {
                 class: format!("{BASE_BTN} {}", variant_classes(variant)),
                 r#type: "button",
+                "data-testid": testid.clone(),
+                "data-mutation-pending": if pending_attr { "true" } else { "false" },
                 onclick: move |_| on_press.call(()),
                 {children}
             }
@@ -80,11 +99,14 @@ pub fn ActionButton(
                 button {
                     class: format!("{BASE_BTN} {}", variant_classes(variant)),
                     r#type: "button",
+                    "data-testid": testid.clone(),
+                    "data-mutation-pending": "false",
                     onclick: move |_| on_press.call(()),
                     {children}
                 }
                 div {
                     class: "max-w-[360px] border border-coral/35 border-l-[3px] bg-coral/5 px-3 py-2 font-mono text-[11px] text-coral",
+                    "data-error-marker": error_marker.clone(),
                     span { class: "block uppercase tracking-[0.14em]", "{title}" }
                     span { class: "mt-[2px] block text-ink-2", "{detail}" }
                 }

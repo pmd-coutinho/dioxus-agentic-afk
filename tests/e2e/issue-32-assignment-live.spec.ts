@@ -34,7 +34,7 @@ test('Assignment panel updates live across Start → Attempt → Proposal verifi
   });
 
   await expect(page.getByRole('heading', { name: 'Issue Assignment' })).toBeVisible();
-  await expect(page.getByText('No active Issue Assignment')).toBeVisible();
+  await expect(page.getByText('No active Assignment')).toBeVisible();
 
   // --- Start Assignment ----------------------------------------------------
   const created1 = await request.post(
@@ -58,8 +58,9 @@ test('Assignment panel updates live across Start → Attempt → Proposal verifi
   await expect(created1).toBeOK();
 
   await expect(page.getByText('Live Test Source Title')).toBeVisible();
-  await expect(page.getByText('State running')).toBeVisible();
-  await expect(page.getByText('No active Issue Assignment')).toBeHidden();
+  // Unknown lifecycle status renders the raw value inside a StatusPill.
+  await expect(page.getByText('running', { exact: true })).toBeVisible();
+  await expect(page.getByText('No active Assignment')).toBeHidden();
 
   // --- Assignment Attempt added -------------------------------------------
   const attemptAdded = await request.post(
@@ -123,7 +124,7 @@ test('Assignment panel updates live across Start → Attempt → Proposal verifi
     },
   );
   await expect(statusPending).toBeOK();
-  await expect(page.getByText('Change Proposal awaiting checks')).toBeVisible();
+  await expect(page.getByText('Awaiting checks')).toBeVisible();
 
   // --- Change Proposal verified -------------------------------------------
   const proposalVerified = await request.post(
@@ -163,7 +164,7 @@ test('Assignment panel updates live across Start → Attempt → Proposal verifi
     },
   );
   await expect(statusVerified).toBeOK();
-  await expect(page.getByText('Verified — awaiting human merge')).toBeVisible();
+  await expect(page.getByText('Verified', { exact: true })).toBeVisible();
   await expect(page.getByText('Change Proposal verified')).toBeVisible();
 
   // No reload happened.

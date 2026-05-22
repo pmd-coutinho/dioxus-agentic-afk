@@ -21,8 +21,11 @@ test('Dashboard loads the seeded Project and API health from the Local Control P
   await projectLink.click();
 
   await expect(page).toHaveURL(/\/projects\/[^/]+$/);
-  await expect(page.getByRole('heading', { name: 'Project detail' })).toBeVisible();
-  await expect(page.getByText('Project ID')).toBeVisible();
+  // Overview Project metadata Card.
+  await expect(
+    page.getByRole('heading', { level: 2, name: 'Project' }).first(),
+  ).toBeVisible();
+  await expect(page.getByText('Project ID', { exact: true })).toBeVisible();
 
   const health = await request.get('/health');
   await expect(health).toBeOK();
@@ -62,10 +65,8 @@ test('Project detail enables a discovered Issue Source candidate', async ({
   await expect(createdProject).toBeOK();
   const project = await createdProject.json();
 
-  await page.goto(`/projects/${project.id}`);
-
-  await expect(page.getByRole('heading', { name: 'Project detail' })).toBeVisible();
-  await expect(page.getByText('Not enabled')).toBeVisible();
+  // Issue Source candidates live on the /source sub-route after issue #35.
+  await page.goto(`/projects/${project.id}/source`);
   await expect(page.getByRole('heading', { name: 'Issue Source candidates' })).toBeVisible();
   await expect(
     page.getByText('github pmd-coutinho/dioxus-agentic-afk', { exact: true }),
@@ -81,12 +82,16 @@ test('Project detail enables a discovered Issue Source candidate', async ({
   await expect(
     page.getByText('local_markdown .scratch/issues', { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText('Not enabled')).toBeHidden();
 
   await page.getByRole('button', { name: 'Refresh Issue Source' }).click();
 
   await expect(page.getByRole('heading', { name: 'Last sync status' })).toBeVisible();
-  await expect(page.getByText('Never synced')).toBeHidden();
+  // After a successful sync the StatusPill flips from Idle/"Never synced"
+  // to Verified/"Synced".
+  await expect(page.getByText('Synced', { exact: true })).toBeVisible();
+
+  // Planning sub-route now owns the Eligible Ready Issues group.
+  await page.goto(`/projects/${project.id}/planning`);
   await expect(page.getByRole('heading', { name: 'Eligible Ready Issues' })).toBeVisible();
   await expect(
     page.getByText('Eligible ready issue', { exact: true }),
@@ -94,7 +99,13 @@ test('Project detail enables a discovered Issue Source candidate', async ({
   await expect(
     page.getByRole('button', { name: 'Start Assignment' }),
   ).toBeHidden();
+
+  // Trust Project lives in the Overview metadata Card after issue #35.
+  await page.goto(`/projects/${project.id}`);
   await page.getByRole('button', { name: 'Trust Project' }).click();
+  await expect(page.getByText('Trusted', { exact: true })).toBeVisible();
+
+  await page.goto(`/projects/${project.id}/planning`);
   await expect(
     page.getByRole('button', { name: 'Start Assignment' }),
   ).toBeVisible();
@@ -110,11 +121,13 @@ test('Project detail enables a discovered Issue Source candidate', async ({
   await expect(page.getByText('Parent planning issue')).toBeVisible();
 
   await rm(resolve(projectPath, '.scratch/issues'), { recursive: true });
+  await page.goto(`/projects/${project.id}/source`);
   await page.getByRole('button', { name: 'Refresh Issue Source' }).click();
 
   await expect(
     page.getByText(/failed to read local markdown Issue Source/).first(),
   ).toBeVisible();
+  await page.goto(`/projects/${project.id}/planning`);
   await expect(
     page.getByText('Eligible ready issue', { exact: true }),
   ).toBeVisible();
@@ -131,8 +144,7 @@ test('Project detail surfaces an Activity panel that reflects recorded entries',
   await expect(created).toBeOK();
   const project = await created.json();
 
-  await page.goto(`/projects/${project.id}`);
-  await expect(page.getByRole('heading', { name: 'Project detail' })).toBeVisible();
+  await page.goto(`/projects/${project.id}/activity`);
   await expect(page.getByRole('heading', { name: 'Activity' })).toBeVisible();
   await expect(page.getByText('No Activity recorded yet.')).toBeVisible();
 

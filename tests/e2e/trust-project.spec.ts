@@ -23,7 +23,9 @@ test('Trust Project mutation runs without a page reload and announces success', 
   });
 
   await page.goto(`/projects/${project.id}`);
-  await expect(page.getByText('Not trusted')).toBeVisible();
+
+  // Untrusted Trust pill rendered by the Overview ProjectMetaCard.
+  await expect(page.getByText('Untrusted', { exact: true })).toBeVisible();
 
   // Drop a marker on the window; a full reload would clear it.
   await page.evaluate(() => {
@@ -35,14 +37,15 @@ test('Trust Project mutation runs without a page reload and announces success', 
   await expect(button).toHaveText('Trust Project');
   await button.click();
 
-  // Mid-flight: button disabled and labeled pending.
+  // Mid-flight: ActionButton swaps to its Pending render-state — disabled
+  // attribute, data-mutation-pending="true".
   await expect(button).toBeDisabled();
   await expect(button).toHaveAttribute('data-mutation-pending', 'true');
 
-  // Settled: project is trusted, button gone, success toast visible.
-  await expect(
-    page.getByText('Trusted for agent execution'),
-  ).toBeVisible();
+  // Settled: Trust pill flips to Verified/Trusted, the inline button is gone
+  // (only rendered while untrusted), success toast visible.
+  await expect(page.getByText('Trusted', { exact: true })).toBeVisible();
+  await expect(button).toHaveCount(0);
   await expect(
     page.locator('[data-toast-kind="success"]', {
       hasText: 'Project trusted',

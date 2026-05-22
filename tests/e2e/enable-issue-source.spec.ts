@@ -57,10 +57,10 @@ test('Enable Issue Source shows pending, transitions row to Enabled in place, no
 
   // Mid-flight: pending state.
   await expect(button).toHaveAttribute('data-mutation-pending', 'true');
-  await expect(button).toHaveAttribute('aria-disabled', 'true');
+  await expect(button).toBeDisabled();
 
-  // Settled: row shows Enabled in place (button gone).
-  await expect(page.locator('[data-candidate-enabled="true"]')).toBeVisible();
+  // Settled: row swaps the ActionButton for a StatusPill labelled "Enabled".
+  await expect(page.getByText('Enabled', { exact: true })).toBeVisible();
   await expect(button).toHaveCount(0);
 
   // No full page reload happened.
@@ -108,7 +108,7 @@ test('Enable Issue Source surfaces inline error on validation failure', async ({
   const button = page.getByTestId(testid);
   await button.click();
 
-  await expect(page.locator('[data-enable-error="true"]')).toContainText(
+  await expect(page.locator('[data-error-marker^="enable-issue-source-"]')).toContainText(
     'Invalid Issue Source',
   );
 
