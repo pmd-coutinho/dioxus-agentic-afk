@@ -1,5 +1,5 @@
 //! Tests for issue #32: server write sites publish typed `ProjectEvent`
-//! deltas through `project_event_publisher`. Each test subscribes to the
+//! deltas through `control_plane_events`. Each test subscribes to the
 //! `EventBus` for the project, drives the relevant handler, then drains and
 //! asserts on the published events.
 

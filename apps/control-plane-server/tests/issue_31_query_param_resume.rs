@@ -6,7 +6,7 @@
 
 use agentic_afk_contracts::{CreateProjectRequest, ProjectEvent};
 use agentic_afk_control_plane_server::{
-    ControlPlaneConfig, activity_publisher, event_bus::EventBus, router_with_bus,
+    ControlPlaneConfig, control_plane_events, event_bus::EventBus, router_with_bus,
 };
 use agentic_afk_persistence as persistence;
 use std::path::PathBuf;
@@ -58,10 +58,10 @@ async fn events_endpoint_honors_last_event_id_query_param_when_header_absent() {
     });
 
     // Publish two activities before subscribing so they enter the ring.
-    activity_publisher::record_project_activity(&db, &bus, &project.id.0, None, "first", None)
+    control_plane_events::record_activity(&db, &bus, &project.id.0, None, "first", None)
         .await
         .unwrap();
-    activity_publisher::record_project_activity(&db, &bus, &project.id.0, None, "second", None)
+    control_plane_events::record_activity(&db, &bus, &project.id.0, None, "second", None)
         .await
         .unwrap();
 
@@ -118,7 +118,7 @@ async fn last_event_id_header_takes_precedence_over_query_param() {
     });
 
     for kind in ["a", "b", "c"] {
-        activity_publisher::record_project_activity(&db, &bus, &project.id.0, None, kind, None)
+        control_plane_events::record_activity(&db, &bus, &project.id.0, None, kind, None)
             .await
             .unwrap();
     }

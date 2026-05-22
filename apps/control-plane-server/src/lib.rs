@@ -39,10 +39,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use utoipa::OpenApi;
 use utoipa::ToSchema;
 
-pub mod activity_publisher;
 pub mod control_plane_events;
 pub mod event_bus;
-pub mod project_event_publisher;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneConfig {
@@ -540,7 +538,7 @@ async fn trust_project(State(state): State<Arc<AppState>>, Path(id): Path<String
     match persistence::trust_project(&state.db, &id).await {
         Ok(project) => {
             let project = with_git_summary(project);
-            crate::project_event_publisher::publish_project_changed(
+            crate::control_plane_events::publish_project_changed(
                 &state.event_bus,
                 &id,
                 project.clone(),
@@ -591,18 +589,18 @@ async fn enable_issue_source(
     match persistence::enable_issue_source(&state.db, &id, &request).await {
         Ok(project) => {
             let project = with_git_summary(project);
-            crate::project_event_publisher::publish_project_changed(
+            crate::control_plane_events::publish_project_changed(
                 &state.event_bus,
                 &id,
                 project.clone(),
             );
             let candidates = discover_issue_source_candidates(&project);
-            crate::project_event_publisher::publish_issue_source_candidates_changed(
+            crate::control_plane_events::publish_issue_source_candidates_changed(
                 &state.event_bus,
                 &id,
                 candidates,
             );
-            crate::project_event_publisher::publish_planning_snapshot_changed(
+            crate::control_plane_events::publish_planning_snapshot_changed(
                 &state.event_bus,
                 &id,
                 persistence::get_planning_snapshot(&state.db, &id).await.ok(),
@@ -682,7 +680,7 @@ async fn sync_issue_source(State(state): State<Arc<AppState>>, Path(id): Path<St
             let planning = persistence::get_planning_snapshot(&state.db, &id)
                 .await
                 .ok();
-            crate::project_event_publisher::publish_planning_snapshot_changed(
+            crate::control_plane_events::publish_planning_snapshot_changed(
                 &state.event_bus,
                 &id,
                 planning,
@@ -892,7 +890,7 @@ struct TestRecordActivityRequest {
 }
 
 /// Mounted only when `AGENTIC_AFK_TEST_ENDPOINTS=1`. Records a Project
-/// Activity entry via the production `activity_publisher`, so Playwright can
+/// Activity entry via the production `control_plane_events`, so Playwright can
 /// drive the live-update flow without needing the full assignment pipeline
 /// (worktrunk + codex binaries) available in CI.
 fn test_endpoints_router() -> Router<Arc<AppState>> {
@@ -954,7 +952,7 @@ async fn test_seed_planning_snapshot(
     {
         Ok(_) => {
             if let Ok(snapshot) = persistence::get_planning_snapshot(&state.db, &id).await {
-                crate::project_event_publisher::publish_planning_snapshot_changed(
+                crate::control_plane_events::publish_planning_snapshot_changed(
                     &state.event_bus,
                     &id,
                     Some(snapshot),
@@ -982,7 +980,7 @@ async fn test_record_activity(
     Path(id): Path<String>,
     Json(request): Json<TestRecordActivityRequest>,
 ) -> Response {
-    match crate::activity_publisher::record_project_activity(
+    match crate::control_plane_events::record_activity(
         &state.db,
         &state.event_bus,
         &id,
@@ -1583,7 +1581,7 @@ async fn set_execution_config(
     }
     match persistence::set_project_execution_config(&state.db, &id, &request).await {
         Ok(config) => {
-            crate::project_event_publisher::publish_project_execution_config_changed(
+            crate::control_plane_events::publish_project_execution_config_changed(
                 &state.event_bus,
                 &id,
                 config.clone(),
@@ -1643,7 +1641,7 @@ async fn re_enable_assignment(
     let _ = &project.enabled_issue_source;
     let _ = &assignment.source_id;
 
-    crate::project_event_publisher::publish_assignment_status_changed(
+    crate::control_plane_events::publish_assignment_status_changed(
         &state.event_bus,
         &id,
         updated.clone(),
@@ -1696,7 +1694,7 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
             match persistence::set_project_execution_config(&state.db, &id, &default_request).await
             {
                 Ok(config) => {
-                    crate::project_event_publisher::publish_project_execution_config_changed(
+                    crate::control_plane_events::publish_project_execution_config_changed(
                         &state.event_bus,
                         &id,
                         config.clone(),
@@ -1749,7 +1747,7 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
         Ok(run) => run,
         Err(error) => return persistence_error_to_response(error),
     };
-    crate::project_event_publisher::publish_plan_run_started(
+    crate::control_plane_events::publish_plan_run_started(
         &state.event_bus,
         &id,
         plan_run.clone(),
@@ -1787,12 +1785,12 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
 
 /// Adapter that lets the orchestrator's `EventPublisher` trait publish to
 /// the control-plane server's per-Project event bus through the existing
-/// `project_event_publisher` helpers.
+/// `control_plane_events` helpers.
 struct EventBusPublisher {
     bus: event_bus::EventBus,
     project_id: String,
     /// Database handle used by `record_activity` to persist Project
-    /// Activity entries through `activity_publisher::record_project_activity`.
+    /// Activity entries through `control_plane_events::record_activity`.
     db: Db,
 }
 
@@ -1812,7 +1810,7 @@ impl agentic_afk_orchestrator::EventPublisher for EventBusPublisher {
         _project_id: &str,
         plan_run: agentic_afk_contracts::PlanRunResponse,
     ) {
-        crate::project_event_publisher::publish_plan_run_started(
+        crate::control_plane_events::publish_plan_run_started(
             &self.bus,
             &self.project_id,
             plan_run,
@@ -1823,7 +1821,7 @@ impl agentic_afk_orchestrator::EventPublisher for EventBusPublisher {
         _project_id: &str,
         plan_run: agentic_afk_contracts::PlanRunResponse,
     ) {
-        crate::project_event_publisher::publish_plan_run_completed(
+        crate::control_plane_events::publish_plan_run_completed(
             &self.bus,
             &self.project_id,
             plan_run,
@@ -1835,7 +1833,7 @@ impl agentic_afk_orchestrator::EventPublisher for EventBusPublisher {
         plan_run_id: &str,
         phase_output: agentic_afk_contracts::PhaseOutputResponse,
     ) {
-        crate::project_event_publisher::publish_plan_run_phase_completed(
+        crate::control_plane_events::publish_plan_run_phase_completed(
             &self.bus,
             &self.project_id,
             plan_run_id,
@@ -1847,7 +1845,7 @@ impl agentic_afk_orchestrator::EventPublisher for EventBusPublisher {
         _project_id: &str,
         assignment: agentic_afk_contracts::IssueAssignmentResponse,
     ) {
-        crate::project_event_publisher::publish_assignment_created(
+        crate::control_plane_events::publish_assignment_created(
             &self.bus,
             &self.project_id,
             assignment,
@@ -1858,7 +1856,7 @@ impl agentic_afk_orchestrator::EventPublisher for EventBusPublisher {
         _project_id: &str,
         assignment: agentic_afk_contracts::IssueAssignmentResponse,
     ) {
-        crate::project_event_publisher::publish_assignment_status_changed(
+        crate::control_plane_events::publish_assignment_status_changed(
             &self.bus,
             &self.project_id,
             assignment,
@@ -1885,7 +1883,7 @@ impl agentic_afk_orchestrator::EventPublisher for EventBusPublisher {
         let kind = kind.to_string();
         let detail = detail.map(str::to_string);
         tokio::spawn(async move {
-            if let Err(error) = crate::activity_publisher::record_project_activity(
+            if let Err(error) = crate::control_plane_events::record_activity(
                 &db,
                 &bus,
                 &project_id,

@@ -8,7 +8,7 @@
 //!   monotonic `id:` SSE event identifiers.
 //! - Reconnect with `Last-Event-ID: <N>` resumes from `> N` when still buffered
 //!   and emits `Resync` when the ring has rolled over.
-//! - `activity_publisher` is the single source of truth: every persisted
+//! - `control_plane_events` is the single source of truth: every persisted
 //!   Activity entry produces a matching `ProjectEvent::Activity` delta with
 //!   the same sequence shape.
 
@@ -17,7 +17,7 @@ use agentic_afk_contracts::{
     ProjectSnapshotResponse,
 };
 use agentic_afk_control_plane_server::{
-    ControlPlaneConfig, activity_publisher, event_bus::EventBus, router, router_with_bus,
+    ControlPlaneConfig, control_plane_events, event_bus::EventBus, router, router_with_bus,
 };
 use agentic_afk_persistence as persistence;
 use axum::body::Body;
@@ -116,7 +116,7 @@ async fn snapshot_sequence_advances_after_activity_publish() {
     // Publish two activities via the public publisher; sequences must
     // advance to 2 on the bus.
     let bus = EventBus::new();
-    activity_publisher::record_project_activity(
+    control_plane_events::record_activity(
         &db,
         &bus,
         &project.id.0,
@@ -126,7 +126,7 @@ async fn snapshot_sequence_advances_after_activity_publish() {
     )
     .await
     .unwrap();
-    activity_publisher::record_project_activity(
+    control_plane_events::record_activity(
         &db,
         &bus,
         &project.id.0,
@@ -187,7 +187,7 @@ async fn events_endpoint_streams_published_events_with_sequence_ids() {
 
     // Publish one activity via the AppState bus by hitting the recorded
     // activity path indirectly. The router owns its own bus, so we publish
-    // through a fresh request that goes through `activity_publisher` via a
+    // through a fresh request that goes through `control_plane_events` via a
     // handler. The cleanest reusable hook is to spawn the publisher
     // ourselves with a shared bus pointer pulled from a direct subscribe in
     // the same router. Since we only get a Router back, instead exercise
@@ -206,7 +206,7 @@ async fn events_endpoint_streams_published_events_with_sequence_ids() {
 }
 
 /// End-to-end: a real bound server fans live deltas published through
-/// `activity_publisher` out over SSE with `id:` headers carrying monotonic
+/// `control_plane_events` out over SSE with `id:` headers carrying monotonic
 /// sequences. Then a fresh reconnect that quotes `Last-Event-ID: 1` resumes
 /// from sequence 2 (still in the ring).
 #[tokio::test]
@@ -296,7 +296,7 @@ async fn sse_endpoint_emits_resync_when_last_event_id_predates_ring() {
     let bus = EventBus::with_ring_capacity(2);
     // Pre-fill the ring beyond capacity so sequence 1 is evicted.
     for kind in ["a", "b", "c", "d"] {
-        activity_publisher::record_project_activity(&db, &bus, &project.id.0, None, kind, None)
+        control_plane_events::record_activity(&db, &bus, &project.id.0, None, kind, None)
             .await
             .unwrap();
     }
@@ -392,10 +392,10 @@ async fn read_sse_until(
     // Publish two activities through the shared bus + DB on first-connect
     // only (last_event_id == None). On reconnect we expect ring replay.
     if last_event_id.is_none() {
-        activity_publisher::record_project_activity(db, bus, project_id, None, "first", None)
+        control_plane_events::record_activity(db, bus, project_id, None, "first", None)
             .await
             .unwrap();
-        activity_publisher::record_project_activity(db, bus, project_id, None, "second", None)
+        control_plane_events::record_activity(db, bus, project_id, None, "second", None)
             .await
             .unwrap();
     }
@@ -456,7 +456,7 @@ async fn resync_emitted_when_last_event_id_predates_ring() {
     assert!(matches!(first.event, ProjectEvent::Resync));
 }
 
-/// `activity_publisher` produces a `ProjectEvent::Activity` delta whose
+/// `control_plane_events` produces a `ProjectEvent::Activity` delta whose
 /// sequence agrees with the bus and whose payload matches the persisted
 /// activity row.
 #[tokio::test]
@@ -480,7 +480,7 @@ async fn activity_publisher_publishes_matching_event_to_fresh_subscriber() {
     let bus = EventBus::new();
     let mut stream = Box::pin(bus.subscribe(&ProjectId(project.id.0.clone()), None));
 
-    let entry = activity_publisher::record_project_activity(
+    let entry = control_plane_events::record_activity(
         &db,
         &bus,
         &project.id.0,
