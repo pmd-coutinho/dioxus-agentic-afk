@@ -26,6 +26,7 @@ dependencies = [
  "http-body-util",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tokio-stream",
  "tower",

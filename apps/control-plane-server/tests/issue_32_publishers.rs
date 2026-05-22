@@ -179,10 +179,7 @@ async fn sync_issue_source_success_publishes_started_completed_planning_sequence
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!(
-                    "/api/projects/{}/issue-source/sync",
-                    project.id.0
-                ))
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -201,9 +198,18 @@ async fn sync_issue_source_success_publishes_started_completed_planning_sequence
         })
         .collect();
 
-    let started_pos = kinds.iter().position(|k| *k == "started").expect("Started present");
-    let completed_pos = kinds.iter().position(|k| *k == "completed").expect("Completed present");
-    let planning_pos = kinds.iter().position(|k| *k == "planning").expect("Planning present");
+    let started_pos = kinds
+        .iter()
+        .position(|k| *k == "started")
+        .expect("Started present");
+    let completed_pos = kinds
+        .iter()
+        .position(|k| *k == "completed")
+        .expect("Completed present");
+    let planning_pos = kinds
+        .iter()
+        .position(|k| *k == "planning")
+        .expect("Planning present");
     assert!(started_pos < completed_pos, "Started before Completed");
     assert!(started_pos < planning_pos, "Started before Planning");
 
@@ -226,10 +232,7 @@ async fn sync_issue_source_failure_publishes_started_then_failed() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!(
-                    "/api/projects/{}/issue-source/sync",
-                    project.id.0
-                ))
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -246,8 +249,14 @@ async fn sync_issue_source_failure_publishes_started_then_failed() {
             _ => "other",
         })
         .collect();
-    let started_pos = kinds.iter().position(|k| *k == "started").expect("Started present");
-    let failed_pos = kinds.iter().position(|k| *k == "failed").expect("Failed present");
+    let started_pos = kinds
+        .iter()
+        .position(|k| *k == "started")
+        .expect("Started present");
+    let failed_pos = kinds
+        .iter()
+        .position(|k| *k == "failed")
+        .expect("Failed present");
     assert!(started_pos < failed_pos);
 
     // Sanity: no Completed and no PlanningSnapshotChanged on the failure path.
@@ -266,6 +275,74 @@ async fn sync_issue_source_failure_publishes_started_then_failed() {
     // Suppress unused-import warning if `IssueSourceSyncResponse` happens not to
     // be referenced in this test (kept for parity with adjacent tests).
     let _ = std::marker::PhantomData::<IssueSourceSyncResponse>;
+}
+
+/// Regression: a persistence failure after `IssueSourceSyncStarted` must still
+/// publish a terminal `IssueSourceSyncFailed` event so the Dashboard sees no
+/// orphan deltas. Before the paired-lifecycle seam was introduced the handler
+/// returned an HTTP error here and left Started dangling on the bus.
+#[tokio::test]
+async fn sync_issue_source_persistence_failure_publishes_failed() {
+    let (app, db, bus) = make_router().await;
+    let project_path = temp_project_path("sync-persist-fail");
+    let issues_dir = project_path.join(".scratch/issues");
+    std::fs::create_dir_all(&issues_dir).unwrap();
+    std::fs::write(
+        issues_dir.join("issue-A.md"),
+        "---\nreadiness: ready\n---\n# Issue A\n",
+    )
+    .unwrap();
+    let project = create_project(&app, &project_path).await;
+    enable_local_markdown(&app, &project.id.0).await;
+    let after = latest_seq(&drain_events_since(&bus, &project.id.0, 0).await);
+
+    // Force `replace_planning_snapshot` to fail AFTER the source fetch
+    // succeeds AND after the handler's initial `get_project` call. Dropping
+    // the table the snapshot writer touches first is the lightest-touch way
+    // to simulate a persistence error mid-handler.
+    sqlx::query("DROP TABLE planning_snapshot_issues")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Either 5xx (Database) or 422 — what matters here is the wire trace.
+    let _ = response.status();
+
+    let events = drain_events_since(&bus, &project.id.0, after).await;
+    let kinds: Vec<&'static str> = events
+        .iter()
+        .map(|e| match &e.event {
+            ProjectEvent::IssueSourceSyncStarted => "started",
+            ProjectEvent::IssueSourceSyncFailed { .. } => "failed",
+            ProjectEvent::IssueSourceSyncCompleted(_) => "completed",
+            _ => "other",
+        })
+        .collect();
+
+    let started_pos = kinds
+        .iter()
+        .position(|k| *k == "started")
+        .expect("Started present");
+    let failed_pos = kinds
+        .iter()
+        .position(|k| *k == "failed")
+        .expect("Failed present after persistence error - regression for orphan-delta bug");
+    assert!(started_pos < failed_pos);
+    assert!(
+        !kinds.contains(&"completed"),
+        "no Completed on failure path"
+    );
 }
 
 // --- Assignment-side publisher tests (cycles 12-14) ------------------------
@@ -332,4 +409,3 @@ async fn trust_project(app: &axum::Router, project_id: &str) -> ProjectResponse 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
 }
-

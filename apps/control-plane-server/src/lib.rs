@@ -40,6 +40,7 @@ use utoipa::OpenApi;
 use utoipa::ToSchema;
 
 pub mod activity_publisher;
+pub mod control_plane_events;
 pub mod event_bus;
 pub mod project_event_publisher;
 
@@ -638,55 +639,68 @@ async fn sync_issue_source(State(state): State<Arc<AppState>>, Path(id): Path<St
         );
     };
 
-    crate::project_event_publisher::publish_issue_source_sync_started(&state.event_bus, &id);
+    let result =
+        crate::control_plane_events::during_issue_source_sync(&state.event_bus, &id, || async {
+            let issues = match match source.kind.as_str() {
+                "local_markdown" => read_local_markdown_issues(&project.path, &source.locator),
+                "github" => read_github_issues(&state.config.gh_binary_path, &source.locator),
+                _ => Err(format!(
+                    "manual sync is not supported for {} Issue Sources yet",
+                    source.kind
+                )),
+            } {
+                Ok(issues) => issues,
+                Err(detail) => {
+                    let _ =
+                        persistence::record_sync_failure(&state.db, &id, &source, &detail).await;
+                    return Err(crate::control_plane_events::SyncErr::Source(detail));
+                }
+            };
 
-    let sync_result = match source.kind.as_str() {
-        "local_markdown" => read_local_markdown_issues(&project.path, &source.locator),
-        "github" => read_github_issues(&state.config.gh_binary_path, &source.locator),
-        _ => Err(format!(
-            "manual sync is not supported for {} Issue Sources yet",
-            source.kind
-        )),
-    };
-
-    match sync_result {
-        Ok(issues) => {
             let synced_at = current_sync_timestamp();
-            match persistence::replace_planning_snapshot(
+            let response = match persistence::replace_planning_snapshot(
                 &state.db, &id, &source, &issues, &synced_at,
             )
             .await
             {
-                Ok(response) => {
-                    crate::project_event_publisher::publish_issue_source_sync_completed(
-                        &state.event_bus,
+                Ok(response) => response,
+                Err(e) => {
+                    // Best-effort mirror the failure into the sync-status row
+                    // so the Dashboard "last failure" surface matches the
+                    // source-fetch failure path.
+                    let _ = persistence::record_sync_failure(
+                        &state.db,
                         &id,
-                        response.clone(),
-                    );
-                    let planning = persistence::get_planning_snapshot(&state.db, &id).await.ok();
-                    crate::project_event_publisher::publish_planning_snapshot_changed(
-                        &state.event_bus,
-                        &id,
-                        planning,
-                    );
-                    Json(response).into_response()
+                        &source,
+                        &format!("failed to persist Planning Snapshot: {e}"),
+                    )
+                    .await;
+                    return Err(crate::control_plane_events::SyncErr::Persistence(e));
                 }
-                Err(e) => persistence_error_to_response(e),
-            }
-        }
-        Err(detail) => {
-            let _ = persistence::record_sync_failure(&state.db, &id, &source, &detail).await;
-            crate::project_event_publisher::publish_issue_source_sync_failed(
+            };
+
+            let planning = persistence::get_planning_snapshot(&state.db, &id)
+                .await
+                .ok();
+            crate::project_event_publisher::publish_planning_snapshot_changed(
                 &state.event_bus,
                 &id,
-                &detail,
+                planning,
             );
-            sync_problem_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "urn:agentic-afk:issue-source-sync-failed",
-                "Unprocessable Entity",
-                detail,
-            )
+            Ok(response)
+        })
+        .await;
+
+    match result {
+        Ok(response) => Json(response).into_response(),
+        Err(crate::control_plane_events::SyncErr::Source(detail)) => sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:issue-source-sync-failed",
+            "Unprocessable Entity",
+            detail,
+        ),
+        Err(crate::control_plane_events::SyncErr::Persistence(e)) => {
+            persistence_error_to_response(e)
         }
     }
 }
