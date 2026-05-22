@@ -14,6 +14,7 @@ agentic-afk-contracts.workspace = true
 agentic-afk-git-summary.workspace = true
 agentic-afk-orchestrator.workspace = true
 agentic-afk-persistence.workspace = true
+agentic-afk-planning-snapshot.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true

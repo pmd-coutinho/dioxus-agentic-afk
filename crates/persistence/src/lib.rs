@@ -5,9 +5,9 @@
 use agentic_afk_contracts::{
     AssignmentAttemptResponse, AssignmentTerminalOutcome, CreateProjectRequest,
     EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource, IssueSourceSyncResponse,
-    IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProjectId, ProjectResponse,
-    SourceIssueSnapshot,
+    IssueSourceSyncStatusResponse, ProjectId, ProjectResponse, SourceIssueSnapshot,
 };
+pub use agentic_afk_planning_snapshot::RawPlanningSnapshot;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
@@ -408,7 +408,7 @@ pub async fn get_issue_source_sync_status(
 pub async fn get_planning_snapshot(
     db: &Db,
     project_id: &str,
-) -> Result<PlanningSnapshotResponse, PersistenceError> {
+) -> Result<RawPlanningSnapshot, PersistenceError> {
     let status = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
         r#"
         SELECT source_kind, source_locator, last_successful_sync_at, last_failure
@@ -466,47 +466,11 @@ pub async fn get_planning_snapshot(
         )
         .collect::<Vec<_>>();
 
-    let ready_ids = issues
-        .iter()
-        .filter(|issue| issue.readiness == "ready")
-        .map(|issue| issue.source_id.clone())
-        .collect::<std::collections::HashSet<_>>();
-    let mut non_ready = Vec::new();
-    let mut blocked = Vec::new();
-    let mut active = Vec::new();
-    let mut completed = Vec::new();
-    let mut eligible = Vec::new();
-
-    for issue in issues {
-        if issue.readiness != "ready" {
-            non_ready.push(issue);
-        } else if issue.lifecycle_status == "completed" {
-            completed.push(issue);
-        } else if matches!(
-            issue.lifecycle_status.as_str(),
-            "claimed" | "running" | "blocked"
-        ) {
-            active.push(issue);
-        } else if issue
-            .issue_dependencies
-            .iter()
-            .any(|dependency| ready_ids.contains(dependency))
-        {
-            blocked.push(issue);
-        } else {
-            eligible.push(issue);
-        }
-    }
-
-    Ok(PlanningSnapshotResponse {
+    Ok(RawPlanningSnapshot {
         source: IssueSource { kind, locator },
         last_successful_sync_at,
         last_failure,
-        non_ready,
-        blocked,
-        active,
-        completed,
-        eligible,
+        issues,
     })
 }
 
@@ -1165,10 +1129,10 @@ mod tests {
             .unwrap();
 
         let snapshot = get_planning_snapshot(&db, &project.id.0).await.unwrap();
-        assert_eq!(snapshot.active.len(), 1);
-        assert_eq!(snapshot.active[0].source_id, "claimed-with-deps");
-        assert!(snapshot.blocked.is_empty());
-        assert!(snapshot.eligible.is_empty());
+        assert_eq!(snapshot.issues.len(), 1);
+        assert_eq!(snapshot.issues[0].source_id, "claimed-with-deps");
+        assert_eq!(snapshot.issues[0].lifecycle_status, "claimed");
+        assert_eq!(snapshot.issues[0].issue_dependencies, vec!["some-dep"]);
     }
 
     #[tokio::test]
@@ -1212,24 +1176,21 @@ mod tests {
             .unwrap();
 
         let snapshot = get_planning_snapshot(&db, &project.id.0).await.unwrap();
-        assert_eq!(snapshot.non_ready.len(), 1);
-        assert_eq!(snapshot.non_ready[0].source_id, "not-ready");
-
-        assert_eq!(snapshot.active.len(), 3);
-        let active_ids: Vec<_> = snapshot
-            .active
+        // Persistence returns raw issues exactly as written; bucketing is the
+        // job of `agentic_afk_planning_snapshot::normalize` and is covered by
+        // that crate's tests.
+        let ids: Vec<_> = snapshot
+            .issues
             .iter()
             .map(|i| i.source_id.clone())
             .collect();
-        assert!(active_ids.contains(&"ready-claimed".to_string()));
-        assert!(active_ids.contains(&"ready-running".to_string()));
-        assert!(active_ids.contains(&"ready-blocked".to_string()));
-
-        assert_eq!(snapshot.completed.len(), 1);
-        assert_eq!(snapshot.completed[0].source_id, "ready-completed");
-
-        assert_eq!(snapshot.eligible.len(), 1);
-        assert_eq!(snapshot.eligible[0].source_id, "ready-ready");
+        assert_eq!(ids.len(), 6);
+        assert!(ids.contains(&"ready-ready".to_string()));
+        assert!(ids.contains(&"ready-claimed".to_string()));
+        assert!(ids.contains(&"ready-running".to_string()));
+        assert!(ids.contains(&"ready-blocked".to_string()));
+        assert!(ids.contains(&"ready-completed".to_string()));
+        assert!(ids.contains(&"not-ready".to_string()));
     }
 
     fn make_issue(source_id: &str, readiness: &str, lifecycle_status: &str) -> SourceIssueSnapshot {

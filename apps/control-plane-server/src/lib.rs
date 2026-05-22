@@ -603,7 +603,10 @@ async fn enable_issue_source(
             crate::control_plane_events::publish_planning_snapshot_changed(
                 &state.event_bus,
                 &id,
-                persistence::get_planning_snapshot(&state.db, &id).await.ok(),
+                persistence::get_planning_snapshot(&state.db, &id)
+                    .await
+                    .ok()
+                    .map(agentic_afk_planning_snapshot::normalize),
             );
             Json(project).into_response()
         }
@@ -679,7 +682,8 @@ async fn sync_issue_source(State(state): State<Arc<AppState>>, Path(id): Path<St
 
             let planning = persistence::get_planning_snapshot(&state.db, &id)
                 .await
-                .ok();
+                .ok()
+                .map(agentic_afk_planning_snapshot::normalize);
             crate::control_plane_events::publish_planning_snapshot_changed(
                 &state.event_bus,
                 &id,
@@ -739,7 +743,7 @@ async fn get_planning_snapshot(
     Path(id): Path<String>,
 ) -> Response {
     match persistence::get_planning_snapshot(&state.db, &id).await {
-        Ok(snapshot) => Json(snapshot).into_response(),
+        Ok(raw) => Json(agentic_afk_planning_snapshot::normalize(raw)).into_response(),
         Err(e) => persistence_error_to_response(e),
     }
 }
@@ -817,7 +821,7 @@ async fn get_project_snapshot(
     // synced). Treat missing snapshot as `None` rather than 404 for the
     // bundle, since other panels still have data to show.
     let planning_snapshot = match persistence::get_planning_snapshot(&state.db, &id).await {
-        Ok(snapshot) => Some(snapshot),
+        Ok(raw) => Some(agentic_afk_planning_snapshot::normalize(raw)),
         Err(PersistenceError::SnapshotNotFound(_)) => None,
         Err(error) => return persistence_error_to_response(error),
     };
@@ -951,11 +955,11 @@ async fn test_seed_planning_snapshot(
     .await
     {
         Ok(_) => {
-            if let Ok(snapshot) = persistence::get_planning_snapshot(&state.db, &id).await {
+            if let Ok(raw) = persistence::get_planning_snapshot(&state.db, &id).await {
                 crate::control_plane_events::publish_planning_snapshot_changed(
                     &state.event_bus,
                     &id,
-                    Some(snapshot),
+                    Some(agentic_afk_planning_snapshot::normalize(raw)),
                 );
             }
             StatusCode::OK.into_response()

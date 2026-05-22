@@ -354,7 +354,7 @@ pub async fn run_plan_run(
     let execution_config = &inputs.exec_config;
     let eligible = persistence::get_planning_snapshot(db, project_id)
         .await
-        .map(|snapshot| snapshot.eligible)
+        .map(|raw| agentic_afk_planning_snapshot::normalize(raw).eligible)
         .unwrap_or_default();
     let prompt = render_planning_prompt(
         &inputs.project_instructions,
@@ -460,7 +460,7 @@ async fn finalize_selection_planning(
     parsed: &crate::ParsedPlanningOutput,
 ) -> Result<PlanRunResponse, CoordinatorError> {
     let snapshot = match persistence::get_planning_snapshot(db, project_id).await {
-        Ok(snapshot) => snapshot,
+        Ok(raw) => agentic_afk_planning_snapshot::normalize(raw),
         Err(error) => {
             return Err(fail_planning_phase(
                 db,

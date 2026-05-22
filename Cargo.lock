@@ -19,6 +19,7 @@ dependencies = [
  "agentic-afk-git-summary",
  "agentic-afk-orchestrator",
  "agentic-afk-persistence",
+ "agentic-afk-planning-snapshot",
  "anyhow",
  "axum",
  "clap",
@@ -62,6 +63,7 @@ version = "0.1.0"
 dependencies = [
  "agentic-afk-contracts",
  "agentic-afk-persistence",
+ "agentic-afk-planning-snapshot",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -72,6 +74,7 @@ name = "agentic-afk-persistence"
 version = "0.1.0"
 dependencies = [
  "agentic-afk-contracts",
+ "agentic-afk-planning-snapshot",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",

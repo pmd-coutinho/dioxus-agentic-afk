@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 agentic-afk-contracts.workspace = true
 agentic-afk-persistence.workspace = true
+agentic-afk-planning-snapshot.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
