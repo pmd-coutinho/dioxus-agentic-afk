@@ -1,4 +1,5 @@
 mod project_store;
+mod sse_client;
 
 use project_store::{ProjectStore, Toast, ToastKind};
 
@@ -6,9 +7,11 @@ use agentic_afk_contracts::{
     AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueSourceCandidate,
     IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse,
     ProjectActivityEntryResponse, ProjectAssignmentStateResponse, ProjectResponse,
-    SourceIssueSnapshot,
+    ProjectEvent, ProjectSnapshotResponse, SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 static TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
@@ -226,6 +229,7 @@ fn ProjectLayout(id: String) -> Element {
         let _ = reload_counter.read();
         fetch_project(project_resource_id.clone())
     });
+    use_project_live_subscription(store, id.clone());
 
     rsx! {
         div { class: "flex flex-col gap-4",
@@ -251,6 +255,44 @@ fn ProjectLayout(id: String) -> Element {
                 },
             }
         }
+    }
+}
+
+/// Hydrate the `ProjectStore` from `/snapshot`, then open an SSE subscription
+/// for the duration of the layout's mount. Re-runs when the Project id in the
+/// route changes. The `SseSubscription` is held by a hook-owned `RefCell`, so
+/// `Drop` closes the `EventSource` automatically on unmount or id swap.
+fn use_project_live_subscription(store: ProjectStore, project_id: String) {
+    let subscription: Signal<Rc<RefCell<Option<sse_client::SseSubscription>>>> =
+        use_hook(|| Signal::new(Rc::new(RefCell::new(None))));
+    let last_project_id: Signal<Option<String>> = use_hook(|| Signal::new(None));
+
+    let needs_rehydrate = store.needs_rehydrate();
+    let project_changed = last_project_id.read().as_deref() != Some(project_id.as_str());
+
+    if project_changed || needs_rehydrate {
+        // Close any existing subscription before re-hydrating.
+        subscription.read().borrow_mut().take();
+        last_project_id
+            .clone()
+            .set(Some(project_id.clone()));
+        store.clear_rehydrate_flag();
+
+        let project_id_for_task = project_id.clone();
+        let subscription_handle = subscription.read().clone();
+        spawn(async move {
+            let snapshot = match fetch_project_snapshot(project_id_for_task.clone()).await {
+                Ok(snapshot) => snapshot,
+                Err(_) => return,
+            };
+            let sequence = snapshot.sequence;
+            store.hydrate(snapshot.snapshot, sequence);
+            let on_event = move |seq: u64, event: ProjectEvent| {
+                store.apply_event(seq, event);
+            };
+            let sub = sse_client::subscribe(&project_id_for_task, sequence, on_event);
+            *subscription_handle.borrow_mut() = Some(sub);
+        });
     }
 }
 
@@ -696,27 +738,10 @@ fn PlanningPanel(id: String) -> Element {
 
 #[component]
 fn ActivitySection(id: String) -> Element {
-    let reload = use_context::<ProjectStore>().reload_counter();
-    let activity_project_id = id.clone();
-    let activity = use_resource(move || {
-        let _ = reload.read();
-        fetch_project_activity(activity_project_id.clone())
-    });
-    rsx! {
-        match &*activity.read_unchecked() {
-            Some(Ok(entries)) => rsx! { ActivityPanel { entries: entries.clone() } },
-            Some(Err(error)) => rsx! {
-                StatusPanel {
-                    title: "Activity unavailable".to_string(),
-                    detail: error.clone(),
-                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                }
-            },
-            None => rsx! {
-                ActivityPanel { entries: Vec::<ProjectActivityEntryResponse>::new() }
-            },
-        }
-    }
+    let _ = id;
+    let state = use_context::<ProjectStore>().state_signal();
+    let entries = state.read().activity.clone();
+    rsx! { ActivityPanel { entries } }
 }
 
 #[component]
@@ -1337,6 +1362,18 @@ async fn fetch_project(project_id: String) -> Result<ProjectResponse, String> {
         .ok_or_else(|| format!("Project {project_id} not found"))
 }
 
+async fn fetch_project_snapshot(
+    project_id: String,
+) -> Result<ProjectSnapshotResponse, String> {
+    gloo_net::http::Request::get(&format!("/api/projects/{project_id}/snapshot"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .json()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 async fn fetch_planning_snapshot(project_id: String) -> Result<PlanningSnapshotResponse, String> {
     gloo_net::http::Request::get(&format!("/api/projects/{project_id}/planning-snapshot"))
         .send()
@@ -1351,18 +1388,6 @@ async fn fetch_assignment_state(
     project_id: String,
 ) -> Result<ProjectAssignmentStateResponse, String> {
     gloo_net::http::Request::get(&format!("/api/projects/{project_id}/assignment-state"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .json()
-        .await
-        .map_err(|error| error.to_string())
-}
-
-async fn fetch_project_activity(
-    project_id: String,
-) -> Result<Vec<ProjectActivityEntryResponse>, String> {
-    gloo_net::http::Request::get(&format!("/api/projects/{project_id}/activity"))
         .send()
         .await
         .map_err(|error| error.to_string())?
