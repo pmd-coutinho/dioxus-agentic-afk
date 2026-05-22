@@ -26,7 +26,6 @@ pub use agentic_afk_orchestrator::{
     UnimplementedMergePhaseRunner, UnimplementedPlanningPhaseRunner,
     UnimplementedReviewPhaseRunner, UnimplementedWorktreeProvisioner,
     WorktrunkAssignmentWorktreeProvisioner, update_markdown_lifecycle_status,
-    write_assignment_lifecycle,
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 use axum::extract::{Path, State};
@@ -1748,7 +1747,11 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     // coordinator owns planning, parallel implementation+review, merge,
     // push, cleanup, and source lifecycle transitions.
     let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> =
-        Arc::new(EventBusPublisher::new(state.event_bus.clone(), id.clone()));
+        Arc::new(EventBusPublisher::new(
+            state.event_bus.clone(),
+            id.clone(),
+            state.db.clone(),
+        ));
     let inputs = agentic_afk_orchestrator::PlanRunInputs::new(
         project.clone(),
         plan_run.clone(),
@@ -1774,11 +1777,18 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
 struct EventBusPublisher {
     bus: event_bus::EventBus,
     project_id: String,
+    /// Database handle used by `record_activity` to persist Project
+    /// Activity entries through `activity_publisher::record_project_activity`.
+    db: Db,
 }
 
 impl EventBusPublisher {
-    fn new(bus: event_bus::EventBus, project_id: String) -> Self {
-        Self { bus, project_id }
+    fn new(bus: event_bus::EventBus, project_id: String, db: Db) -> Self {
+        Self {
+            bus,
+            project_id,
+            db,
+        }
     }
 }
 
@@ -1839,6 +1849,43 @@ impl agentic_afk_orchestrator::EventPublisher for EventBusPublisher {
             &self.project_id,
             assignment,
         );
+    }
+    fn record_activity(
+        &self,
+        _project_id: &str,
+        assignment_id: Option<&str>,
+        kind: &str,
+        detail: Option<&str>,
+    ) {
+        // ADR-0035: post-claim lifecycle write-back failures are
+        // surfaced as Project Activity rather than aborting the Plan
+        // Run. The write itself is best-effort; spawn it so the
+        // synchronous coordinator does not have to await DB I/O at
+        // every lifecycle failure site. If the spawn outlives the
+        // current Tokio runtime (test shutdown, etc) the activity is
+        // lost — that is acceptable for the best-effort surface.
+        let db = self.db.clone();
+        let bus = self.bus.clone();
+        let project_id = self.project_id.clone();
+        let assignment_id = assignment_id.map(str::to_string);
+        let kind = kind.to_string();
+        let detail = detail.map(str::to_string);
+        tokio::spawn(async move {
+            if let Err(error) = crate::activity_publisher::record_project_activity(
+                &db,
+                &bus,
+                &project_id,
+                assignment_id.as_deref(),
+                &kind,
+                detail.as_deref(),
+            )
+            .await
+            {
+                eprintln!(
+                    "warning: failed to record Project Activity entry ({kind}): {error}"
+                );
+            }
+        });
     }
 }
 

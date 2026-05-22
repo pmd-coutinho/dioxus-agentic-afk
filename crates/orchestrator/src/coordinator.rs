@@ -212,6 +212,17 @@ pub trait EventPublisher: Send + Sync {
     );
     fn assignment_created(&self, project_id: &str, assignment: IssueAssignmentResponse);
     fn assignment_status_changed(&self, project_id: &str, assignment: IssueAssignmentResponse);
+    /// Record a Project Activity entry as a best-effort write. Used by the
+    /// Plan Run coordinator to surface post-claim **Lifecycle Status**
+    /// write-back failures (per ADR-0035) so they appear in the Dashboard
+    /// Activity feed instead of disappearing to stderr.
+    fn record_activity(
+        &self,
+        project_id: &str,
+        assignment_id: Option<&str>,
+        kind: &str,
+        detail: Option<&str>,
+    );
 }
 
 /// Coordinator failure surface. Each variant carries the HTTP status, a
@@ -336,7 +347,6 @@ pub async fn run_plan_run(
     let deps = &effects.deps;
     let db = &effects.db;
     let events = &effects.events;
-    let gh_binary_path: &Path = effects.gh_binary_path.as_path();
     let project = &inputs.project;
     let project_id = inputs.project_id();
     let plan_run = &inputs.plan_run;
@@ -405,7 +415,6 @@ pub async fn run_plan_run(
         deps,
         db,
         events,
-        gh_binary_path,
         project,
         project_id,
         plan_run,
@@ -444,7 +453,6 @@ async fn finalize_selection_planning(
     deps: &PlanRunDeps,
     db: &Db,
     events: &Arc<dyn EventPublisher>,
-    gh_binary_path: &Path,
     project: &ProjectResponse,
     project_id: &str,
     plan_run: &PlanRunResponse,
@@ -566,7 +574,10 @@ async fn finalize_selection_planning(
             .await
             .map_err(CoordinatorError::from_persistence)?;
 
-        if let Err(error) = deps.lifecycle.write_claimed(&eligible_issue.source_id) {
+        if let Err(error) = deps
+            .lifecycle
+            .write(&eligible_issue.source_id, crate::LifecycleStatus::Claimed)
+        {
             let _ = persistence::release_issue_assignment(db, &assignment.id).await;
             return Err(fail_planning_phase(
                 db,
@@ -604,7 +615,6 @@ async fn finalize_selection_planning(
         deps,
         db,
         events,
-        gh_binary_path,
         project,
         project_id,
         plan_run,
@@ -631,7 +641,6 @@ async fn finalize_selection_planning(
         deps,
         db,
         events,
-        gh_binary_path,
         project,
         project_id,
         plan_run,
@@ -660,7 +669,6 @@ async fn run_parallel_implement_review(
     deps: &PlanRunDeps,
     db: &Db,
     events: &Arc<dyn EventPublisher>,
-    gh_binary_path: &Path,
     project: &ProjectResponse,
     project_id: &str,
     plan_run: &PlanRunResponse,
@@ -678,7 +686,6 @@ async fn run_parallel_implement_review(
         let deps = deps.clone();
         let db = db.clone();
         let events = events.clone();
-        let gh_binary_path = gh_binary_path.to_path_buf();
         let project = project.clone();
         let project_id = project_id.to_string();
         let plan_run = plan_run.clone();
@@ -690,7 +697,6 @@ async fn run_parallel_implement_review(
                 &deps,
                 &db,
                 &events,
-                &gh_binary_path,
                 &project,
                 &project_id,
                 &plan_run,
@@ -752,7 +758,6 @@ async fn run_assignment_implement_review(
     deps: &PlanRunDeps,
     db: &Db,
     events: &Arc<dyn EventPublisher>,
-    gh_binary_path: &Path,
     project: &ProjectResponse,
     project_id: &str,
     plan_run: &PlanRunResponse,
@@ -935,7 +940,7 @@ async fn run_assignment_implement_review(
                 block_assignment_for_loop(
                     db,
                     events,
-                    gh_binary_path,
+                    deps,
                     project,
                     project_id,
                     assignment,
@@ -954,7 +959,7 @@ async fn run_assignment_implement_review(
 async fn block_assignment_for_loop(
     db: &Db,
     events: &Arc<dyn EventPublisher>,
-    gh_binary_path: &Path,
+    deps: &PlanRunDeps,
     project: &ProjectResponse,
     project_id: &str,
     assignment: &IssueAssignmentResponse,
@@ -970,16 +975,21 @@ async fn block_assignment_for_loop(
         },
     )
     .await?;
-    if let Some(source) = project.enabled_issue_source.as_ref() {
-        if let Err(error) = write_assignment_lifecycle(
-            gh_binary_path,
-            project,
-            source,
-            &assignment.source_id,
-            "blocked",
-        ) {
-            eprintln!(
-                "warning: failed to write blocked Lifecycle Status back to Issue Source: {error}"
+    if project.enabled_issue_source.is_some() {
+        if let Err(error) = deps
+            .lifecycle
+            .write(&assignment.source_id, crate::LifecycleStatus::Blocked)
+        {
+            // Per ADR-0035, post-claim lifecycle write-back is
+            // best-effort. Surface the failure as Project Activity so the
+            // developer notices through the Dashboard rather than stderr.
+            events.record_activity(
+                project_id,
+                Some(&assignment.id),
+                "lifecycle_writeback_failed",
+                Some(&format!(
+                    "blocked Lifecycle Status write-back failed: {error}"
+                )),
             );
         }
     }
@@ -1027,7 +1037,6 @@ async fn finalize_parallel_plan_run(
     deps: &PlanRunDeps,
     db: &Db,
     events: &Arc<dyn EventPublisher>,
-    gh_binary_path: &Path,
     project: &ProjectResponse,
     project_id: &str,
     plan_run: &PlanRunResponse,
@@ -1145,16 +1154,18 @@ async fn finalize_parallel_plan_run(
                     },
                 )
                 .await?;
-                if let Some(source) = project.enabled_issue_source.as_ref() {
-                    if let Err(error) = write_assignment_lifecycle(
-                        gh_binary_path,
-                        project,
-                        source,
-                        &merge_assignment.source_id,
-                        "blocked",
-                    ) {
-                        eprintln!(
-                            "warning: failed to write blocked Lifecycle Status back to Issue Source during Merge Phase: {error}"
+                if project.enabled_issue_source.is_some() {
+                    if let Err(error) = deps
+                        .lifecycle
+                        .write(&merge_assignment.source_id, crate::LifecycleStatus::Blocked)
+                    {
+                        events.record_activity(
+                            project_id,
+                            Some(&merge_assignment.id),
+                            "lifecycle_writeback_failed",
+                            Some(&format!(
+                                "blocked Lifecycle Status write-back during Merge Phase failed: {error}"
+                            )),
                         );
                     }
                 }
@@ -1208,17 +1219,19 @@ async fn finalize_parallel_plan_run(
         // Push succeeded: now complete the Source Issues. Completion only
         // after the verified Integration Branch push so upstream lifecycle
         // state never claims work the developer did not actually receive.
-        if let Some(source) = project.enabled_issue_source.as_ref() {
+        if project.enabled_issue_source.is_some() {
             for assignment in &merged_assignments {
-                if let Err(error) = write_assignment_lifecycle(
-                    gh_binary_path,
-                    project,
-                    source,
-                    &assignment.source_id,
-                    "completed",
-                ) {
-                    eprintln!(
-                        "warning: failed to write completed Lifecycle Status back to Issue Source after push: {error}"
+                if let Err(error) = deps
+                    .lifecycle
+                    .write(&assignment.source_id, crate::LifecycleStatus::Completed)
+                {
+                    events.record_activity(
+                        project_id,
+                        Some(&assignment.id),
+                        "lifecycle_writeback_failed",
+                        Some(&format!(
+                            "completed Lifecycle Status write-back after push failed: {error}"
+                        )),
                     );
                 }
             }
@@ -1308,7 +1321,7 @@ pub(crate) fn load_project_instructions(project_path: &str) -> String {
 /// (`gh issue edit` labels). Errors are surfaced as `String` so the caller
 /// can log them without coupling to a specific error type; the coordinator
 /// treats lifecycle write-back as best-effort and only logs warnings.
-pub fn write_assignment_lifecycle(
+pub(crate) fn write_assignment_lifecycle(
     gh_binary_path: &Path,
     project: &ProjectResponse,
     source: &IssueSource,
@@ -1516,7 +1529,7 @@ mod tests {
         // accepts writes without error.
         resolved
             .lifecycle
-            .write_claimed("42")
+            .write("42", crate::LifecycleStatus::Claimed)
             .expect("fake lifecycle writer accepts writes");
     }
 
@@ -1531,7 +1544,9 @@ mod tests {
         // `write_assignment_lifecycle` helper. Calling it for a
         // non-existent gh binary surfaces a LifecycleWrite error rather
         // than the FakeLifecycleWriter's silent Ok.
-        let result = resolved.lifecycle.write_claimed("42");
+        let result = resolved
+            .lifecycle
+            .write("42", crate::LifecycleStatus::Claimed);
         assert!(
             result.is_err(),
             "production lifecycle writer should surface gh failure, got {result:?}",

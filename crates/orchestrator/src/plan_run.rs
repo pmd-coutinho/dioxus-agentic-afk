@@ -410,10 +410,42 @@ pub trait AssignmentWorktreeProvisioner: Send + Sync {
     ) -> Result<PathBuf, PlanRunPhaseError>;
 }
 
-/// Write the `Claimed` lifecycle for a Source Issue back to the Issue
-/// Source. Production drives `gh`; tests inject a fake.
+/// The five canonical Lifecycle Status values written back to the
+/// **Issue Source** for one **Source Issue**. Mirrors CONTEXT.md →
+/// Lifecycle Status. The `as_str` discriminator is what production
+/// adapters (label suffixes, markdown line text) emit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleStatus {
+    Ready,
+    Claimed,
+    Running,
+    Blocked,
+    Completed,
+}
+
+impl LifecycleStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Claimed => "claimed",
+            Self::Running => "running",
+            Self::Blocked => "blocked",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+/// Write a Lifecycle Status for one Source Issue back to the upstream
+/// Issue Source. Production drives `gh` or a local markdown file; tests
+/// inject a fake. The fatality of a failure depends on the calling site:
+/// the Claimed transition is a correctness invariant per ADR-0035, and
+/// every later transition is best-effort and recorded as Activity.
 pub trait IssueLifecycleWriter: Send + Sync {
-    fn write_claimed(&self, source_id: &str) -> Result<(), PlanRunPhaseError>;
+    fn write(
+        &self,
+        source_id: &str,
+        status: LifecycleStatus,
+    ) -> Result<(), PlanRunPhaseError>;
 }
 
 /// Test provisioner that records its calls and returns a fixed worktree
@@ -452,10 +484,10 @@ impl AssignmentWorktreeProvisioner for FakeWorktreeProvisioner {
     }
 }
 
-/// Test lifecycle writer that records each `Claimed` write and optionally
-/// errors after a configurable point.
+/// Test lifecycle writer that records each write and optionally errors
+/// every call.
 pub struct FakeLifecycleWriter {
-    calls: Mutex<Vec<String>>,
+    calls: Mutex<Vec<(String, LifecycleStatus)>>,
     error: Option<String>,
 }
 
@@ -474,7 +506,9 @@ impl FakeLifecycleWriter {
         }
     }
 
-    pub fn calls(&self) -> Vec<String> {
+    /// Every recorded write, including the lifecycle status. Tests that
+    /// only care about Source Issue identity can map over `.0`.
+    pub fn calls(&self) -> Vec<(String, LifecycleStatus)> {
         self.calls.lock().unwrap().clone()
     }
 }
@@ -486,8 +520,15 @@ impl Default for FakeLifecycleWriter {
 }
 
 impl IssueLifecycleWriter for FakeLifecycleWriter {
-    fn write_claimed(&self, source_id: &str) -> Result<(), PlanRunPhaseError> {
-        self.calls.lock().unwrap().push(source_id.to_string());
+    fn write(
+        &self,
+        source_id: &str,
+        status: LifecycleStatus,
+    ) -> Result<(), PlanRunPhaseError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((source_id.to_string(), status));
         if let Some(error) = &self.error {
             Err(PlanRunPhaseError::LifecycleWrite(error.clone()))
         } else {
@@ -518,7 +559,11 @@ impl AssignmentWorktreeProvisioner for UnimplementedWorktreeProvisioner {
 pub struct UnimplementedLifecycleWriter;
 
 impl IssueLifecycleWriter for UnimplementedLifecycleWriter {
-    fn write_claimed(&self, _source_id: &str) -> Result<(), PlanRunPhaseError> {
+    fn write(
+        &self,
+        _source_id: &str,
+        _status: LifecycleStatus,
+    ) -> Result<(), PlanRunPhaseError> {
         Err(PlanRunPhaseError::LifecycleWrite(
             "real Issue Source lifecycle writer not implemented yet".to_string(),
         ))

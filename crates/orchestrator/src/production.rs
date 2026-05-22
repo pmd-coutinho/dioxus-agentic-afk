@@ -221,13 +221,17 @@ impl GhLifecycleWriter {
 }
 
 impl IssueLifecycleWriter for GhLifecycleWriter {
-    fn write_claimed(&self, source_id: &str) -> Result<(), PlanRunPhaseError> {
+    fn write(
+        &self,
+        source_id: &str,
+        status: crate::plan_run::LifecycleStatus,
+    ) -> Result<(), PlanRunPhaseError> {
         crate::coordinator::write_assignment_lifecycle(
             &self.gh_binary_path,
             &self.project,
             &self.source,
             source_id,
-            "claimed",
+            status.as_str(),
         )
         .map_err(PlanRunPhaseError::LifecycleWrite)
     }
@@ -394,7 +398,7 @@ mod tests {
             locator: "issues".to_string(),
         };
         let writer = GhLifecycleWriter::for_project(PathBuf::from("gh"), project, source);
-        let result = writer.write_claimed("42");
+        let result = writer.write("42", crate::plan_run::LifecycleStatus::Claimed);
 
         let updated = std::fs::read_to_string(&issue_path).unwrap();
         let _ = std::fs::remove_dir_all(&project_path);

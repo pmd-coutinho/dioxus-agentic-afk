@@ -17,7 +17,7 @@ pub mod review_loop;
 
 pub use coordinator::{
     CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs, run_plan_run,
-    update_markdown_lifecycle_status, write_assignment_lifecycle,
+    update_markdown_lifecycle_status,
 };
 pub use planning_phase::{PlannedClaim, PlanningRejection, render_planning_prompt};
 
@@ -35,7 +35,7 @@ pub use plan_run::{
     FakeImplementationPhaseRunner, FakeIntegrationBranchPusher, FakeLifecycleWriter,
     FakeMergePhaseRunner, FakePlanningPhaseRunner, FakeReviewPhaseRunner,
     FakeWorktreeProvisioner, ImplementationPhaseRunner, IntegrationBranchPusher,
-    IntegrationBranchRefresher, IssueLifecycleWriter, MergePhaseRunner,
+    IntegrationBranchRefresher, IssueLifecycleWriter, LifecycleStatus, MergePhaseRunner,
     ParsedImplementationOutput, ParsedMergeOutput, ParsedPlanningOutput, ParsedReviewOutput,
     PerSourceImplementationPhaseRunner, PerSourceMergePhaseRunner, PerSourceReviewPhaseRunner,
     PlanRunPhaseError, PlannerSelection, PlanningPhaseRunner, RefreshedBaseline,

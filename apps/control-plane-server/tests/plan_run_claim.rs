@@ -252,7 +252,15 @@ async fn planning_phase_claims_one_eligible_issue() {
     assert_eq!(branch, "agent/issue-42");
 
     // Lifecycle writer saw the Claimed write before any implementation pass.
-    assert_eq!(fixture.lifecycle.calls(), vec!["42".to_string()]);
+    let calls = fixture.lifecycle.calls();
+    assert_eq!(
+        calls.first().cloned(),
+        Some((
+            "42".to_string(),
+            agentic_afk_orchestrator::LifecycleStatus::Claimed
+        )),
+        "Claimed write is the first Lifecycle write for the assignment, got {calls:?}",
+    );
 }
 
 #[tokio::test]
