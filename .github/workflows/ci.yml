@@ -13,4 +13,10 @@ jobs:
       - uses: jdx/mise-action@v2
       - run: npm ci
       - run: npx playwright install --with-deps chromium
+      # Warm the Rust toolchain + build artifacts sequentially before
+      # the parallel `ci` task fan-out. Otherwise multiple mise tasks
+      # invoke rustup concurrently and race on
+      # ~/.rustup/downloads/*.partial -> "could not rename downloaded
+      # file ... No such file or directory" (os error 2).
+      - run: mise run build
       - run: mise run ci
