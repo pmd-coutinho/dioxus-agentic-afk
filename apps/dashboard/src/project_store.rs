@@ -13,6 +13,8 @@ pub enum MutationKey {
     AbandonAssignment(ProjectId, IssueAssignmentId),
     RecoverAssignment(ProjectId, IssueAssignmentId),
     RefreshProposalState(ProjectId, IssueAssignmentId),
+    SyncIssueSource(ProjectId),
+    EnableIssueSource(ProjectId, String, String),
 }
 
 /// Identifier for a Source Issue (the upstream issue tracker's issue id).
@@ -372,6 +374,40 @@ mod tests {
         assert!(table.is_pending(&abandon));
         assert!(!table.is_pending(&recover));
         assert!(!table.is_pending(&refresh));
+    }
+
+    #[test]
+    fn sync_issue_source_key_tracked_independently_from_trust() {
+        let mut table = MutationsTable::new();
+        let project = ProjectId("p1".to_string());
+        let trust = MutationKey::TrustProject(project.clone());
+        let sync = MutationKey::SyncIssueSource(project);
+
+        table.set_pending(sync.clone());
+
+        assert!(table.is_pending(&sync));
+        assert!(!table.is_pending(&trust));
+    }
+
+    #[test]
+    fn enable_issue_source_keys_distinguish_by_kind_and_locator() {
+        let mut table = MutationsTable::new();
+        let project = ProjectId("p1".to_string());
+        let github = MutationKey::EnableIssueSource(
+            project.clone(),
+            "github".into(),
+            "acme/repo".into(),
+        );
+        let local = MutationKey::EnableIssueSource(
+            project,
+            "local_markdown".into(),
+            ".scratch/issues".into(),
+        );
+
+        table.set_pending(github.clone());
+
+        assert!(table.is_pending(&github));
+        assert!(!table.is_pending(&local));
     }
 
     #[test]
