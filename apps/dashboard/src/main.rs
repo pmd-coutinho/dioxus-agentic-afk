@@ -254,34 +254,48 @@ fn ProjectLayout(id: String) -> Element {
     });
     use_project_live_subscription(store, id.clone());
 
+    // Hold the last successful `ProjectResponse` so refetches (triggered by
+    // every mutation via `bump_reload`) don't unmount the Outlet and lose the
+    // browser's scroll anchor. We still surface the latest error — if the
+    // refetch fails, ErrorState wins over stale data.
+    let mut last_ok: Signal<Option<ProjectResponse>> = use_signal(|| None);
+    let resource_read = project.read_unchecked();
+    let (current_ok, current_err) = match &*resource_read {
+        Some(Ok(p)) => (Some(p.clone()), None),
+        Some(Err(e)) => (None, Some(e.clone())),
+        None => (None, None),
+    };
+    drop(resource_read);
+    if let Some(p) = &current_ok {
+        if last_ok.read().as_ref() != Some(p) {
+            last_ok.set(Some(p.clone()));
+        }
+    }
+
     rsx! {
         div { class: "flex flex-col gap-6",
-            match &*project.read_unchecked() {
-                Some(Ok(project)) => rsx! {
-                    ProjectCrumb { project: project.clone() }
-                    ProjectSubNav { id: id.clone() }
-                    Outlet::<Route> {}
-                },
-                Some(Err(error)) => rsx! {
-                    ErrorState {
-                        title: "Project unavailable".to_string(),
-                        detail: error.clone(),
-                        problem_json: None,
+            if let Some(error) = current_err {
+                ErrorState {
+                    title: "Project unavailable".to_string(),
+                    detail: error,
+                    problem_json: None,
+                }
+            } else if let Some(project) = last_ok.read().clone() {
+                ProjectCrumb { project }
+                ProjectSubNav { id: id.clone() }
+                Outlet::<Route> {}
+            } else {
+                Card {
+                    CardHead {
+                        title: "Loading Project".to_string(),
+                        id_text: Some(short_project_id(&id)),
                     }
-                },
-                None => rsx! {
-                    Card {
-                        CardHead {
-                            title: "Loading Project".to_string(),
-                            id_text: Some(short_project_id(&id)),
-                        }
-                        CardBody {
-                            SkeletonHeading {}
-                            SkeletonLine { width_percent: 60 }
-                            SkeletonLine { width_percent: 40 }
-                        }
+                    CardBody {
+                        SkeletonHeading {}
+                        SkeletonLine { width_percent: 60 }
+                        SkeletonLine { width_percent: 40 }
                     }
-                },
+                }
             }
         }
     }

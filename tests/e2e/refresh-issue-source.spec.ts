@@ -136,20 +136,30 @@ test('Refresh Issue Source preserves scroll position and focus through mutation'
   const button = page.getByTestId('refresh-issue-source-button');
   await expect(button).toBeVisible();
 
-  // Force the page taller so scroll is possible.
+  // Force the page taller so scroll is possible. Focus the button FIRST —
+  // Playwright auto-scrolls on focus/click, so the baseline scroll must be
+  // set AFTER Playwright is done positioning the button, otherwise the
+  // assertion measures Playwright's auto-scroll rather than any
+  // mutation-driven scroll shift.
   await page.evaluate(() => {
     const filler = document.createElement('div');
     filler.style.height = '2000px';
     filler.id = '__scroll_filler__';
     document.body.appendChild(filler);
-    window.scrollTo(0, 600);
   });
+  await page.evaluate(() => window.scrollTo(0, 600));
 
   const scrollBefore = await page.evaluate(() => window.scrollY);
   expect(scrollBefore).toBeGreaterThan(0);
 
-  await button.focus();
-  await button.click();
+  // Focus + click via the DOM directly. Playwright's `button.focus()` /
+  // `button.click()` (even with `force: true`) scroll the target into view
+  // first, which would defeat the very behavior under test.
+  await page.evaluate(() => {
+    const el = document.querySelector('[data-testid="refresh-issue-source-button"]') as HTMLElement | null;
+    el?.focus({ preventScroll: true });
+    el?.click();
+  });
 
   await expect(
     page.locator('[data-toast-kind="success"]', {

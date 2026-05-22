@@ -61,49 +61,48 @@ pub fn ActionButton(
 ) -> Element {
     let store = use_context::<ProjectStore>();
     let render_state = derive_button_render_state(store.state(&mutation_key));
-    let pending_attr = matches!(render_state, ButtonRenderState::Pending);
+    let is_pending = matches!(render_state, ButtonRenderState::Pending);
+    let error = match &render_state {
+        ButtonRenderState::IdleWithError { title, detail } => {
+            Some((title.clone(), detail.clone()))
+        }
+        _ => None,
+    };
+    let is_disabled = is_pending || disabled;
+    let class = if is_pending {
+        PENDING_BTN.to_string()
+    } else if disabled {
+        DISABLED_BTN.to_string()
+    } else {
+        format!("{BASE_BTN} {}", variant_classes(variant))
+    };
 
-    match render_state {
-        ButtonRenderState::Pending => rsx! {
+    // Always render the same single `button` (wrapped in a flex column so the
+    // error block can sit alongside without changing the button's identity).
+    // Diffing across Idle / Pending / IdleWithError keeps the underlying DOM
+    // node stable, which preserves browser focus through a mutation cycle.
+    rsx! {
+        div { class: "flex flex-col items-start gap-3",
+            // `aria-disabled` instead of the HTML `disabled` attribute so the
+            // browser doesn't blur a focused button when it transitions to
+            // Pending. Mouse interaction is already blocked by the `pointer-
+            // events-none` class on PENDING_BTN / DISABLED_BTN; the onclick
+            // handler also no-ops when `is_disabled` so keyboard activation
+            // is gated even though the button remains focusable.
             button {
-                class: PENDING_BTN,
+                class,
                 r#type: "button",
-                disabled: true,
+                "aria-disabled": if is_disabled { "true" } else { "false" },
                 "data-testid": testid.clone(),
-                "data-mutation-pending": "true",
+                "data-mutation-pending": if is_pending { "true" } else { "false" },
+                onclick: move |_| {
+                    if !is_disabled {
+                        on_press.call(());
+                    }
+                },
                 {children}
             }
-        },
-        ButtonRenderState::Idle if disabled => rsx! {
-            button {
-                class: DISABLED_BTN,
-                r#type: "button",
-                disabled: true,
-                "data-testid": testid.clone(),
-                "data-mutation-pending": "false",
-                {children}
-            }
-        },
-        ButtonRenderState::Idle => rsx! {
-            button {
-                class: format!("{BASE_BTN} {}", variant_classes(variant)),
-                r#type: "button",
-                "data-testid": testid.clone(),
-                "data-mutation-pending": if pending_attr { "true" } else { "false" },
-                onclick: move |_| on_press.call(()),
-                {children}
-            }
-        },
-        ButtonRenderState::IdleWithError { title, detail } => rsx! {
-            div { class: "flex flex-col items-start gap-3",
-                button {
-                    class: format!("{BASE_BTN} {}", variant_classes(variant)),
-                    r#type: "button",
-                    "data-testid": testid.clone(),
-                    "data-mutation-pending": "false",
-                    onclick: move |_| on_press.call(()),
-                    {children}
-                }
+            if let Some((title, detail)) = error {
                 div {
                     class: "max-w-[360px] border border-coral/35 border-l-[3px] bg-coral/5 px-3 py-2 font-mono text-[11px] text-coral",
                     "data-error-marker": error_marker.clone(),
@@ -111,7 +110,7 @@ pub fn ActionButton(
                     span { class: "mt-[2px] block text-ink-2", "{detail}" }
                 }
             }
-        },
+        }
     }
 }
 

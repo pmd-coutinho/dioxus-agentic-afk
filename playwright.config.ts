@@ -8,9 +8,9 @@ export default defineConfig({
   },
   webServer: {
     command:
-      'cargo run -p agentic-afk-control-plane-server --bin agentic-afk -- serve --seed-dev',
+      'rm -f target/agentic-afk-playwright.db target/agentic-afk-playwright.db-shm target/agentic-afk-playwright.db-wal target/agentic-afk-playwright.db-journal && cargo run -p agentic-afk-control-plane-server --bin agentic-afk -- serve --seed-dev',
     url: 'http://127.0.0.1:3637/health',
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 120_000,
     env: {
       AGENTIC_AFK_BIND_ADDRESS: '127.0.0.1:3637',
