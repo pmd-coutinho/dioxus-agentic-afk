@@ -16,9 +16,11 @@ use agentic_afk_orchestrator::{
     codex_process_identity, create_assignment_worktree, preflight_binary, run_initial_codex,
 };
 pub use agentic_afk_orchestrator::{
-    FakePlanningPhaseRunner, IntegrationBranchRefresher, PlanRunPhaseError, PlanningPhaseRunner,
-    RefreshedBaseline, StaticIntegrationBranchRefresher, UnimplementedIntegrationBranchRefresher,
-    UnimplementedPlanningPhaseRunner,
+    AssignmentWorktreeProvisioner, FakeLifecycleWriter, FakePlanningPhaseRunner,
+    FakeWorktreeProvisioner, IntegrationBranchRefresher, IssueLifecycleWriter, PlanRunPhaseError,
+    PlannerSelection, PlanningPhaseRunner, RefreshedBaseline, StaticIntegrationBranchRefresher,
+    UnimplementedIntegrationBranchRefresher, UnimplementedLifecycleWriter,
+    UnimplementedPlanningPhaseRunner, UnimplementedWorktreeProvisioner,
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 use axum::extract::{Path, State};
@@ -102,6 +104,8 @@ pub(crate) struct AppState {
 pub struct PlanRunDeps {
     pub refresher: Arc<dyn IntegrationBranchRefresher>,
     pub planner: Arc<dyn PlanningPhaseRunner>,
+    pub worktree: Arc<dyn AssignmentWorktreeProvisioner>,
+    pub lifecycle: Arc<dyn IssueLifecycleWriter>,
 }
 
 impl PlanRunDeps {
@@ -109,6 +113,8 @@ impl PlanRunDeps {
         Self {
             refresher: Arc::new(UnimplementedIntegrationBranchRefresher),
             planner: Arc::new(UnimplementedPlanningPhaseRunner),
+            worktree: Arc::new(UnimplementedWorktreeProvisioner),
+            lifecycle: Arc::new(UnimplementedLifecycleWriter),
         }
     }
 }
@@ -168,16 +174,37 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
 }
 
 fn plan_run_deps_from_env() -> PlanRunDeps {
-    if std::env::var("AGENTIC_AFK_TEST_PLAN_RUN_STUBS").as_deref() == Ok("1") {
-        let refresher = Arc::new(StaticIntegrationBranchRefresher::new(RefreshedBaseline {
-            commit_sha: "test-baseline".to_string(),
-        }));
-        let planner = Arc::new(FakePlanningPhaseRunner::with_stdout(
-            r#"<plan>{"issues":[],"summary":"test stub: no eligible work"}</plan>"#,
-        ));
-        PlanRunDeps { refresher, planner }
-    } else {
-        PlanRunDeps::unimplemented()
+    let mode = std::env::var("AGENTIC_AFK_TEST_PLAN_RUN_STUBS").ok();
+    let Some(mode) = mode else {
+        return PlanRunDeps::unimplemented();
+    };
+    let stdout = match mode.as_str() {
+        "1" => r#"<plan>{"issues":[],"summary":"test stub: no eligible work"}</plan>"#.to_string(),
+        // `select=<source_id>` mode: planner selects the given Source Issue
+        // with a derived branch name and selection summary. The driving
+        // test must seed the planning snapshot so the selection is eligible.
+        other if other.starts_with("select=") => {
+            let source_id = &other["select=".len()..];
+            format!(
+                r#"<plan>{{"issues":[{{"source_issue_id":"{sid}","title":"stub {sid}","branch":"agent/issue-{sid}","selection_summary":"stub selection"}}],"summary":"test stub: select one"}}</plan>"#,
+                sid = source_id,
+            )
+        }
+        _ => r#"<plan>{"issues":[],"summary":"test stub: no eligible work"}</plan>"#.to_string(),
+    };
+    let refresher = Arc::new(StaticIntegrationBranchRefresher::new(RefreshedBaseline {
+        commit_sha: "test-baseline".to_string(),
+    }));
+    let planner = Arc::new(FakePlanningPhaseRunner::with_stdout(stdout));
+    let worktree = Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir().join(
+        "agentic-afk-test-worktrees",
+    )));
+    let lifecycle = Arc::new(FakeLifecycleWriter::new());
+    PlanRunDeps {
+        refresher,
+        planner,
+        worktree,
+        lifecycle,
     }
 }
 
@@ -200,7 +227,14 @@ pub fn router_with_plan_run_deps(
         config,
         db,
         event_bus::EventBus::new(),
-        PlanRunDeps { refresher, planner },
+        PlanRunDeps {
+            refresher,
+            planner,
+            worktree: Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir().join(
+                "agentic-afk-test-worktrees",
+            ))),
+            lifecycle: Arc::new(FakeLifecycleWriter::new()),
+        },
     )
 }
 
@@ -214,7 +248,44 @@ pub fn router_with_plan_run_deps_and_bus(
     refresher: Arc<dyn IntegrationBranchRefresher>,
     planner: Arc<dyn PlanningPhaseRunner>,
 ) -> Router {
-    router_with_full_deps(config, db, event_bus, PlanRunDeps { refresher, planner })
+    router_with_full_deps(
+        config,
+        db,
+        event_bus,
+        PlanRunDeps {
+            refresher,
+            planner,
+            worktree: Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir().join(
+                "agentic-afk-test-worktrees",
+            ))),
+            lifecycle: Arc::new(FakeLifecycleWriter::new()),
+        },
+    )
+}
+
+/// Build a router with the full Plan Run dependency surface, including the
+/// Assignment Worktree provisioner and Issue Source lifecycle writer used
+/// by the claim path. Tests that exercise the claim flow drive this entry
+/// point so they can inject fakes for every seam.
+pub fn router_with_plan_run_full_deps(
+    config: ControlPlaneConfig,
+    db: Db,
+    refresher: Arc<dyn IntegrationBranchRefresher>,
+    planner: Arc<dyn PlanningPhaseRunner>,
+    worktree: Arc<dyn AssignmentWorktreeProvisioner>,
+    lifecycle: Arc<dyn IssueLifecycleWriter>,
+) -> Router {
+    router_with_full_deps(
+        config,
+        db,
+        event_bus::EventBus::new(),
+        PlanRunDeps {
+            refresher,
+            planner,
+            worktree,
+            lifecycle,
+        },
+    )
 }
 
 fn router_with_full_deps(
@@ -759,6 +830,62 @@ fn test_endpoints_router() -> Router<Arc<AppState>> {
             "/api/_test/projects/{id}/project-event",
             post(test_publish_project_event),
         )
+        .route(
+            "/api/_test/projects/{id}/planning-snapshot",
+            post(test_seed_planning_snapshot),
+        )
+}
+
+/// Test-only request body: a list of fully-formed Source Issue rows the
+/// caller wants reflected in the persisted planning snapshot. Lets the
+/// Playwright e2e seed the snapshot without depending on a real Issue
+/// Source sync.
+#[derive(Debug, Deserialize)]
+struct TestSeedPlanningSnapshotRequest {
+    source: IssueSource,
+    issues: Vec<SourceIssueSnapshot>,
+}
+
+async fn test_seed_planning_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<TestSeedPlanningSnapshotRequest>,
+) -> Response {
+    // Make sure the project knows about this Issue Source so the claim path
+    // can use it for lifecycle write-back.
+    if let Err(error) = persistence::enable_issue_source(
+        &state.db,
+        &id,
+        &EnableIssueSourceRequest {
+            kind: request.source.kind.clone(),
+            locator: request.source.locator.clone(),
+        },
+    )
+    .await
+    {
+        return persistence_error_to_response(error);
+    }
+    match persistence::replace_planning_snapshot(
+        &state.db,
+        &id,
+        &request.source,
+        &request.issues,
+        "unix:1",
+    )
+    .await
+    {
+        Ok(_) => {
+            if let Ok(snapshot) = persistence::get_planning_snapshot(&state.db, &id).await {
+                crate::project_event_publisher::publish_planning_snapshot_changed(
+                    &state.event_bus,
+                    &id,
+                    Some(snapshot),
+                );
+            }
+            StatusCode::OK.into_response()
+        }
+        Err(error) => persistence_error_to_response(error),
+    }
 }
 
 /// Test-only: publish an arbitrary `ProjectEvent` for `id` so Playwright can
@@ -1847,7 +1974,11 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
         plan_run.clone(),
     );
 
-    let prompt = render_planning_prompt(&project, &execution_config, &baseline);
+    let eligible = persistence::get_planning_snapshot(&state.db, &id)
+        .await
+        .map(|snapshot| snapshot.eligible)
+        .unwrap_or_default();
+    let prompt = render_planning_prompt(&project, &execution_config, &baseline, &eligible);
     let planner_stdout = match state.plan_run_deps.planner.run(&prompt) {
         Ok(stdout) => stdout,
         Err(error) => {
@@ -1904,17 +2035,25 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
         }
     };
 
-    let outcome = if parsed.is_empty {
-        "succeeded_empty"
-    } else {
-        "succeeded"
-    };
+    if parsed.is_empty {
+        return finalize_empty_planning(&state, &id, &plan_run.id, &parsed.body).await;
+    }
+
+    finalize_selection_planning(&state, &project, &id, &plan_run, &baseline, &parsed.body).await
+}
+
+async fn finalize_empty_planning(
+    state: &AppState,
+    project_id: &str,
+    plan_run_id: &str,
+    body: &serde_json::Value,
+) -> Response {
     let phase_output = match persistence::record_plan_run_phase_output(
         &state.db,
-        &plan_run.id,
+        plan_run_id,
         "planning",
-        outcome,
-        &parsed.body,
+        "succeeded_empty",
+        body,
     )
     .await
     {
@@ -1923,35 +2062,250 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     };
     crate::project_event_publisher::publish_plan_run_phase_completed(
         &state.event_bus,
-        &id,
+        project_id,
+        plan_run_id,
+        phase_output,
+    );
+    let finished =
+        match persistence::finish_plan_run(&state.db, plan_run_id, "succeeded_empty").await {
+            Ok(run) => run,
+            Err(error) => return persistence_error_to_response(error),
+        };
+    crate::project_event_publisher::publish_plan_run_completed(
+        &state.event_bus,
+        project_id,
+        finished.clone(),
+    );
+    (StatusCode::CREATED, Json(finished)).into_response()
+}
+
+async fn finalize_selection_planning(
+    state: &AppState,
+    project: &ProjectResponse,
+    project_id: &str,
+    plan_run: &PlanRunResponse,
+    baseline: &RefreshedBaseline,
+    body: &serde_json::Value,
+) -> Response {
+    let parsed = agentic_afk_orchestrator::ParsedPlanningOutput {
+        is_empty: false,
+        body: body.clone(),
+    };
+    let selections = match agentic_afk_orchestrator::extract_planner_selections(&parsed) {
+        Ok(selections) => selections,
+        Err(error) => {
+            return fail_planning_phase(
+                state,
+                project_id,
+                &plan_run.id,
+                &error,
+                "urn:agentic-afk:planning-output-unparseable",
+            )
+            .await;
+        }
+    };
+
+    let snapshot = match persistence::get_planning_snapshot(&state.db, project_id).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return fail_planning_phase(
+                state,
+                project_id,
+                &plan_run.id,
+                &error.to_string(),
+                "urn:agentic-afk:planning-snapshot-missing",
+            )
+            .await;
+        }
+    };
+
+    let eligible_by_id: std::collections::HashMap<&str, &SourceIssueSnapshot> = snapshot
+        .eligible
+        .iter()
+        .map(|issue| (issue.source_id.as_str(), issue))
+        .collect();
+
+    // This slice claims one assignment per Plan Run; the planner may have
+    // returned more, but ADR-0034 caps per-slice concurrency at one until
+    // the implementation phase (#43) lands. Selections beyond the first
+    // are rejected up front so the planner is forced to converge.
+    if selections.len() > 1 {
+        return fail_planning_phase(
+            state,
+            project_id,
+            &plan_run.id,
+            &format!(
+                "Planning Phase returned {} issues; only one selection is supported in this slice",
+                selections.len()
+            ),
+            "urn:agentic-afk:planning-multi-selection",
+        )
+        .await;
+    }
+
+    let selection = &selections[0];
+    let Some(issue) = eligible_by_id.get(selection.source_issue_id.as_str()).copied() else {
+        return fail_planning_phase(
+            state,
+            project_id,
+            &plan_run.id,
+            &format!(
+                "Planning Phase selected Source Issue {} which is not in the eligible set",
+                selection.source_issue_id
+            ),
+            "urn:agentic-afk:planning-selection-ineligible",
+        )
+        .await;
+    };
+
+    let Some(source) = project.enabled_issue_source.clone() else {
+        return fail_planning_phase(
+            state,
+            project_id,
+            &plan_run.id,
+            "Project has no enabled Issue Source for claim write-back",
+            "urn:agentic-afk:issue-source-missing",
+        )
+        .await;
+    };
+
+    // Persist the provisional assignment first so a failure to provision
+    // the Assignment Worktree or write the Claimed lifecycle leaves a
+    // recoverable row for diagnosis.
+    let assignment = match persistence::create_plan_run_assignment(
+        &state.db,
+        &plan_run.id,
+        project_id,
+        &source,
+        issue,
+        &selection.branch,
+        &selection.selection_summary,
+    )
+    .await
+    {
+        Ok(assignment) => assignment,
+        Err(error) => return persistence_error_to_response(error),
+    };
+
+    let project_path = std::path::Path::new(&project.path);
+    let worktree_path = match state.plan_run_deps.worktree.provision(
+        project_path,
+        &baseline.commit_sha,
+        &selection.branch,
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = persistence::release_issue_assignment(&state.db, &assignment.id).await;
+            return fail_planning_phase(
+                state,
+                project_id,
+                &plan_run.id,
+                &error.to_string(),
+                "urn:agentic-afk:assignment-worktree-failed",
+            )
+            .await;
+        }
+    };
+
+    let worktree_path_str = worktree_path.to_string_lossy().into_owned();
+    let assignment = match persistence::set_assignment_worktree(
+        &state.db,
+        &assignment.id,
+        &worktree_path_str,
+    )
+    .await
+    {
+        Ok(assignment) => assignment,
+        Err(error) => return persistence_error_to_response(error),
+    };
+
+    if let Err(error) = state
+        .plan_run_deps
+        .lifecycle
+        .write_claimed(&issue.source_id)
+    {
+        let _ = persistence::release_issue_assignment(&state.db, &assignment.id).await;
+        return fail_planning_phase(
+            state,
+            project_id,
+            &plan_run.id,
+            &error.to_string(),
+            "urn:agentic-afk:issue-source-lifecycle-failed",
+        )
+        .await;
+    }
+
+    crate::project_event_publisher::publish_assignment_created(
+        &state.event_bus,
+        project_id,
+        assignment.clone(),
+    );
+
+    let phase_output = match persistence::record_plan_run_phase_output(
+        &state.db,
+        &plan_run.id,
+        "planning",
+        "succeeded",
+        body,
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    crate::project_event_publisher::publish_plan_run_phase_completed(
+        &state.event_bus,
+        project_id,
         &plan_run.id,
         phase_output,
     );
 
-    let finished_state = if parsed.is_empty {
-        "succeeded_empty"
-    } else {
-        // Non-empty selection not exercised in this slice (#41); still finalize
-        // so the Plan Run is not left running.
-        "succeeded"
-    };
-    let finished = match persistence::finish_plan_run(&state.db, &plan_run.id, finished_state).await
-    {
+    // Leave the Plan Run in `running` state: planning succeeded and the
+    // assignment is claimed, but later phases (#43+) own the terminal
+    // transition. The active_plan_run snapshot will surface the claimed
+    // assignment.
+    let refreshed = match persistence::get_plan_run(&state.db, &plan_run.id).await {
         Ok(run) => run,
         Err(error) => return persistence_error_to_response(error),
     };
-    crate::project_event_publisher::publish_plan_run_completed(
-        &state.event_bus,
-        &id,
-        finished.clone(),
-    );
-    (StatusCode::CREATED, Json(finished)).into_response()
+    (StatusCode::CREATED, Json(refreshed)).into_response()
+}
+
+async fn fail_planning_phase(
+    state: &AppState,
+    project_id: &str,
+    plan_run_id: &str,
+    error: &str,
+    problem_type: &str,
+) -> Response {
+    let _ = persistence::record_plan_run_phase_output(
+        &state.db,
+        plan_run_id,
+        "planning",
+        "failed",
+        &serde_json::json!({ "error": error }),
+    )
+    .await;
+    if let Ok(run) = persistence::finish_plan_run(&state.db, plan_run_id, "failed").await {
+        crate::project_event_publisher::publish_plan_run_completed(
+            &state.event_bus,
+            project_id,
+            run,
+        );
+    }
+    sync_problem_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        problem_type,
+        "Internal Server Error",
+        error.to_string(),
+    )
 }
 
 fn render_planning_prompt(
     project: &ProjectResponse,
     config: &ProjectExecutionConfigResponse,
     baseline: &RefreshedBaseline,
+    eligible: &[SourceIssueSnapshot],
 ) -> String {
     let template = include_str!("../../../crates/orchestrator/prompts/plan-run/plan.md");
     template
@@ -1963,7 +2317,36 @@ fn render_planning_prompt(
             "{{MAX_PARALLEL_TASKS}}",
             &config.max_parallel_tasks.to_string(),
         )
-        .replace("{{ELIGIBLE_SOURCE_ISSUES}}", "")
+        .replace(
+            "{{ELIGIBLE_SOURCE_ISSUES}}",
+            &render_eligible_source_issues(eligible),
+        )
+}
+
+fn render_eligible_source_issues(eligible: &[SourceIssueSnapshot]) -> String {
+    if eligible.is_empty() {
+        return "(no eligible Source Issues)".to_string();
+    }
+    eligible
+        .iter()
+        .map(|issue| {
+            format!(
+                "- source_id: {}\n  title: {}\n  raw:\n{}",
+                issue.source_id,
+                issue.title,
+                indent_lines(&issue.raw_text, 4)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn indent_lines(text: &str, spaces: usize) -> String {
+    let pad = " ".repeat(spaces);
+    text.lines()
+        .map(|line| format!("{pad}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {

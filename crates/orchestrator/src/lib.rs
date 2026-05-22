@@ -8,10 +8,12 @@ use std::process::{Command, Stdio};
 pub mod plan_run;
 
 pub use plan_run::{
-    FakePlanningPhaseRunner, IntegrationBranchRefresher, ParsedPlanningOutput, PlanRunPhaseError,
-    PlanningPhaseRunner, RefreshedBaseline, StaticIntegrationBranchRefresher,
-    UnimplementedIntegrationBranchRefresher, UnimplementedPlanningPhaseRunner,
-    parse_planning_output,
+    AssignmentWorktreeProvisioner, FakeLifecycleWriter, FakePlanningPhaseRunner,
+    FakeWorktreeProvisioner, IntegrationBranchRefresher, IssueLifecycleWriter, ParsedPlanningOutput,
+    PlanRunPhaseError, PlannerSelection, PlanningPhaseRunner, RefreshedBaseline,
+    StaticIntegrationBranchRefresher, UnimplementedIntegrationBranchRefresher,
+    UnimplementedLifecycleWriter, UnimplementedPlanningPhaseRunner,
+    UnimplementedWorktreeProvisioner, extract_planner_selections, parse_planning_output,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

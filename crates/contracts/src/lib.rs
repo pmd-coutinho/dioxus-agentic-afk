@@ -127,6 +127,14 @@ pub struct IssueAssignmentResponse {
     pub status: String,
     pub status_detail: Option<String>,
     pub latest_attempt: Option<AssignmentAttemptResponse>,
+    /// Plan Run that owns this assignment (ADR-0034). `None` for legacy
+    /// rows from before the Plan Run flow landed.
+    #[serde(default)]
+    pub plan_run_id: Option<String>,
+    /// Planner selection summary captured when the Planning Phase chose
+    /// this Source Issue for the Plan Run.
+    #[serde(default)]
+    pub selection_summary: Option<String>,
 }
 
 // --- Plan Run contracts (ADR-0034) ---
@@ -160,6 +168,10 @@ pub struct PlanRunResponse {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub phase_outputs: Vec<PhaseOutputResponse>,
+    /// Issue Assignments selected and claimed by the Plan Run's Planning
+    /// Phase. Empty for `succeeded_empty` runs.
+    #[serde(default)]
+    pub assignments: Vec<IssueAssignmentResponse>,
 }
 
 /// One durable phase result (planning/implementation/review/merge) recorded

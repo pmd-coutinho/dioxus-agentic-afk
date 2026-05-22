@@ -595,12 +595,24 @@ fn PlanRunCard(
                     match active {
                         Some(active) => {
                             let id_short = active.id.chars().take(8).collect::<String>();
+                            let assignments = active.assignments.clone();
                             rsx! {
-                                div { class: "flex flex-col gap-1", "data-testid": "plan-run-active",
+                                div { class: "flex flex-col gap-2", "data-testid": "plan-run-active",
                                     StatusPill { tone: PillTone::Running, label: "Running".to_string() }
                                     p { class: "font-mono text-[12px] text-ink", "{id_short}" }
                                     p { class: "text-[12px] text-ink-2",
                                         "{active.integration_branch} @ {active.baseline_commit}"
+                                    }
+                                    if !assignments.is_empty() {
+                                        div { class: "mt-1 flex flex-col gap-1",
+                                            "data-testid": "plan-run-assignments",
+                                            p { class: "text-[11px] text-ink-2", "Selected Issue Assignments" }
+                                            for assignment in assignments.iter() {
+                                                PlanRunAssignmentRow {
+                                                    assignment: assignment.clone(),
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -631,6 +643,32 @@ fn PlanRunCard(
                     }
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
+    let tone = match assignment.status.as_str() {
+        "claimed" => PillTone::Running,
+        "provisional" => PillTone::Pending,
+        _ => PillTone::Pending,
+    };
+    let summary = assignment
+        .selection_summary
+        .clone()
+        .unwrap_or_else(|| String::from("(no selection summary)"));
+    rsx! {
+        div { class: "flex flex-col gap-0.5 rounded border border-line/40 bg-surface-2/40 p-2",
+            "data-testid": "plan-run-assignment-row",
+            div { class: "flex items-center gap-2",
+                StatusPill { tone, label: assignment.status.clone() }
+                p { class: "font-mono text-[12px] text-ink",
+                    "{assignment.source_id}: {assignment.source_title}"
+                }
+            }
+            p { class: "font-mono text-[11px] text-ink-2", "{assignment.branch}" }
+            p { class: "text-[11px] text-ink-2", "{summary}" }
         }
     }
 }

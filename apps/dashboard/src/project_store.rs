@@ -86,8 +86,25 @@ impl ProjectStoreState {
                     if matches!(assignment.status.as_str(), "abandoned" | "completed") {
                         None
                     } else {
-                        Some(assignment)
+                        Some(assignment.clone())
                     };
+                // Mirror the assignment into its owning Plan Run so the
+                // Plan Run card shows the claimed Issue Assignment live
+                // (issue #42).
+                if let Some(plan_run_id) = assignment.plan_run_id.as_deref()
+                    && let Some(active) = self.active_plan_run.as_mut()
+                    && active.id == plan_run_id
+                {
+                    if let Some(slot) = active
+                        .assignments
+                        .iter_mut()
+                        .find(|existing| existing.id == assignment.id)
+                    {
+                        *slot = assignment;
+                    } else {
+                        active.assignments.push(assignment);
+                    }
+                }
             }
             ProjectEvent::AssignmentAttemptAdded {
                 assignment_id,
@@ -488,6 +505,8 @@ mod tests {
             status: status.to_string(),
             status_detail: None,
             latest_attempt: None,
+            plan_run_id: None,
+            selection_summary: None,
         }
     }
 
@@ -927,6 +946,7 @@ mod tests {
             started_at: "0".to_string(),
             finished_at: None,
             phase_outputs: vec![],
+            assignments: vec![],
         }
     }
 
@@ -1008,6 +1028,28 @@ mod tests {
         assert!(state.active_plan_run.is_none());
         assert_eq!(state.recent_plan_runs.len(), 1);
         assert_eq!(state.recent_plan_runs[0].state, "succeeded_empty");
+    }
+
+    #[test]
+    fn assignment_created_with_plan_run_id_mirrors_into_active_plan_run() {
+        let mut state = ProjectStoreState::new();
+        state.hydrate(snapshot_with_activity(vec![]), 0);
+        state.apply_event(
+            1,
+            ProjectEvent::PlanRunStarted(plan_run_response("pr1", "running")),
+        );
+        let mut assignment = assignment("a1", "claimed");
+        assignment.plan_run_id = Some("pr1".to_string());
+        assignment.selection_summary = Some("baseline ready".to_string());
+        let outcome = state.apply_event(2, ProjectEvent::AssignmentCreated(assignment));
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        let active = state.active_plan_run.as_ref().unwrap();
+        assert_eq!(active.assignments.len(), 1);
+        assert_eq!(active.assignments[0].id, "a1");
+        assert_eq!(
+            active.assignments[0].selection_summary.as_deref(),
+            Some("baseline ready")
+        );
     }
 
     #[test]

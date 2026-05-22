@@ -28,6 +28,9 @@ pub use plan_run::{
     set_project_execution_config,
 };
 
+// Re-export new Plan Run assignment helpers at the crate root for
+// convenience; defined further down in this module.
+
 /// Public re-export of the internal assignment lookup, used by sibling modules and external callers.
 pub async fn get_issue_assignment_public(
     db: &Db,
@@ -680,9 +683,24 @@ pub(crate) async fn get_issue_assignment(
     db: &Db,
     assignment_id: &str,
 ) -> Result<IssueAssignmentResponse, PersistenceError> {
-    let row = sqlx::query_as::<_, (String, String, String, String, String, String, String)>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         r#"
-        SELECT id, project_id, source_id, source_title, branch, worktree_path, status
+        SELECT id, project_id, source_id, source_title, branch, worktree_path, status,
+               status_detail, plan_run_id, selection_summary
         FROM issue_assignments
         WHERE id = ?
         "#,
@@ -690,18 +708,23 @@ pub(crate) async fn get_issue_assignment(
     .bind(assignment_id)
     .fetch_optional(db)
     .await?;
-    let Some((id, project_id, source_id, source_title, branch, worktree_path, status)) = row else {
+    let Some((
+        id,
+        project_id,
+        source_id,
+        source_title,
+        branch,
+        worktree_path,
+        status,
+        status_detail,
+        plan_run_id,
+        selection_summary,
+    )) = row
+    else {
         return Err(PersistenceError::AssignmentNotFound(
             assignment_id.to_string(),
         ));
     };
-    let status_detail = sqlx::query_as::<_, (Option<String>,)>(
-        "SELECT status_detail FROM issue_assignments WHERE id = ?",
-    )
-    .bind(assignment_id)
-    .fetch_one(db)
-    .await?
-    .0;
     let latest_attempt =
         sqlx::query_as::<_, (String, String, Option<i64>, Option<String>, Option<String>)>(
             r#"
@@ -739,7 +762,77 @@ pub(crate) async fn get_issue_assignment(
         status,
         status_detail,
         latest_attempt,
+        plan_run_id,
+        selection_summary,
     })
+}
+
+/// Insert a provisional Issue Assignment nested under a Plan Run.
+///
+/// The assignment starts in `provisional` status with no worktree path; the
+/// caller transitions it to `claimed` after the Assignment Worktree is
+/// ready (ADR-0028).
+pub async fn create_plan_run_assignment(
+    db: &Db,
+    plan_run_id: &str,
+    project_id: &str,
+    source: &IssueSource,
+    issue: &SourceIssueSnapshot,
+    branch: &str,
+    selection_summary: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO issue_assignments (
+            id, project_id, source_kind, source_locator, source_id, source_title,
+            source_raw_text, branch, status, plan_run_id, selection_summary
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'provisional', ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(project_id)
+    .bind(&source.kind)
+    .bind(&source.locator)
+    .bind(&issue.source_id)
+    .bind(&issue.title)
+    .bind(&issue.raw_text)
+    .bind(branch)
+    .bind(plan_run_id)
+    .bind(selection_summary)
+    .execute(db)
+    .await
+    .map_err(|error| match &error {
+        sqlx::Error::Database(db_error) if db_error.is_unique_violation() => {
+            PersistenceError::ActiveAssignment(plan_run_id.to_string())
+        }
+        _ => PersistenceError::Database(error),
+    })?;
+
+    get_issue_assignment(db, &id).await
+}
+
+/// List Issue Assignments nested under a Plan Run, oldest first.
+pub async fn list_plan_run_assignments(
+    db: &Db,
+    plan_run_id: &str,
+) -> Result<Vec<IssueAssignmentResponse>, PersistenceError> {
+    let rows = sqlx::query_as::<_, (String,)>(
+        r#"
+        SELECT id FROM issue_assignments
+        WHERE plan_run_id = ?
+        ORDER BY rowid ASC
+        "#,
+    )
+    .bind(plan_run_id)
+    .fetch_all(db)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (id,) in rows {
+        out.push(get_issue_assignment(db, &id).await?);
+    }
+    Ok(out)
 }
 
 fn validate_issue_source(request: &EnableIssueSourceRequest) -> Result<(), PersistenceError> {

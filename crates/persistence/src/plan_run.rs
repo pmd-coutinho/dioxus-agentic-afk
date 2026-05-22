@@ -154,6 +154,7 @@ pub async fn get_plan_run(db: &Db, plan_run_id: &str) -> Result<PlanRunResponse,
     .ok_or_else(|| PersistenceError::NotFound(plan_run_id.to_string()))?;
     let (id, project_id, integration_branch, baseline_commit, state, started_at, finished_at) = row;
     let phase_outputs = list_phase_outputs(db, &id).await?;
+    let assignments = crate::list_plan_run_assignments(db, &id).await?;
     Ok(PlanRunResponse {
         id,
         project_id: ProjectId(project_id),
@@ -163,6 +164,7 @@ pub async fn get_plan_run(db: &Db, plan_run_id: &str) -> Result<PlanRunResponse,
         started_at,
         finished_at,
         phase_outputs,
+        assignments,
     })
 }
 
