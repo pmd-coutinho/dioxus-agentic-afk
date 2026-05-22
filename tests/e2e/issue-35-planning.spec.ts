@@ -3,8 +3,8 @@
  *
  * Planning is a Card wrapping the five group sections (Eligible Ready
  * Issues, Active Issues, Blocked Ready Issues, Completed Issues, Non-ready
- * Source Issues). Each PlanningIssue's Start Assignment is an
- * `ActionButton` so call sites no longer wire pending/error state by hand.
+ * Source Issues). After issue #47 retired the proposal-era execution path,
+ * Plan Run owns kicking off issue work — Planning groups are now read-only.
  */
 import { expect, test } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
@@ -75,11 +75,10 @@ test.describe('Planning', () => {
       await expect(page.getByRole('heading', { level: 3, name: group })).toBeVisible();
     }
     await expect(page.getByText('Ready issue A', { exact: true })).toBeVisible();
-    // ActionButton in Idle state — disabled attribute reads false through the
-    // `data-mutation-pending` flag.
-    const startBtn = page.getByTestId('start-assignment-button').first();
-    await expect(startBtn).toBeVisible();
-    await expect(startBtn).toHaveAttribute('data-mutation-pending', 'false');
+    // Eligible Ready Issues are read-only after the proposal-era Start
+    // Assignment surface was retired (issue #47).
+    await expect(page.getByTestId('start-assignment-button')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Start Assignment' })).toHaveCount(0);
   });
 
   test('empty groups render the "None" sentinel inside the group section', async ({

@@ -1,9 +1,10 @@
 /**
  * Issue #35 — Project Overview sub-route recomposed from primitives.
  *
- * Overview renders three Cards: Project metadata, Issue Assignment summary,
- * and Git Summary. Each card has explicit loading / empty / error states
- * built from the primitive library.
+ * Overview renders the Project metadata Card, the Plan Run Card (the
+ * canonical execution surface after issue #47 retired the proposal-era
+ * Issue Assignment summary), and the Git Summary card. Each card has
+ * explicit loading / empty / error states built from the primitive library.
  */
 import { expect, test } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
@@ -62,7 +63,7 @@ test.describe('Overview', () => {
     await expect(gitCard.getByRole('definition').filter({ hasText: 'master' })).toBeVisible();
   });
 
-  test('empty Assignment card renders EmptyState when no active assignment', async ({
+  test('Overview no longer renders the retired Issue Assignment summary card', async ({
     page,
     request,
   }) => {
@@ -78,9 +79,17 @@ test.describe('Overview', () => {
     }));
 
     await page.goto(`/projects/${projectId}`);
+    // Plan Run is the only execution-card on Overview; the proposal-era
+    // Issue Assignment summary panel was retired by issue #47.
+    await expect(
+      page.getByRole('heading', { level: 2, name: 'Plan Run' }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('heading', { level: 2, name: 'Issue Assignment' }),
+    ).toHaveCount(0);
     await expect(
       page.getByText('No active Assignment', { exact: true }),
-    ).toBeVisible();
+    ).toHaveCount(0);
   });
 
   test('error state renders ErrorState when project fetch fails', async ({

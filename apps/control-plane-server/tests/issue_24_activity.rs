@@ -1,13 +1,11 @@
 //! Tests for issue #24: Expose comprehensive Issue Assignment Activity on Project detail.
 //!
-//! Covers the API projection of `project_activity` rows and verifies that every
-//! lifecycle path enumerated by the issue (start, block, recover, abandon,
-//! proposal open/verify/repair, complete, cleanup) records a truthful Activity
-//! entry without leaking full Codex output.
+//! Covers the API projection of `project_activity` rows and the bounded
+//! `detail` projection that prevents full Codex output from leaking into the
+//! Activity audit log.
 
 use agentic_afk_contracts::{
-    CreateProjectRequest, EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource,
-    ProjectActivityEntryResponse, ProjectResponse, SourceIssueSnapshot,
+    CreateProjectRequest, EnableIssueSourceRequest, ProjectResponse,
 };
 use agentic_afk_control_plane_server::{ControlPlaneConfig, router};
 use agentic_afk_persistence::{self as persistence};
@@ -133,85 +131,8 @@ async fn create_trusted_local_markdown_project(
     serde_json::from_slice(&body).unwrap()
 }
 
-async fn sync_local_markdown(app: &axum::Router, project: &ProjectResponse) {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/projects/{}/issue-source/sync", project.id.0))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
-async fn start_assignment(
-    app: &axum::Router,
-    project: &ProjectResponse,
-    source_id: &str,
-) -> IssueAssignmentResponse {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "/api/projects/{}/source-issues/{source_id}/assignment",
-                    project.id.0
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&body).unwrap()
-}
-
-async fn fetch_activity(
-    app: &axum::Router,
-    project_id: &str,
-) -> Vec<ProjectActivityEntryResponse> {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/projects/{project_id}/activity"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&body).unwrap()
-}
-
-/// Worktrunk fake that creates a per-call worktree directory on `switch` and
-/// removes it on `remove`.
-fn fake_worktrunk(name: &str, worktree: &std::path::Path) -> PathBuf {
-    write_fake_command(
-        name,
-        &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nif [ \"$1\" = \"switch\" ]; then\n  mkdir -p '{wt}'\n  printf '{{\"path\":\"{wt}\"}}\\n'\n  exit 0\nfi\nif [ \"$1\" = \"remove\" ]; then\n  rm -rf '{wt}'\n  exit 0\nfi\nexit 9\n",
-            wt = worktree.display(),
-        ),
-    )
-}
-
-fn fake_codex_blocked(name: &str) -> PathBuf {
-    write_fake_command(
-        name,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nlast=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--output-last-message\" ]; then shift; last=\"$1\"; fi\n  shift\ndone\nprintf '{\"outcome\":\"Blocked\",\"summary\":\"need input\"}\\n' > \"$last\"\n",
-    )
-}
-
-/// Tracer: starting and abandoning an assignment surfaces Activity entries
-/// through the new `GET /api/projects/{id}/activity` endpoint, newest first.
+/// Activity detail is truncated so full Codex output never lands in the audit
+/// log.
 #[tokio::test]
 async fn activity_detail_is_truncated_to_protect_against_codex_output() {
     use agentic_afk_persistence::PROJECT_ACTIVITY_DETAIL_MAX_BYTES;
@@ -237,10 +158,6 @@ async fn activity_detail_is_truncated_to_protect_against_codex_output() {
     assert!(stored.len() <= PROJECT_ACTIVITY_DETAIL_MAX_BYTES + 8);
     assert!(stored.ends_with('…'));
 }
-
-/// Seed a GitHub-source Project with one assignment that already has a pending
-/// Change Proposal, so verify/repair handlers can be exercised without going
-/// through the full Codex start flow.
 
 /// The activity endpoint rejects unknown projects with a problem+json 404.
 #[tokio::test]

@@ -1034,26 +1034,6 @@ async fn create_trusted_github_project(
     serde_json::from_slice(&body).unwrap()
 }
 
-async fn start_source_issue_assignment(
-    app: &axum::Router,
-    project: &ProjectResponse,
-    source_id: &str,
-) -> axum::response::Response {
-    app.clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!(
-                    "/api/projects/{}/source-issues/{source_id}/assignment",
-                    project.id.0
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-}
-
 #[tokio::test]
 async fn lifecycle_status_write_back_updates_markdown_file() {
     let (project_path, issues_dir) = setup_local_markdown_project("lifecycle-write-back");

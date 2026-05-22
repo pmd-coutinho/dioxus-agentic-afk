@@ -3,7 +3,7 @@ mod sse_client;
 mod ui;
 
 use project_store::{
-    IssueAssignmentId, MutationCategory, MutationKey, MutationState, ProjectStore, SourceIssueId,
+    IssueAssignmentId, MutationCategory, MutationKey, MutationState, ProjectStore,
 };
 use ui::{
     ActionButton, ButtonVariant, Card, CardBody, CardFoot, CardHead, EmptyState, EmptyStateAccent,
@@ -413,7 +413,6 @@ fn ProjectOverview(id: String) -> Element {
     let state_sig = use_context::<ProjectStore>().state_signal();
     let s = state_sig.read();
     let project = s.project.clone();
-    let active_assignment = s.active_assignment.clone();
     let execution_config = s.execution_config.clone();
     let active_plan_run = s.active_plan_run.clone();
     let recent_plan_runs = s.recent_plan_runs.clone();
@@ -424,7 +423,6 @@ fn ProjectOverview(id: String) -> Element {
             Some(project) => rsx! {
                 div { class: "grid gap-6 lg:grid-cols-2",
                     ProjectMetaCard { project: project.clone() }
-                    AssignmentSummaryCard { active_assignment: active_assignment.clone() }
                 }
                 ExecutionConfigCard {
                     project_id: project.id.0.clone(),
@@ -831,41 +829,6 @@ fn ProjectMetaCard(project: ProjectResponse) -> Element {
 }
 
 #[component]
-fn AssignmentSummaryCard(active_assignment: Option<IssueAssignmentResponse>) -> Element {
-    let active = active_assignment;
-    rsx! {
-        Card {
-            CardHead {
-                title: "Issue Assignment".to_string(),
-                id_text: active.as_ref().map(|a| a.id.chars().take(8).collect::<String>()),
-            }
-            CardBody {
-                match active {
-                    Some(assignment) => {
-                        let (tone, label) = derive_assignment_lifecycle_pill(&assignment.status);
-                        rsx! {
-                            div { class: "flex flex-col gap-3",
-                                StatusPill { tone, label }
-                                p { class: "font-display text-[13px] text-ink", "{assignment.source_title}" }
-                                p { class: "font-mono text-[11px] text-ink-dim", "{assignment.source_id}" }
-                                p { class: "break-words font-mono text-[11px] text-ink-2", "{assignment.branch}" }
-                            }
-                        }
-                    },
-                    None => rsx! {
-                        EmptyState {
-                            title: "No active Assignment".to_string(),
-                            body: "Start an Assignment from Planning to boot an agent.".to_string(),
-                            accent: EmptyStateAccent::Cyan,
-                        }
-                    },
-                }
-            }
-        }
-    }
-}
-
-#[component]
 fn GitSummaryCard(git_summary: Option<GitSummary>) -> Element {
     let (tone, label) = derive_git_pill(git_summary.as_ref());
     rsx! {
@@ -1125,17 +1088,6 @@ fn derive_trust_pill(trusted: bool) -> (PillTone, &'static str) {
     }
 }
 
-fn derive_assignment_lifecycle_pill(status: &str) -> (PillTone, String) {
-    match status {
-        "proposal_pending" => (PillTone::Running, "Awaiting checks".to_string()),
-        "proposal_verified" => (PillTone::Verified, "Verified".to_string()),
-        "completed" => (PillTone::Verified, "Completed".to_string()),
-        "blocked" => (PillTone::Failed, "Blocked".to_string()),
-        "abandoned" => (PillTone::Idle, "Abandoned".to_string()),
-        other => (PillTone::Pending, other.to_string()),
-    }
-}
-
 fn derive_git_pill(summary: Option<&GitSummary>) -> (PillTone, String) {
     match summary {
         None => (PillTone::Idle, "No Git".to_string()),
@@ -1360,6 +1312,7 @@ fn PlanningSnapshot(
     trusted: bool,
     snapshot: PlanningSnapshotResponse,
 ) -> Element {
+    let _ = trusted;
     let last_sync = snapshot
         .last_successful_sync_at
         .clone()
@@ -1387,31 +1340,26 @@ fn PlanningSnapshot(
                             project_id: project_id.clone(),
                             title: "Eligible Ready Issues".to_string(),
                             issues: snapshot.eligible,
-                            can_start: trusted,
                         }
                         PlanningGroup {
                             project_id: project_id.clone(),
                             title: "Active Issues".to_string(),
                             issues: snapshot.active,
-                            can_start: false,
                         }
                         PlanningGroup {
                             project_id: project_id.clone(),
                             title: "Blocked Ready Issues".to_string(),
                             issues: snapshot.blocked,
-                            can_start: false,
                         }
                         PlanningGroup {
                             project_id: project_id.clone(),
                             title: "Completed Issues".to_string(),
                             issues: snapshot.completed,
-                            can_start: false,
                         }
                         PlanningGroup {
                             project_id,
                             title: "Non-ready Source Issues".to_string(),
                             issues: snapshot.non_ready,
-                            can_start: false,
                         }
                     }
                 }
@@ -1425,7 +1373,6 @@ fn PlanningGroup(
     project_id: String,
     title: String,
     issues: Vec<SourceIssueSnapshot>,
-    can_start: bool,
 ) -> Element {
     rsx! {
         section { class: "min-w-0 border border-stroke bg-panel/40 p-4",
@@ -1438,7 +1385,6 @@ fn PlanningGroup(
                         PlanningIssue {
                             project_id: project_id.clone(),
                             issue,
-                            can_start,
                         }
                     }
                 }
@@ -1448,9 +1394,8 @@ fn PlanningGroup(
 }
 
 #[component]
-fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool) -> Element {
-    use project_store::SourceIssueId;
-
+fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot) -> Element {
+    let _ = project_id;
     let dependencies = if issue.issue_dependencies.is_empty() {
         "No dependencies".to_string()
     } else {
@@ -1460,13 +1405,6 @@ fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool
         .parent_issue
         .clone()
         .unwrap_or_else(|| "No parent".to_string());
-    let store = use_context::<ProjectStore>();
-    let key = MutationKey::StartAssignment(
-        ProjectId(project_id.clone()),
-        SourceIssueId(issue.source_id.clone()),
-    );
-    let start_project_id = project_id.clone();
-    let start_source_id = issue.source_id.clone();
 
     rsx! {
         li { class: "grid gap-1 border-b border-stroke pb-3 text-[12px] text-ink-2 last:border-0 last:pb-0",
@@ -1477,30 +1415,6 @@ fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool
             p { class: "break-words font-mono text-[11px] text-ink-dim", "{issue.source_id}" }
             p { class: "font-mono text-[11px] text-ink-2", "Parent {parent}" }
             p { class: "font-mono text-[11px] text-ink-2", "{dependencies}" }
-            if can_start {
-                div { class: "mt-2",
-                    ActionButton {
-                        mutation_key: key.clone(),
-                        variant: ButtonVariant::Primary,
-                        testid: "start-assignment-button".to_string(),
-                        error_marker: "start-assignment".to_string(),
-                        on_press: {
-                            let key = key.clone();
-                            move |_| {
-                                let key = key.clone();
-                                let project_id = start_project_id.clone();
-                                let source_id = start_source_id.clone();
-                                wasm_bindgen_futures::spawn_local(async move {
-                                    let _ = store
-                                        .mutate(key, start_assignment_api(project_id, source_id))
-                                        .await;
-                                });
-                            }
-                        },
-                        "Start Assignment"
-                    }
-                }
-            }
         }
     }
 }
@@ -1615,37 +1529,6 @@ async fn trust_project_api(
         .map_err(|error| project_store::MutationFailure::network(error.to_string()))
 }
 
-async fn start_assignment_api(
-    project_id: String,
-    source_id: String,
-) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
-    post_assignment_mutation(format!(
-        "/api/projects/{project_id}/source-issues/{source_id}/assignment"
-    ))
-    .await
-}
-
-
-/// Issue a POST against an Issue Assignment lifecycle endpoint and map the
-/// outcome into a `MutationFailure` so the `ProjectStore` can categorize it.
-async fn post_assignment_mutation(
-    path: String,
-) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
-    let response = gloo_net::http::Request::post(&path)
-        .send()
-        .await
-        .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
-    let status = response.status();
-    if !(200..300).contains(&status) {
-        let body = response.text().await.unwrap_or_default();
-        return Err(project_store::MutationFailure::http(status, body));
-    }
-    response
-        .json()
-        .await
-        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
-}
-
 async fn set_execution_config_api(
     project_id: String,
     request: SetProjectExecutionConfigRequest,
@@ -1735,30 +1618,21 @@ fn DesignSandbox() -> Element {
 
     use_hook(|| {
         let pending_key = MutationKey::SyncIssueSource(ProjectId("demo".into()));
-        let err_key = MutationKey::StartAssignment(
-            ProjectId("demo".into()),
-            SourceIssueId("issue-A".into()),
-        );
+        let err_key = MutationKey::StartPlanRun(ProjectId("demo".into()));
         store.force_state(pending_key, MutationState::Pending);
         store.force_state(
             err_key,
             MutationState::Error {
                 category: MutationCategory::Validation,
                 title: "project trust required".into(),
-                detail: "trust the project from settings before booting an agent".into(),
+                detail: "trust the project from settings before starting a Plan Run".into(),
             },
         );
     });
 
-    let idle_key = MutationKey::AbandonAssignment(
-        ProjectId("demo".into()),
-        IssueAssignmentId("assn-A".into()),
-    );
+    let idle_key = MutationKey::TrustProject(ProjectId("demo".into()));
     let pending_key = MutationKey::SyncIssueSource(ProjectId("demo".into()));
-    let err_key = MutationKey::StartAssignment(
-        ProjectId("demo".into()),
-        SourceIssueId("issue-A".into()),
-    );
+    let err_key = MutationKey::StartPlanRun(ProjectId("demo".into()));
 
     rsx! {
         document::Link {
@@ -1797,7 +1671,7 @@ fn DesignSandbox() -> Element {
                                 mutation_key: idle_key.clone(),
                                 variant: ButtonVariant::Destructive,
                                 on_press: move |_| {},
-                                "Abandon Assignment"
+                                "Trust Project"
                             }
                         }
                         div {
@@ -1815,7 +1689,7 @@ fn DesignSandbox() -> Element {
                                 mutation_key: err_key.clone(),
                                 variant: ButtonVariant::Primary,
                                 on_press: move |_| {},
-                                "Start Assignment"
+                                "Start Plan Run"
                             }
                         }
                     }
@@ -1866,14 +1740,14 @@ fn DesignSandbox() -> Element {
                 SandboxSection { heading: "EmptyState".to_string(),
                     div { class: "grid gap-5 md:grid-cols-2",
                         EmptyState {
-                            title: "No Assignments".to_string(),
-                            body: "Pick a Ready Issue to boot an agent against this Project.".to_string(),
+                            title: "No Plan Runs".to_string(),
+                            body: "Start a Plan Run to plan and run a parallel batch of issue work.".to_string(),
                             accent: EmptyStateAccent::Cyan,
                             ActionButton {
                                 mutation_key: MutationKey::TrustProject(ProjectId("demo-empty".into())),
                                 variant: ButtonVariant::Primary,
                                 on_press: move |_| {},
-                                "Pick an Issue"
+                                "Start a Plan Run"
                             }
                         }
                         EmptyState {
@@ -1997,38 +1871,4 @@ mod tests {
         assert_eq!(label, "Untrusted");
     }
 
-    #[test]
-    fn lifecycle_pill_proposal_pending_is_running() {
-        let (tone, label) = derive_assignment_lifecycle_pill("proposal_pending");
-        assert_eq!(tone, PillTone::Running);
-        assert_eq!(label, "Awaiting checks");
-    }
-
-    #[test]
-    fn lifecycle_pill_proposal_verified_is_verified() {
-        let (tone, label) = derive_assignment_lifecycle_pill("proposal_verified");
-        assert_eq!(tone, PillTone::Verified);
-        assert_eq!(label, "Verified");
-    }
-
-    #[test]
-    fn lifecycle_pill_completed_is_verified() {
-        let (tone, label) = derive_assignment_lifecycle_pill("completed");
-        assert_eq!(tone, PillTone::Verified);
-        assert_eq!(label, "Completed");
-    }
-
-    #[test]
-    fn lifecycle_pill_blocked_is_failed() {
-        let (tone, label) = derive_assignment_lifecycle_pill("blocked");
-        assert_eq!(tone, PillTone::Failed);
-        assert_eq!(label, "Blocked");
-    }
-
-    #[test]
-    fn lifecycle_pill_unknown_status_is_pending() {
-        let (tone, label) = derive_assignment_lifecycle_pill("queued");
-        assert_eq!(tone, PillTone::Pending);
-        assert_eq!(label, "queued");
-    }
 }

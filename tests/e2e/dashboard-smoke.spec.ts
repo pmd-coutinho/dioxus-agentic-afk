@@ -96,9 +96,6 @@ test('Project detail enables a discovered Issue Source candidate', async ({
   await expect(
     page.getByText('Eligible ready issue', { exact: true }),
   ).toBeVisible();
-  await expect(
-    page.getByRole('button', { name: 'Start Assignment' }),
-  ).toBeHidden();
 
   // Trust Project lives in the Overview metadata Card after issue #35.
   await page.goto(`/projects/${project.id}`);
@@ -106,9 +103,6 @@ test('Project detail enables a discovered Issue Source candidate', async ({
   await expect(page.getByText('Trusted', { exact: true })).toBeVisible();
 
   await page.goto(`/projects/${project.id}/planning`);
-  await expect(
-    page.getByRole('button', { name: 'Start Assignment' }),
-  ).toBeVisible();
   const blockedIssues = page
     .getByRole('heading', { name: 'Blocked Ready Issues' })
     .locator('..');

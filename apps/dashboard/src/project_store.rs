@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use agentic_afk_contracts::{
-    IssueAssignmentResponse, IssueSourceCandidate, PlanRunResponse, PlanningSnapshotResponse,
-    ProblemDetail, ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse,
-    ProjectId, ProjectResponse, ProjectSnapshot,
+    IssueSourceCandidate, PlanRunResponse, PlanningSnapshotResponse, ProblemDetail,
+    ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse, ProjectId,
+    ProjectResponse, ProjectSnapshot,
 };
 use dioxus::prelude::*;
 
@@ -27,9 +27,6 @@ pub enum ApplyOutcome {
 pub struct ProjectStoreState {
     pub project: Option<ProjectResponse>,
     pub activity: Vec<ProjectActivityEntryResponse>,
-    /// Active Issue Assignment under the legacy single-slot flow. Plan Run
-    /// nested Issue Assignments are tracked through `active_plan_run`.
-    pub active_assignment: Option<IssueAssignmentResponse>,
     pub planning_snapshot: Option<PlanningSnapshotResponse>,
     pub issue_source_candidates: Vec<IssueSourceCandidate>,
     pub execution_config: Option<ProjectExecutionConfigResponse>,
@@ -49,7 +46,6 @@ impl ProjectStoreState {
     pub fn hydrate(&mut self, snapshot: ProjectSnapshot, sequence: u64) {
         self.project = Some(snapshot.project);
         self.activity = snapshot.activity;
-        self.active_assignment = None;
         self.execution_config = snapshot.execution_config;
         self.active_plan_run = snapshot.active_plan_run;
         self.recent_plan_runs = snapshot.recent_plan_runs;
@@ -81,13 +77,6 @@ impl ProjectStoreState {
             }
             ProjectEvent::AssignmentCreated(assignment)
             | ProjectEvent::AssignmentStatusChanged(assignment) => {
-                // Terminal statuses release the Project assignment slot.
-                self.active_assignment =
-                    if matches!(assignment.status.as_str(), "abandoned" | "completed") {
-                        None
-                    } else {
-                        Some(assignment.clone())
-                    };
                 // Mirror the assignment into its owning Plan Run so the
                 // Plan Run card shows the claimed Issue Assignment live
                 // (issue #42).
@@ -110,9 +99,14 @@ impl ProjectStoreState {
                 assignment_id,
                 attempt,
             } => {
-                if let Some(active) = self.active_assignment.as_mut() {
-                    if active.id == assignment_id {
-                        active.latest_attempt = Some(attempt);
+                // Mirror onto the matching Plan Run assignment if any.
+                if let Some(active) = self.active_plan_run.as_mut() {
+                    if let Some(slot) = active
+                        .assignments
+                        .iter_mut()
+                        .find(|existing| existing.id == assignment_id)
+                    {
+                        slot.latest_attempt = Some(attempt);
                     }
                 }
             }
@@ -177,10 +171,6 @@ impl ProjectStoreState {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum MutationKey {
     TrustProject(ProjectId),
-    StartAssignment(ProjectId, SourceIssueId),
-    AbandonAssignment(ProjectId, IssueAssignmentId),
-    RecoverAssignment(ProjectId, IssueAssignmentId),
-    RefreshProposalState(ProjectId, IssueAssignmentId),
     SyncIssueSource(ProjectId),
     EnableIssueSource(ProjectId, String, String),
     SetExecutionConfig(ProjectId),
@@ -188,15 +178,8 @@ pub enum MutationKey {
     ReEnableAssignment(ProjectId, IssueAssignmentId),
 }
 
-/// Identifier for a Source Issue (the upstream issue tracker's issue id).
-///
-/// Distinct from `IssueAssignmentId` so the type system rejects mistakes
-/// like keying a Start Assignment mutation by an assignment id.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct SourceIssueId(pub String);
-
 /// Identifier for an Issue Assignment (a single attempt to land a Source
-/// Issue), distinct from `SourceIssueId`.
+/// Issue inside a Plan Run).
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct IssueAssignmentId(pub String);
 
@@ -597,36 +580,6 @@ mod tests {
         assert_eq!(state.last_seen_seq, 10);
     }
 
-    #[test]
-    fn assignment_created_event_sets_active_assignment() {
-        let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 3;
-
-        let outcome = state.apply_event(
-            4,
-            ProjectEvent::AssignmentCreated(assignment("assn-1", "running")),
-        );
-
-        assert_eq!(outcome, ApplyOutcome::Merged);
-        let active = state.active_assignment.as_ref().expect("active set");
-        assert_eq!(active.id, "assn-1");
-        assert_eq!(active.status, "running");
-    }
-
-    #[test]
-    fn assignment_status_changed_to_abandoned_clears_active_assignment() {
-        let mut state = ProjectStoreState::new();
-        state.active_assignment = Some(assignment("assn-1", "running"));
-
-        let outcome = state.apply_event(
-            1,
-            ProjectEvent::AssignmentStatusChanged(assignment("assn-1", "abandoned")),
-        );
-
-        assert_eq!(outcome, ApplyOutcome::Merged);
-        assert!(state.active_assignment.is_none());
-    }
-
     fn attempt(id: &str, kind: &str) -> AssignmentAttemptResponse {
         AssignmentAttemptResponse {
             id: id.to_string(),
@@ -638,9 +591,11 @@ mod tests {
     }
 
     #[test]
-    fn assignment_attempt_added_sets_latest_attempt_when_assignment_matches() {
+    fn assignment_attempt_added_updates_latest_attempt_in_active_plan_run() {
         let mut state = ProjectStoreState::new();
-        state.active_assignment = Some(assignment("assn-1", "running"));
+        let mut plan_run = plan_run_response("pr1", "running");
+        plan_run.assignments = vec![assignment("assn-1", "implementing")];
+        state.active_plan_run = Some(plan_run);
 
         let outcome = state.apply_event(
             1,
@@ -651,8 +606,11 @@ mod tests {
         );
 
         assert_eq!(outcome, ApplyOutcome::Merged);
-        let active = state.active_assignment.as_ref().unwrap();
-        assert_eq!(active.latest_attempt.as_ref().unwrap().id, "att-1");
+        let plan_run = state.active_plan_run.as_ref().unwrap();
+        assert_eq!(
+            plan_run.assignments[0].latest_attempt.as_ref().unwrap().id,
+            "att-1"
+        );
     }
 
     #[test]
@@ -924,18 +882,17 @@ mod tests {
     #[test]
     fn assignment_keys_are_distinct_by_variant_and_id() {
         let project = ProjectId("p1".to_string());
-        let source = SourceIssueId("issue-A".to_string());
-        let assignment = IssueAssignmentId("assn-A".to_string());
+        let assignment_a = IssueAssignmentId("assn-A".to_string());
+        let assignment_b = IssueAssignmentId("assn-B".to_string());
 
         let mut table = MutationsTable::new();
-        let start = MutationKey::StartAssignment(project.clone(), source);
-        let abandon = MutationKey::AbandonAssignment(project.clone(), assignment.clone());
-        let recover = MutationKey::RecoverAssignment(project, assignment);
+        let re_enable_a =
+            MutationKey::ReEnableAssignment(project.clone(), assignment_a.clone());
+        let re_enable_b = MutationKey::ReEnableAssignment(project, assignment_b);
 
-        table.set_pending(start.clone());
-        assert!(table.is_pending(&start));
-        assert!(!table.is_pending(&abandon));
-        assert!(!table.is_pending(&recover));
+        table.set_pending(re_enable_a.clone());
+        assert!(table.is_pending(&re_enable_a));
+        assert!(!table.is_pending(&re_enable_b));
     }
 
     // --- Plan Run store behavior (issue #41) ---

@@ -1002,8 +1002,7 @@ async fn test_seed_planning_snapshot(
 }
 
 /// Test-only: publish an arbitrary `ProjectEvent` for `id` so Playwright can
-/// drive lifecycle flows (e.g. Start Assignment -> Attempt -> Proposal
-/// Refreshed -> Verified) without needing worktrunk/codex binaries.
+/// drive Plan Run lifecycle flows without needing worktrunk/codex binaries.
 async fn test_publish_project_event(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1206,30 +1205,6 @@ async fn update_lifecycle_status(
 }
 
 
-pub(crate) fn assignment_problem(problem_type: &str, detail: String) -> Response {
-    sync_problem_response(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        problem_type,
-        "Unprocessable Entity",
-        detail,
-    )
-}
-
-fn assignment_branch(source: &IssueSource, source_id: &str) -> String {
-    let identity = format!("{}-{source_id}", source.kind.replace('_', "-"));
-    let identity = identity
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    format!("agentic-afk/{identity}")
-}
-
 fn write_local_markdown_lifecycle(
     project: &ProjectResponse,
     source: &IssueSource,
@@ -1314,214 +1289,6 @@ fn write_github_lifecycle(
             command_output(&output)
         ))
     }
-}
-
-fn preflight_github_assignment(
-    gh_binary_path: &std::path::Path,
-    project: &ProjectResponse,
-    source: &IssueSource,
-) -> Result<(), String> {
-    preflight_github_auth(gh_binary_path)?;
-    let project_locator = github_origin_locator(std::path::Path::new(&project.path))
-        .ok_or_else(|| "Project Git remote does not identify a GitHub repository".to_string())?;
-    if project_locator != source.locator {
-        return Err(format!(
-            "Project GitHub remote {project_locator} does not match Issue Source {}",
-            source.locator
-        ));
-    }
-    refresh_github_origin(std::path::Path::new(&project.path))?;
-    ensure_github_lifecycle_labels(gh_binary_path, &source.locator)
-}
-
-fn refresh_github_origin(project_path: &std::path::Path) -> Result<(), String> {
-    let output = Command::new("git")
-        .current_dir(project_path)
-        .args(["fetch", "--prune", "origin"])
-        .output()
-        .map_err(|error| format!("failed to refresh GitHub origin: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "failed to refresh GitHub origin before claim: {}",
-            command_output(&output)
-        ))
-    }
-}
-
-fn github_origin_locator(project_path: &std::path::Path) -> Option<String> {
-    let config = std::fs::read_to_string(project_path.join(".git/config")).ok()?;
-    let mut in_origin = false;
-    for line in config.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_origin = trimmed == r#"[remote "origin"]"#;
-            continue;
-        }
-        if in_origin {
-            let (key, url) = trimmed.split_once('=')?;
-            if key.trim() == "url" {
-                return github_locator_from_url(url.trim());
-            }
-        }
-    }
-    None
-}
-
-fn preflight_github_auth(gh_binary_path: &std::path::Path) -> Result<(), String> {
-    let auth = Command::new(gh_binary_path)
-        .args(["auth", "status"])
-        .output()
-        .map_err(|error| format!("failed to run gh auth status: {error}"))?;
-    if auth.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "gh is not authenticated: {}",
-            command_output(&auth)
-        ))
-    }
-}
-
-fn ensure_github_lifecycle_labels(
-    gh_binary_path: &std::path::Path,
-    locator: &str,
-) -> Result<(), String> {
-    for label in [
-        "agentic-afk:claimed",
-        "agentic-afk:running",
-        "agentic-afk:blocked",
-        "agentic-afk:completed",
-    ] {
-        let output = Command::new(gh_binary_path)
-            .args([
-                "label", "create", label, "--repo", locator, "--force", "--color", "57606a",
-            ])
-            .output()
-            .map_err(|error| {
-                format!("failed to provision GitHub lifecycle label {label}: {error}")
-            })?;
-        if !output.status.success() {
-            return Err(format!(
-                "failed to provision GitHub lifecycle label {label}: {}",
-                command_output(&output)
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn comment_github_issue(
-    gh_binary_path: &std::path::Path,
-    locator: &str,
-    source_id: &str,
-    body: &str,
-) -> Result<(), String> {
-    let output = Command::new(gh_binary_path)
-        .args([
-            "issue", "comment", source_id, "--repo", locator, "--body", body,
-        ])
-        .output()
-        .map_err(|error| format!("failed to comment on GitHub Source Issue: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "failed to comment on GitHub Source Issue: {}",
-            command_output(&output)
-        ))
-    }
-}
-
-fn create_github_change_proposal(
-    gh_binary_path: &std::path::Path,
-    source: &IssueSource,
-    issue: &SourceIssueSnapshot,
-    branch: &str,
-    worktree_path: &std::path::Path,
-) -> Result<String, String> {
-    let push = Command::new("git")
-        .current_dir(worktree_path)
-        .args(["push", "--set-upstream", "origin", branch])
-        .output()
-        .map_err(|error| format!("failed to push Change Proposal branch: {error}"))?;
-    if !push.status.success() {
-        return Err(format!(
-            "failed to push Change Proposal branch: {}",
-            command_output(&push)
-        ));
-    }
-
-    let body = format!("Fixes #{}\n\nCreated by agentic-afk.", issue.source_id);
-    let proposal = Command::new(gh_binary_path)
-        .args([
-            "pr",
-            "create",
-            "--repo",
-            &source.locator,
-            "--head",
-            branch,
-            "--title",
-            &issue.title,
-            "--body",
-            &body,
-        ])
-        .output()
-        .map_err(|error| format!("failed to create GitHub Change Proposal: {error}"))?;
-    if !proposal.status.success() {
-        return Err(format!(
-            "failed to create GitHub Change Proposal: {}",
-            command_output(&proposal)
-        ));
-    }
-    let url = String::from_utf8_lossy(&proposal.stdout).trim().to_string();
-    if url.is_empty() {
-        Err("GitHub Change Proposal creation did not return a URL".to_string())
-    } else {
-        comment_github_issue(
-            gh_binary_path,
-            &source.locator,
-            &issue.source_id,
-            &format!("Change Proposal created: {url}"),
-        )?;
-        Ok(url)
-    }
-}
-
-pub(crate) async fn refresh_local_markdown_after_change(
-    db: &Db,
-    project: &ProjectResponse,
-    source: &IssueSource,
-) -> Result<(), String> {
-    refresh_local_markdown_snapshot(db, project, source).await
-}
-
-pub(crate) fn write_assignment_lifecycle_for_abandon(
-    gh_binary_path: &std::path::Path,
-    project: &ProjectResponse,
-    source: &IssueSource,
-    source_id: &str,
-) -> Result<(), String> {
-    write_assignment_lifecycle(gh_binary_path, project, source, source_id, "ready")
-}
-
-async fn refresh_local_markdown_snapshot(
-    db: &Db,
-    project: &ProjectResponse,
-    source: &IssueSource,
-) -> Result<(), String> {
-    let issues = read_local_markdown_issues(&project.path, &source.locator)?;
-    persistence::replace_planning_snapshot(
-        db,
-        &project.id.0,
-        source,
-        &issues,
-        &current_sync_timestamp(),
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    Ok(())
 }
 
 fn read_local_markdown_issues(
@@ -1880,15 +1647,6 @@ fn github_locator_from_url(url: &str) -> Option<String> {
     }
 
     Some(format!("{owner}/{repo}"))
-}
-
-pub(crate) fn write_github_lifecycle_pub(
-    gh_binary_path: &std::path::Path,
-    locator: &str,
-    source_id: &str,
-    lifecycle_status: &str,
-) -> Result<(), String> {
-    write_github_lifecycle(gh_binary_path, locator, source_id, lifecycle_status)
 }
 
 pub(crate) fn persistence_error_to_response(err: PersistenceError) -> Response {

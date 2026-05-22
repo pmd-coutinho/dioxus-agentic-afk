@@ -1,8 +1,8 @@
 //! Single funnel for non-Activity `ProjectEvent` publishes (issue #32).
 //!
 //! Activity entries flow through [`crate::activity_publisher`] because they
-//! also append to the audit log. Other lifecycle events (Assignment, Change
-//! Proposal, Planning, Issue Source) are pure live-only deltas — they have no
+//! also append to the audit log. Other lifecycle events (Plan Run, Assignment,
+//! Planning, Issue Source) are pure live-only deltas — they have no
 //! corresponding audit-log row beyond the Activity entry that may already
 //! describe them. Routing them through this module keeps the audit trail of
 //! "where Project events get published" in one place rather than scattering

@@ -86,7 +86,9 @@ pub fn run_initial_codex(
     run_codex_exec(codex_binary_path, worktree_path, prompt)
 }
 
-/// Shared `codex exec` invocation used by initial, recovery, and repair Assignment Attempts.
+/// Shared `codex exec` invocation used by Plan Run Assignment Attempts
+/// (initial implementation, Review Loop re-implementation, review, and
+/// merge passes).
 pub fn run_codex_exec(
     codex_binary_path: &Path,
     worktree_path: &Path,
@@ -161,7 +163,7 @@ fn terminal_outcome_schema() -> &'static str {
   "additionalProperties": false,
   "required": ["outcome", "summary"],
   "properties": {
-    "outcome": { "type": "string", "enum": ["ReadyForProposal", "Blocked", "Failed"] },
+    "outcome": { "type": "string", "enum": ["ReadyForReview", "Blocked", "Failed"] },
     "summary": { "type": "string" }
   }
 }"#

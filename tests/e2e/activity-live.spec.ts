@@ -67,10 +67,10 @@ test('Activity panel updates live from SSE without a page reload', async ({
   const second = await request.post(
     `/api/_test/projects/${project.id}/activity`,
     {
-      data: { kind: 'change_proposal_opened', detail: 'second-event' },
+      data: { kind: 'plan_run_phase_completed', detail: 'second-event' },
     },
   );
   await expect(second).toBeOK();
-  await expect(page.getByText('change_proposal_opened')).toBeVisible();
+  await expect(page.getByText('plan_run_phase_completed')).toBeVisible();
   await expect(page.getByText('second-event')).toBeVisible();
 });

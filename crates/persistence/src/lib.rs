@@ -614,7 +614,7 @@ pub async fn get_assignment(
 }
 
 /// Fetch the persisted Source Issue raw text for an assignment, used when
-/// building repair prompts that need the original brief verbatim.
+/// building Plan Run implementation prompts that need the original brief verbatim.
 pub async fn get_assignment_source_raw_text(
     db: &Db,
     assignment_id: &str,
@@ -627,23 +627,6 @@ pub async fn get_assignment_source_raw_text(
     .await?
     .ok_or_else(|| PersistenceError::AssignmentNotFound(assignment_id.to_string()))?;
     Ok(row.0)
-}
-
-pub async fn get_active_assignment(
-    db: &Db,
-    project_id: &str,
-) -> Result<Option<IssueAssignmentResponse>, PersistenceError> {
-    let id = sqlx::query_as::<_, (String,)>(
-        "SELECT id FROM issue_assignments WHERE project_id = ? AND status != 'abandoned' ORDER BY rowid DESC LIMIT 1",
-    )
-    .bind(project_id)
-    .fetch_optional(db)
-    .await?
-    .map(|row| row.0);
-    match id {
-        Some(id) => get_issue_assignment(db, &id).await.map(Some),
-        None => Ok(None),
-    }
 }
 
 async fn update_assignment(
