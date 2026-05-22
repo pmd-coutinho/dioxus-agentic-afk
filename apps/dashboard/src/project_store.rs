@@ -9,7 +9,23 @@ use dioxus::prelude::*;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum MutationKey {
     TrustProject(ProjectId),
+    StartAssignment(ProjectId, SourceIssueId),
+    AbandonAssignment(ProjectId, IssueAssignmentId),
+    RecoverAssignment(ProjectId, IssueAssignmentId),
+    RefreshProposalState(ProjectId, IssueAssignmentId),
 }
+
+/// Identifier for a Source Issue (the upstream issue tracker's issue id).
+///
+/// Distinct from `IssueAssignmentId` so the type system rejects mistakes
+/// like keying a Start Assignment mutation by an assignment id.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SourceIssueId(pub String);
+
+/// Identifier for an Issue Assignment (a single attempt to land a Source
+/// Issue), distinct from `SourceIssueId`.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct IssueAssignmentId(pub String);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MutationCategory {
@@ -330,6 +346,32 @@ mod tests {
             })
         ));
         assert!(!table.is_pending(&key));
+    }
+
+    #[test]
+    fn assignment_keys_are_distinct_by_variant_and_id() {
+        let project = ProjectId("p1".to_string());
+        let source = SourceIssueId("issue-A".to_string());
+        let assignment = IssueAssignmentId("assn-A".to_string());
+
+        let mut table = MutationsTable::new();
+        let start = MutationKey::StartAssignment(project.clone(), source.clone());
+        let abandon = MutationKey::AbandonAssignment(project.clone(), assignment.clone());
+        let recover = MutationKey::RecoverAssignment(project.clone(), assignment.clone());
+        let refresh = MutationKey::RefreshProposalState(project.clone(), assignment.clone());
+
+        table.set_pending(start.clone());
+
+        assert!(table.is_pending(&start));
+        assert!(!table.is_pending(&abandon));
+        assert!(!table.is_pending(&recover));
+        assert!(!table.is_pending(&refresh));
+
+        // Same project + assignment id but different variant must not collide.
+        table.set_pending(abandon.clone());
+        assert!(table.is_pending(&abandon));
+        assert!(!table.is_pending(&recover));
+        assert!(!table.is_pending(&refresh));
     }
 
     #[test]
