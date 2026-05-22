@@ -184,6 +184,19 @@ pub async fn recover_assignment(
     let _ = worktree_path; // kept above for clarity that recovery reuses the same path.
     let _ = assignment_problem; // suppress unused-import warning when reusing helpers later.
 
+    crate::project_event_publisher::publish_assignment_status_changed(
+        &state.event_bus,
+        &project_id,
+        final_assignment.clone(),
+    );
+    if let Some(attempt) = final_assignment.latest_attempt.clone() {
+        crate::project_event_publisher::publish_assignment_attempt_added(
+            &state.event_bus,
+            &project_id,
+            &final_assignment.id,
+            attempt,
+        );
+    }
     let _ = crate::activity_publisher::record_project_activity(
         &state.db,
         &state.event_bus,

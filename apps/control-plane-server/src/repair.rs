@@ -233,6 +233,19 @@ async fn apply_repair_outcome(
         "failed" => "assignment_failed",
         _ => "assignment_blocked",
     };
+    crate::project_event_publisher::publish_assignment_status_changed(
+        &state.event_bus,
+        &assignment.project_id.0,
+        assignment.clone(),
+    );
+    if let Some(attempt) = assignment.latest_attempt.clone() {
+        crate::project_event_publisher::publish_assignment_attempt_added(
+            &state.event_bus,
+            &assignment.project_id.0,
+            &assignment.id,
+            attempt,
+        );
+    }
     let _ = crate::activity_publisher::record_project_activity(
         &state.db,
         &state.event_bus,
@@ -251,6 +264,15 @@ async fn apply_repair_outcome(
         )
         .await
         {
+            crate::project_event_publisher::publish_change_proposal_refreshed(
+                &state.event_bus,
+                &updated.project_id.0,
+                &updated.id,
+                updated
+                    .change_proposal
+                    .clone()
+                    .expect("proposal set above"),
+            );
             return updated;
         }
     }

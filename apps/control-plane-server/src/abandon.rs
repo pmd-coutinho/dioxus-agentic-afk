@@ -81,6 +81,11 @@ pub(crate) async fn abandon_assignment(
         }
     }
 
+    crate::project_event_publisher::publish_assignment_status_changed(
+        &state.event_bus,
+        &project_id,
+        abandoned.clone(),
+    );
     let _ = crate::activity_publisher::record_project_activity(
         &state.db,
         &state.event_bus,

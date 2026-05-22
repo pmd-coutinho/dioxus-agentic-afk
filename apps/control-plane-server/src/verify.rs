@@ -120,6 +120,11 @@ pub(crate) async fn refresh_proposal_state(
             Ok(assignment) => assignment,
             Err(error) => return persistence_error_to_response(error),
         };
+        crate::project_event_publisher::publish_assignment_status_changed(
+            &state.event_bus,
+            &project_id,
+            updated.clone(),
+        );
         let _ = crate::activity_publisher::record_project_activity(
             &state.db,
             &state.event_bus,
@@ -163,8 +168,17 @@ pub(crate) async fn refresh_proposal_state(
 
     let updated = match check_state {
         CheckState::Pending => {
-            // No transition. Return the current assignment so the dashboard
-            // can refresh its view.
+            // No transition. Publish a refreshed Change Proposal delta so
+            // the live Dashboard can re-render with the latest known
+            // proposal state even though persistence did not change.
+            if let Some(proposal) = assignment.change_proposal.clone() {
+                crate::project_event_publisher::publish_change_proposal_refreshed(
+                    &state.event_bus,
+                    &project_id,
+                    &assignment.id,
+                    proposal,
+                );
+            }
             assignment
         }
         CheckState::Passing => {
@@ -173,6 +187,19 @@ pub(crate) async fn refresh_proposal_state(
                     Ok(assignment) => assignment,
                     Err(error) => return persistence_error_to_response(error),
                 };
+            if let Some(proposal) = verified.change_proposal.clone() {
+                crate::project_event_publisher::publish_change_proposal_verified(
+                    &state.event_bus,
+                    &project_id,
+                    &verified.id,
+                    proposal,
+                );
+            }
+            crate::project_event_publisher::publish_assignment_status_changed(
+                &state.event_bus,
+                &project_id,
+                verified.clone(),
+            );
             let _ = crate::activity_publisher::record_project_activity(
                 &state.db,
                 &state.event_bus,
@@ -206,6 +233,11 @@ pub(crate) async fn refresh_proposal_state(
                 Ok(assignment) => assignment,
                 Err(error) => return persistence_error_to_response(error),
             };
+            crate::project_event_publisher::publish_assignment_status_changed(
+                &state.event_bus,
+                &project_id,
+                failing.clone(),
+            );
             let _ = crate::activity_publisher::record_project_activity(
                 &state.db,
                 &state.event_bus,

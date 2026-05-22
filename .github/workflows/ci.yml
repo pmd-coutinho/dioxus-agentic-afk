@@ -10,13 +10,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Install only `rust` and `node` via mise; skip `cargo:dioxus-cli`,
+      # `cargo:bacon`, and `codex` (slow source builds; not needed for CI:
+      # bacon is dev-only, dioxus-cli is installed below via cargo-binstall,
+      # and codex is never executed because Playwright mocks the assignment
+      # routes — see playwright.config.ts AGENTIC_AFK_TEST_ENDPOINTS=1).
       - uses: jdx/mise-action@v2
+        with:
+          install_args: "rust node"
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall --no-confirm --locked dioxus-cli@0.7.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      # Warm the Rust toolchain + build artifacts sequentially before
-      # the parallel `ci` task fan-out. Otherwise multiple mise tasks
-      # invoke rustup concurrently and race on
-      # ~/.rustup/downloads/*.partial -> "could not rename downloaded
-      # file ... No such file or directory" (os error 2).
       - run: mise run build
       - run: mise run ci
