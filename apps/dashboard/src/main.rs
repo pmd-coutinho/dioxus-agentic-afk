@@ -650,16 +650,18 @@ fn PlanRunCard(
 #[component]
 fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
     let tone = match assignment.status.as_str() {
-        "claimed" => PillTone::Running,
-        "provisional" => PillTone::Pending,
+        "reviewed" => PillTone::Verified,
+        "implemented" | "claimed" | "implementing" => PillTone::Running,
+        "rejected" | "blocked" => PillTone::Failed,
         _ => PillTone::Pending,
     };
     let summary = assignment
         .selection_summary
         .clone()
         .unwrap_or_else(|| String::from("(no selection summary)"));
+    let phase_outputs = assignment.phase_outputs.clone();
     rsx! {
-        div { class: "flex flex-col gap-0.5 rounded border border-line/40 bg-surface-2/40 p-2",
+        div { class: "flex flex-col gap-1 rounded border border-line/40 bg-surface-2/40 p-2",
             "data-testid": "plan-run-assignment-row",
             div { class: "flex items-center gap-2",
                 StatusPill { tone, label: assignment.status.clone() }
@@ -669,6 +671,39 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
             }
             p { class: "font-mono text-[11px] text-ink-2", "{assignment.branch}" }
             p { class: "text-[11px] text-ink-2", "{summary}" }
+            if !phase_outputs.is_empty() {
+                div { class: "mt-1 flex flex-col gap-0.5",
+                    "data-testid": "assignment-phase-outputs",
+                    for phase_output in phase_outputs.iter() {
+                        AssignmentPhaseOutputRow { phase_output: phase_output.clone() }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AssignmentPhaseOutputRow(
+    phase_output: agentic_afk_contracts::PhaseOutputResponse,
+) -> Element {
+    let tone = match phase_output.outcome.as_str() {
+        "ready_for_review" | "approved" => PillTone::Verified,
+        "rejected" | "failed" | "blocked" => PillTone::Failed,
+        _ => PillTone::Pending,
+    };
+    let summary = phase_output
+        .body_json
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    rsx! {
+        div { class: "flex items-center gap-2", "data-testid": "assignment-phase-output-row",
+            StatusPill { tone, label: format!("{} {}", phase_output.phase, phase_output.outcome) }
+            if !summary.is_empty() {
+                p { class: "text-[11px] text-ink-2", "{summary}" }
+            }
         }
     }
 }

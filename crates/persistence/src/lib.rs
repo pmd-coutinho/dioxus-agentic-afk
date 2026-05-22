@@ -24,8 +24,8 @@ pub use activity::{
 };
 pub use plan_run::{
     create_plan_run, finish_plan_run, get_active_plan_run, get_plan_run,
-    get_project_execution_config, list_recent_plan_runs, record_plan_run_phase_output,
-    set_project_execution_config,
+    get_project_execution_config, list_assignment_phase_outputs, list_recent_plan_runs,
+    record_assignment_phase_output, record_plan_run_phase_output, set_project_execution_config,
 };
 
 // Re-export new Plan Run assignment helpers at the crate root for
@@ -752,6 +752,7 @@ pub(crate) async fn get_issue_assignment(
                 }
             },
         );
+    let phase_outputs = list_assignment_phase_outputs(db, &id).await?;
     Ok(IssueAssignmentResponse {
         id,
         project_id: ProjectId(project_id),
@@ -764,6 +765,7 @@ pub(crate) async fn get_issue_assignment(
         latest_attempt,
         plan_run_id,
         selection_summary,
+        phase_outputs,
     })
 }
 

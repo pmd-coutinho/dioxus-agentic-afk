@@ -507,6 +507,7 @@ mod tests {
             latest_attempt: None,
             plan_run_id: None,
             selection_summary: None,
+            phase_outputs: vec![],
         }
     }
 
@@ -956,6 +957,7 @@ mod tests {
             outcome: outcome.to_string(),
             body_json: serde_json::json!({"issues":[]}),
             recorded_at: "0".to_string(),
+            assignment_id: None,
         }
     }
 
@@ -1050,6 +1052,46 @@ mod tests {
             active.assignments[0].selection_summary.as_deref(),
             Some("baseline ready")
         );
+    }
+
+    #[test]
+    fn assignment_status_changed_mirrors_phase_outputs_into_active_plan_run() {
+        let mut state = ProjectStoreState::new();
+        state.hydrate(snapshot_with_activity(vec![]), 0);
+        state.apply_event(
+            1,
+            ProjectEvent::PlanRunStarted(plan_run_response("pr1", "running")),
+        );
+        let mut created = assignment("a1", "claimed");
+        created.plan_run_id = Some("pr1".to_string());
+        state.apply_event(2, ProjectEvent::AssignmentCreated(created));
+
+        // Status change carries an updated assignment with new phase outputs;
+        // the store must mirror it into the active Plan Run.
+        let mut reviewed = assignment("a1", "reviewed");
+        reviewed.plan_run_id = Some("pr1".to_string());
+        reviewed.phase_outputs = vec![
+            agentic_afk_contracts::PhaseOutputResponse {
+                phase: "implementation".to_string(),
+                outcome: "ready_for_review".to_string(),
+                body_json: serde_json::json!({}),
+                recorded_at: "0".to_string(),
+                assignment_id: Some("a1".to_string()),
+            },
+            agentic_afk_contracts::PhaseOutputResponse {
+                phase: "review".to_string(),
+                outcome: "approved".to_string(),
+                body_json: serde_json::json!({}),
+                recorded_at: "0".to_string(),
+                assignment_id: Some("a1".to_string()),
+            },
+        ];
+        state.apply_event(3, ProjectEvent::AssignmentStatusChanged(reviewed));
+        let active = state.active_plan_run.as_ref().unwrap();
+        assert_eq!(active.assignments.len(), 1);
+        assert_eq!(active.assignments[0].status, "reviewed");
+        assert_eq!(active.assignments[0].phase_outputs.len(), 2);
+        assert_eq!(active.assignments[0].phase_outputs[1].outcome, "approved");
     }
 
     #[test]

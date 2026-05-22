@@ -230,7 +230,9 @@ async fn planning_phase_claims_one_eligible_issue() {
     let assignment = &run.assignments[0];
     assert_eq!(assignment.source_id, "42");
     assert_eq!(assignment.branch, "agent/issue-42");
-    assert_eq!(assignment.status, "claimed");
+    // With #43 the assignment runs implementation + review immediately
+    // after claim using the default stub fakes; both reach `reviewed`.
+    assert_eq!(assignment.status, "reviewed");
     assert_eq!(assignment.plan_run_id.as_deref(), Some(run.id.as_str()));
     assert_eq!(
         assignment.selection_summary.as_deref(),
@@ -427,7 +429,7 @@ async fn snapshot_exposes_claimed_assignment_inside_active_plan_run() {
         .expect("active Plan Run after claim");
     assert_eq!(active.assignments.len(), 1);
     assert_eq!(active.assignments[0].source_id, "42");
-    assert_eq!(active.assignments[0].status, "claimed");
+    assert_eq!(active.assignments[0].status, "reviewed");
 
     // Planning snapshot remains visible alongside the active Plan Run.
     let planning = snapshot

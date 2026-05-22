@@ -16,11 +16,14 @@ use agentic_afk_orchestrator::{
     codex_process_identity, create_assignment_worktree, preflight_binary, run_initial_codex,
 };
 pub use agentic_afk_orchestrator::{
-    AssignmentWorktreeProvisioner, FakeLifecycleWriter, FakePlanningPhaseRunner,
-    FakeWorktreeProvisioner, IntegrationBranchRefresher, IssueLifecycleWriter, PlanRunPhaseError,
-    PlannerSelection, PlanningPhaseRunner, RefreshedBaseline, StaticIntegrationBranchRefresher,
+    AssignmentWorktreeProvisioner, FakeImplementationPhaseRunner, FakeLifecycleWriter,
+    FakePlanningPhaseRunner, FakeReviewPhaseRunner, FakeWorktreeProvisioner,
+    ImplementationPhaseRunner, IntegrationBranchRefresher, IssueLifecycleWriter, PlanRunPhaseError,
+    PlannerSelection, PlanningPhaseRunner, RefreshedBaseline, ReviewPhaseRunner,
+    StaticIntegrationBranchRefresher, UnimplementedImplementationPhaseRunner,
     UnimplementedIntegrationBranchRefresher, UnimplementedLifecycleWriter,
-    UnimplementedPlanningPhaseRunner, UnimplementedWorktreeProvisioner,
+    UnimplementedPlanningPhaseRunner, UnimplementedReviewPhaseRunner,
+    UnimplementedWorktreeProvisioner,
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 use axum::extract::{Path, State};
@@ -106,6 +109,8 @@ pub struct PlanRunDeps {
     pub planner: Arc<dyn PlanningPhaseRunner>,
     pub worktree: Arc<dyn AssignmentWorktreeProvisioner>,
     pub lifecycle: Arc<dyn IssueLifecycleWriter>,
+    pub implementation: Arc<dyn ImplementationPhaseRunner>,
+    pub review: Arc<dyn ReviewPhaseRunner>,
 }
 
 impl PlanRunDeps {
@@ -115,6 +120,8 @@ impl PlanRunDeps {
             planner: Arc::new(UnimplementedPlanningPhaseRunner),
             worktree: Arc::new(UnimplementedWorktreeProvisioner),
             lifecycle: Arc::new(UnimplementedLifecycleWriter),
+            implementation: Arc::new(UnimplementedImplementationPhaseRunner),
+            review: Arc::new(UnimplementedReviewPhaseRunner),
         }
     }
 }
@@ -196,15 +203,34 @@ fn plan_run_deps_from_env() -> PlanRunDeps {
         commit_sha: "test-baseline".to_string(),
     }));
     let planner = Arc::new(FakePlanningPhaseRunner::with_stdout(stdout));
-    let worktree = Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir().join(
-        "agentic-afk-test-worktrees",
-    )));
-    let lifecycle = Arc::new(FakeLifecycleWriter::new());
     PlanRunDeps {
         refresher,
         planner,
-        worktree,
-        lifecycle,
+        ..default_test_deps()
+    }
+}
+
+/// Default fakes for the worktree/lifecycle/implementation/review seams,
+/// used by the `*_with_plan_run_deps*` builders so existing callers don't
+/// have to wire the full graph.
+fn default_test_deps() -> PlanRunDeps {
+    PlanRunDeps {
+        refresher: Arc::new(StaticIntegrationBranchRefresher::new(RefreshedBaseline {
+            commit_sha: "test-baseline".to_string(),
+        })),
+        planner: Arc::new(FakePlanningPhaseRunner::with_stdout(
+            r#"<plan>{"issues":[],"summary":"none"}</plan>"#,
+        )),
+        worktree: Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir().join(
+            "agentic-afk-test-worktrees",
+        ))),
+        lifecycle: Arc::new(FakeLifecycleWriter::new()),
+        implementation: Arc::new(FakeImplementationPhaseRunner::with_stdout(
+            r#"<impl>{"outcome":"ready_for_review","summary":"stub","commits":[],"verification":[],"gaps":[]}</impl>"#,
+        )),
+        review: Arc::new(FakeReviewPhaseRunner::with_stdout(
+            r#"<review>{"outcome":"approved","findings":[],"summary":"stub approved","verification":[],"gaps":[]}</review>"#,
+        )),
     }
 }
 
@@ -230,10 +256,7 @@ pub fn router_with_plan_run_deps(
         PlanRunDeps {
             refresher,
             planner,
-            worktree: Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir().join(
-                "agentic-afk-test-worktrees",
-            ))),
-            lifecycle: Arc::new(FakeLifecycleWriter::new()),
+            ..default_test_deps()
         },
     )
 }
@@ -255,10 +278,7 @@ pub fn router_with_plan_run_deps_and_bus(
         PlanRunDeps {
             refresher,
             planner,
-            worktree: Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir().join(
-                "agentic-afk-test-worktrees",
-            ))),
-            lifecycle: Arc::new(FakeLifecycleWriter::new()),
+            ..default_test_deps()
         },
     )
 }
@@ -275,6 +295,35 @@ pub fn router_with_plan_run_full_deps(
     worktree: Arc<dyn AssignmentWorktreeProvisioner>,
     lifecycle: Arc<dyn IssueLifecycleWriter>,
 ) -> Router {
+    router_with_plan_run_all_deps(
+        config,
+        db,
+        refresher,
+        planner,
+        worktree,
+        lifecycle,
+        Arc::new(FakeImplementationPhaseRunner::with_stdout(
+            r#"<impl>{"outcome":"ready_for_review","summary":"stub","commits":[],"verification":[],"gaps":[]}</impl>"#,
+        )),
+        Arc::new(FakeReviewPhaseRunner::with_stdout(
+            r#"<review>{"outcome":"approved","findings":[],"summary":"stub approved","verification":[],"gaps":[]}</review>"#,
+        )),
+    )
+}
+
+/// Build a router with every Plan Run dependency seam injected
+/// (planning, claim, implementation, review). Used by tests that drive
+/// the full Plan Run flow.
+pub fn router_with_plan_run_all_deps(
+    config: ControlPlaneConfig,
+    db: Db,
+    refresher: Arc<dyn IntegrationBranchRefresher>,
+    planner: Arc<dyn PlanningPhaseRunner>,
+    worktree: Arc<dyn AssignmentWorktreeProvisioner>,
+    lifecycle: Arc<dyn IssueLifecycleWriter>,
+    implementation: Arc<dyn ImplementationPhaseRunner>,
+    review: Arc<dyn ReviewPhaseRunner>,
+) -> Router {
     router_with_full_deps(
         config,
         db,
@@ -284,6 +333,8 @@ pub fn router_with_plan_run_full_deps(
             planner,
             worktree,
             lifecycle,
+            implementation,
+            review,
         },
     )
 }
@@ -2260,15 +2311,365 @@ async fn finalize_selection_planning(
         phase_output,
     );
 
-    // Leave the Plan Run in `running` state: planning succeeded and the
-    // assignment is claimed, but later phases (#43+) own the terminal
-    // transition. The active_plan_run snapshot will surface the claimed
-    // assignment.
+    // Issue #43: run one implementation pass followed by an approving
+    // Review Phase. Reject paths land in #44; a rejected review here
+    // terminates the Plan Run as failed.
+    if let Err(response) =
+        run_implementation_and_review(state, project, project_id, plan_run, baseline, &assignment)
+            .await
+    {
+        return response;
+    }
+
     let refreshed = match persistence::get_plan_run(&state.db, &plan_run.id).await {
         Ok(run) => run,
         Err(error) => return persistence_error_to_response(error),
     };
     (StatusCode::CREATED, Json(refreshed)).into_response()
+}
+
+async fn run_implementation_and_review(
+    state: &AppState,
+    project: &ProjectResponse,
+    project_id: &str,
+    plan_run: &PlanRunResponse,
+    baseline: &RefreshedBaseline,
+    assignment: &IssueAssignmentResponse,
+) -> Result<(), Response> {
+    let project_instructions = load_project_instructions(&project.path);
+    let raw_text = persistence::get_assignment_source_raw_text(&state.db, &assignment.id)
+        .await
+        .map_err(persistence_error_to_response)?;
+    let exec_config =
+        match persistence::get_project_execution_config(&state.db, project_id).await {
+            Ok(Some(cfg)) => cfg,
+            Ok(None) => {
+                return Err(fail_assignment(
+                    state,
+                    project_id,
+                    plan_run,
+                    assignment,
+                    "implementation",
+                    "Project Execution Config disappeared between claim and implementation",
+                    "urn:agentic-afk:execution-config-missing",
+                )
+                .await);
+            }
+            Err(error) => return Err(persistence_error_to_response(error)),
+        };
+
+    // Transition assignment status -> implementing.
+    let assignment_state = match persistence::set_assignment_status(
+        &state.db,
+        &assignment.id,
+        "implementing",
+        None,
+    )
+    .await
+    {
+        Ok(state) => state,
+        Err(error) => return Err(persistence_error_to_response(error)),
+    };
+    crate::project_event_publisher::publish_assignment_status_changed(
+        &state.event_bus,
+        project_id,
+        assignment_state,
+    );
+
+    let impl_prompt = render_implementation_prompt(
+        &project_instructions,
+        project,
+        plan_run,
+        baseline,
+        &exec_config,
+        assignment,
+        &raw_text,
+    );
+    let impl_stdout = match state.plan_run_deps.implementation.run(&impl_prompt) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            return Err(fail_assignment(
+                state,
+                project_id,
+                plan_run,
+                assignment,
+                "implementation",
+                &error.to_string(),
+                "urn:agentic-afk:implementation-phase-failed",
+            )
+            .await);
+        }
+    };
+    let impl_parsed = match agentic_afk_orchestrator::parse_implementation_output(&impl_stdout) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Err(fail_assignment(
+                state,
+                project_id,
+                plan_run,
+                assignment,
+                "implementation",
+                &error,
+                "urn:agentic-afk:implementation-output-unparseable",
+            )
+            .await);
+        }
+    };
+    if impl_parsed.outcome != "ready_for_review" {
+        return Err(fail_assignment(
+            state,
+            project_id,
+            plan_run,
+            assignment,
+            "implementation",
+            &format!(
+                "implementation outcome `{}` does not enter Review Phase in this slice",
+                impl_parsed.outcome
+            ),
+            "urn:agentic-afk:implementation-not-ready",
+        )
+        .await);
+    }
+    let impl_output = persistence::record_assignment_phase_output(
+        &state.db,
+        &plan_run.id,
+        &assignment.id,
+        "implementation",
+        &impl_parsed.outcome,
+        &impl_parsed.body,
+    )
+    .await
+    .map_err(persistence_error_to_response)?;
+    crate::project_event_publisher::publish_plan_run_phase_completed(
+        &state.event_bus,
+        project_id,
+        &plan_run.id,
+        impl_output.clone(),
+    );
+
+    let assignment_state = match persistence::set_assignment_status(
+        &state.db,
+        &assignment.id,
+        "implemented",
+        None,
+    )
+    .await
+    {
+        Ok(state) => state,
+        Err(error) => return Err(persistence_error_to_response(error)),
+    };
+    crate::project_event_publisher::publish_assignment_status_changed(
+        &state.event_bus,
+        project_id,
+        assignment_state,
+    );
+
+    let review_prompt = render_review_prompt(
+        &project_instructions,
+        project,
+        plan_run,
+        baseline,
+        &exec_config,
+        assignment,
+        &raw_text,
+        &impl_parsed.body,
+    );
+    let review_stdout = match state.plan_run_deps.review.run(&review_prompt) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            return Err(fail_assignment(
+                state,
+                project_id,
+                plan_run,
+                assignment,
+                "review",
+                &error.to_string(),
+                "urn:agentic-afk:review-phase-failed",
+            )
+            .await);
+        }
+    };
+    let review_parsed = match agentic_afk_orchestrator::parse_review_output(&review_stdout) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Err(fail_assignment(
+                state,
+                project_id,
+                plan_run,
+                assignment,
+                "review",
+                &error,
+                "urn:agentic-afk:review-output-unparseable",
+            )
+            .await);
+        }
+    };
+    let review_output = persistence::record_assignment_phase_output(
+        &state.db,
+        &plan_run.id,
+        &assignment.id,
+        "review",
+        &review_parsed.outcome,
+        &review_parsed.body,
+    )
+    .await
+    .map_err(persistence_error_to_response)?;
+    crate::project_event_publisher::publish_plan_run_phase_completed(
+        &state.event_bus,
+        project_id,
+        &plan_run.id,
+        review_output.clone(),
+    );
+
+    if review_parsed.outcome != "approved" {
+        // The Review Loop (issue #44) will turn this into another
+        // implementation pass. This slice surfaces the rejection by
+        // marking the assignment as `rejected` and the Plan Run as
+        // failed.
+        let rejected = persistence::set_assignment_status(
+            &state.db,
+            &assignment.id,
+            "rejected",
+            Some("review rejected; Review Loop not implemented in this slice"),
+        )
+        .await
+        .map_err(persistence_error_to_response)?;
+        crate::project_event_publisher::publish_assignment_status_changed(
+            &state.event_bus,
+            project_id,
+            rejected,
+        );
+        if let Ok(run) =
+            persistence::finish_plan_run(&state.db, &plan_run.id, "failed").await
+        {
+            crate::project_event_publisher::publish_plan_run_completed(
+                &state.event_bus,
+                project_id,
+                run,
+            );
+        }
+        return Err(sync_problem_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "urn:agentic-afk:review-rejected",
+            "Internal Server Error",
+            "Review Phase rejected the assignment".to_string(),
+        ));
+    }
+
+    let reviewed = persistence::set_assignment_status(&state.db, &assignment.id, "reviewed", None)
+        .await
+        .map_err(persistence_error_to_response)?;
+    crate::project_event_publisher::publish_assignment_status_changed(
+        &state.event_bus,
+        project_id,
+        reviewed,
+    );
+    Ok(())
+}
+
+async fn fail_assignment(
+    state: &AppState,
+    project_id: &str,
+    plan_run: &PlanRunResponse,
+    assignment: &IssueAssignmentResponse,
+    phase: &str,
+    error: &str,
+    problem_type: &str,
+) -> Response {
+    let _ = persistence::record_assignment_phase_output(
+        &state.db,
+        &plan_run.id,
+        &assignment.id,
+        phase,
+        "failed",
+        &serde_json::json!({ "error": error }),
+    )
+    .await;
+    if let Ok(updated) =
+        persistence::set_assignment_status(&state.db, &assignment.id, "blocked", Some(error)).await
+    {
+        crate::project_event_publisher::publish_assignment_status_changed(
+            &state.event_bus,
+            project_id,
+            updated,
+        );
+    }
+    if let Ok(run) = persistence::finish_plan_run(&state.db, &plan_run.id, "failed").await {
+        crate::project_event_publisher::publish_plan_run_completed(
+            &state.event_bus,
+            project_id,
+            run,
+        );
+    }
+    sync_problem_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        problem_type,
+        "Internal Server Error",
+        error.to_string(),
+    )
+}
+
+fn load_project_instructions(project_path: &str) -> String {
+    for candidate in ["AGENTS.md", "CLAUDE.md", "PROJECT.md"] {
+        if let Ok(text) =
+            std::fs::read_to_string(std::path::Path::new(project_path).join(candidate))
+        {
+            return text;
+        }
+    }
+    String::new()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_implementation_prompt(
+    project_instructions: &str,
+    project: &ProjectResponse,
+    plan_run: &PlanRunResponse,
+    baseline: &RefreshedBaseline,
+    config: &ProjectExecutionConfigResponse,
+    assignment: &IssueAssignmentResponse,
+    source_issue_brief: &str,
+) -> String {
+    let template = include_str!("../../../crates/orchestrator/prompts/plan-run/implement.md");
+    template
+        .replace("{{PROJECT_INSTRUCTIONS}}", project_instructions)
+        .replace("{{PROJECT_NAME}}", &project.path)
+        .replace("{{PLAN_RUN_ID}}", &plan_run.id)
+        .replace("{{PLAN_RUN_BASELINE}}", &baseline.commit_sha)
+        .replace("{{INTEGRATION_BRANCH}}", &config.integration_branch)
+        .replace("{{SOURCE_ISSUE_ID}}", &assignment.source_id)
+        .replace("{{SOURCE_ISSUE_TITLE}}", &assignment.source_title)
+        .replace("{{ISSUE_BRANCH}}", &assignment.branch)
+        .replace("{{SOURCE_ISSUE_BRIEF}}", source_issue_brief)
+        .replace("{{REVIEW_FINDINGS}}", "")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_review_prompt(
+    project_instructions: &str,
+    project: &ProjectResponse,
+    plan_run: &PlanRunResponse,
+    baseline: &RefreshedBaseline,
+    config: &ProjectExecutionConfigResponse,
+    assignment: &IssueAssignmentResponse,
+    source_issue_brief: &str,
+    impl_body: &serde_json::Value,
+) -> String {
+    let template = include_str!("../../../crates/orchestrator/prompts/plan-run/review.md");
+    template
+        .replace("{{PROJECT_INSTRUCTIONS}}", project_instructions)
+        .replace("{{PROJECT_NAME}}", &project.path)
+        .replace("{{PLAN_RUN_ID}}", &plan_run.id)
+        .replace("{{PLAN_RUN_BASELINE}}", &baseline.commit_sha)
+        .replace("{{INTEGRATION_BRANCH}}", &config.integration_branch)
+        .replace("{{SOURCE_ISSUE_ID}}", &assignment.source_id)
+        .replace("{{SOURCE_ISSUE_TITLE}}", &assignment.source_title)
+        .replace("{{ISSUE_BRANCH}}", &assignment.branch)
+        .replace("{{SOURCE_ISSUE_BRIEF}}", source_issue_brief)
+        .replace(
+            "{{IMPLEMENTATION_PHASE_OUTPUT}}",
+            &serde_json::to_string_pretty(impl_body).unwrap_or_default(),
+        )
 }
 
 async fn fail_planning_phase(

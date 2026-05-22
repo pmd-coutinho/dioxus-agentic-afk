@@ -96,6 +96,39 @@ pub async fn record_plan_run_phase_output(
     outcome: &str,
     body_json: &serde_json::Value,
 ) -> Result<PhaseOutputResponse, PersistenceError> {
+    record_phase_output(db, plan_run_id, None, phase, outcome, body_json).await
+}
+
+/// Record a Phase Output attributed to a particular Issue Assignment
+/// (implementation / review). The plan_run_id is the assignment's owning
+/// Plan Run.
+pub async fn record_assignment_phase_output(
+    db: &Db,
+    plan_run_id: &str,
+    assignment_id: &str,
+    phase: &str,
+    outcome: &str,
+    body_json: &serde_json::Value,
+) -> Result<PhaseOutputResponse, PersistenceError> {
+    record_phase_output(
+        db,
+        plan_run_id,
+        Some(assignment_id),
+        phase,
+        outcome,
+        body_json,
+    )
+    .await
+}
+
+async fn record_phase_output(
+    db: &Db,
+    plan_run_id: &str,
+    assignment_id: Option<&str>,
+    phase: &str,
+    outcome: &str,
+    body_json: &serde_json::Value,
+) -> Result<PhaseOutputResponse, PersistenceError> {
     let id = Uuid::new_v4().to_string();
     let body_text = serde_json::to_string(body_json)
         .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
@@ -103,9 +136,9 @@ pub async fn record_plan_run_phase_output(
     sqlx::query(
         r#"
         INSERT INTO plan_run_phase_outputs (
-            id, plan_run_id, phase, outcome, body_json, recorded_at
+            id, plan_run_id, phase, outcome, body_json, recorded_at, assignment_id
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
@@ -114,6 +147,7 @@ pub async fn record_plan_run_phase_output(
     .bind(outcome)
     .bind(&body_text)
     .bind(&recorded_at)
+    .bind(assignment_id)
     .execute(db)
     .await?;
     Ok(PhaseOutputResponse {
@@ -121,7 +155,39 @@ pub async fn record_plan_run_phase_output(
         outcome: outcome.to_string(),
         body_json: body_json.clone(),
         recorded_at,
+        assignment_id: assignment_id.map(str::to_owned),
     })
+}
+
+/// List Phase Outputs attributed to one Issue Assignment, oldest first.
+pub async fn list_assignment_phase_outputs(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<Vec<PhaseOutputResponse>, PersistenceError> {
+    let rows = sqlx::query_as::<_, (String, String, String, String)>(
+        r#"
+        SELECT phase, outcome, body_json, recorded_at
+        FROM plan_run_phase_outputs
+        WHERE assignment_id = ?
+        ORDER BY recorded_at ASC, rowid ASC
+        "#,
+    )
+    .bind(assignment_id)
+    .fetch_all(db)
+    .await?;
+    rows.into_iter()
+        .map(|(phase, outcome, body_text, recorded_at)| {
+            let body_json: serde_json::Value = serde_json::from_str(&body_text)
+                .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
+            Ok(PhaseOutputResponse {
+                phase,
+                outcome,
+                body_json,
+                recorded_at,
+                assignment_id: Some(assignment_id.to_string()),
+            })
+        })
+        .collect()
 }
 
 /// Transition a Plan Run to a terminal state and stamp `finished_at`.
@@ -172,9 +238,9 @@ async fn list_phase_outputs(
     db: &Db,
     plan_run_id: &str,
 ) -> Result<Vec<PhaseOutputResponse>, PersistenceError> {
-    let rows = sqlx::query_as::<_, (String, String, String, String)>(
+    let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>)>(
         r#"
-        SELECT phase, outcome, body_json, recorded_at
+        SELECT phase, outcome, body_json, recorded_at, assignment_id
         FROM plan_run_phase_outputs
         WHERE plan_run_id = ?
         ORDER BY recorded_at ASC, rowid ASC
@@ -184,7 +250,7 @@ async fn list_phase_outputs(
     .fetch_all(db)
     .await?;
     rows.into_iter()
-        .map(|(phase, outcome, body_text, recorded_at)| {
+        .map(|(phase, outcome, body_text, recorded_at, assignment_id)| {
             let body_json: serde_json::Value = serde_json::from_str(&body_text)
                 .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
             Ok(PhaseOutputResponse {
@@ -192,6 +258,7 @@ async fn list_phase_outputs(
                 outcome,
                 body_json,
                 recorded_at,
+                assignment_id,
             })
         })
         .collect()

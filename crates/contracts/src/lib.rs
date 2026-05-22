@@ -135,6 +135,11 @@ pub struct IssueAssignmentResponse {
     /// this Source Issue for the Plan Run.
     #[serde(default)]
     pub selection_summary: Option<String>,
+    /// Implementation and review Phase Outputs recorded against this
+    /// assignment, oldest first. Empty for `provisional` / freshly
+    /// `claimed` assignments that have not yet run a phase.
+    #[serde(default)]
+    pub phase_outputs: Vec<PhaseOutputResponse>,
 }
 
 // --- Plan Run contracts (ADR-0034) ---
@@ -182,6 +187,11 @@ pub struct PhaseOutputResponse {
     pub outcome: String,
     pub body_json: serde_json::Value,
     pub recorded_at: String,
+    /// Owning Issue Assignment when this Phase Output came from an
+    /// implementation or review pass. `None` for the planning Phase
+    /// Output of a Plan Run.
+    #[serde(default)]
+    pub assignment_id: Option<String>,
 }
 
 /// One agent execution pass within an Issue Assignment.

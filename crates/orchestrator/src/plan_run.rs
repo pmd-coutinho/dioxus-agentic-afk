@@ -107,6 +107,155 @@ impl IntegrationBranchRefresher for UnimplementedIntegrationBranchRefresher {
     }
 }
 
+/// Execute an Implementation Phase prompt and return raw agent stdout for
+/// the Plan Run coordinator to parse.
+pub trait ImplementationPhaseRunner: Send + Sync {
+    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError>;
+}
+
+/// Execute a Review Phase prompt and return raw agent stdout.
+pub trait ReviewPhaseRunner: Send + Sync {
+    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError>;
+}
+
+/// Test runner that returns canned stdout and records the last prompt.
+pub struct FakeImplementationPhaseRunner {
+    stdout: String,
+    last_prompt: Mutex<Option<String>>,
+}
+
+impl FakeImplementationPhaseRunner {
+    pub fn with_stdout(stdout: impl Into<String>) -> Self {
+        Self {
+            stdout: stdout.into(),
+            last_prompt: Mutex::new(None),
+        }
+    }
+
+    pub fn last_prompt(&self) -> Option<String> {
+        self.last_prompt.lock().unwrap().clone()
+    }
+}
+
+impl ImplementationPhaseRunner for FakeImplementationPhaseRunner {
+    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+        *self.last_prompt.lock().unwrap() = Some(prompt.to_string());
+        Ok(self.stdout.clone())
+    }
+}
+
+pub struct FakeReviewPhaseRunner {
+    stdout: String,
+    last_prompt: Mutex<Option<String>>,
+}
+
+impl FakeReviewPhaseRunner {
+    pub fn with_stdout(stdout: impl Into<String>) -> Self {
+        Self {
+            stdout: stdout.into(),
+            last_prompt: Mutex::new(None),
+        }
+    }
+
+    pub fn last_prompt(&self) -> Option<String> {
+        self.last_prompt.lock().unwrap().clone()
+    }
+}
+
+impl ReviewPhaseRunner for FakeReviewPhaseRunner {
+    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+        *self.last_prompt.lock().unwrap() = Some(prompt.to_string());
+        Ok(self.stdout.clone())
+    }
+}
+
+pub struct UnimplementedImplementationPhaseRunner;
+
+impl ImplementationPhaseRunner for UnimplementedImplementationPhaseRunner {
+    fn run(&self, _prompt: &str) -> Result<String, PlanRunPhaseError> {
+        Err(PlanRunPhaseError::Planning(
+            "real Codex implementation runner not implemented yet".to_string(),
+        ))
+    }
+}
+
+pub struct UnimplementedReviewPhaseRunner;
+
+impl ReviewPhaseRunner for UnimplementedReviewPhaseRunner {
+    fn run(&self, _prompt: &str) -> Result<String, PlanRunPhaseError> {
+        Err(PlanRunPhaseError::Planning(
+            "real Codex review runner not implemented yet".to_string(),
+        ))
+    }
+}
+
+/// Parse the JSON body wrapped in `<impl>...</impl>` returned by the
+/// Implementation Phase agent.
+pub fn parse_implementation_output(stdout: &str) -> Result<ParsedImplementationOutput, String> {
+    let body = extract_tagged_json(stdout, "impl")?;
+    let outcome = body
+        .get("outcome")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "implementation output missing `outcome` string".to_string())?;
+    if !matches!(outcome, "ready_for_review" | "blocked" | "failed") {
+        return Err(format!(
+            "implementation output `outcome` must be one of ready_for_review|blocked|failed, got {outcome}"
+        ));
+    }
+    Ok(ParsedImplementationOutput {
+        outcome: outcome.to_string(),
+        body,
+    })
+}
+
+/// Parse the JSON body wrapped in `<review>...</review>` returned by the
+/// Review Phase agent.
+pub fn parse_review_output(stdout: &str) -> Result<ParsedReviewOutput, String> {
+    let body = extract_tagged_json(stdout, "review")?;
+    let outcome = body
+        .get("outcome")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "review output missing `outcome` string".to_string())?;
+    if !matches!(outcome, "approved" | "rejected") {
+        return Err(format!(
+            "review output `outcome` must be approved|rejected, got {outcome}"
+        ));
+    }
+    Ok(ParsedReviewOutput {
+        outcome: outcome.to_string(),
+        body,
+    })
+}
+
+fn extract_tagged_json(stdout: &str, tag: &str) -> Result<serde_json::Value, String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = stdout
+        .find(&open)
+        .ok_or_else(|| format!("output missing {open} opening tag"))?
+        + open.len();
+    let end = stdout
+        .find(&close)
+        .ok_or_else(|| format!("output missing {close} closing tag"))?;
+    if end < start {
+        return Err(format!("output has malformed {tag} tags"));
+    }
+    let body = stdout[start..end].trim();
+    serde_json::from_str(body).map_err(|error| format!("{tag} output is not valid JSON: {error}"))
+}
+
+#[derive(Clone, Debug)]
+pub struct ParsedImplementationOutput {
+    pub outcome: String,
+    pub body: serde_json::Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct ParsedReviewOutput {
+    pub outcome: String,
+    pub body: serde_json::Value,
+}
+
 /// Production placeholder that errors until the real Codex planning path is
 /// implemented (later slices of ADR-0034).
 pub struct UnimplementedPlanningPhaseRunner;
