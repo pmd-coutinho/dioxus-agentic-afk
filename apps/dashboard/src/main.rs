@@ -811,13 +811,32 @@ fn ActivityPanel(entries: Vec<ProjectActivityEntryResponse>) -> Element {
 
 #[component]
 fn IssueSourceSyncStatus(project_id: String) -> Element {
-    let reload = use_context::<ProjectStore>().reload_counter();
+    use project_store::{MutationCategory, MutationKey, MutationState};
+
+    let store = use_context::<ProjectStore>();
+    let reload = store.reload_counter();
     let sync_project_id = project_id.clone();
     let sync_status = use_resource(move || {
         let _ = reload.read();
         fetch_issue_source_sync_status(sync_project_id.clone())
     });
+    let snapshot_project_id = project_id.clone();
+    let planning_snapshot = use_resource(move || {
+        let _ = reload.read();
+        fetch_planning_snapshot(snapshot_project_id.clone())
+    });
     let refresh_project_id = project_id.clone();
+
+    let key = MutationKey::SyncIssueSource(agentic_afk_contracts::ProjectId(project_id.clone()));
+    let pending = store.is_pending(&key);
+    let inline_error = match store.state(&key) {
+        Some(MutationState::Error {
+            category: MutationCategory::Validation,
+            title,
+            detail,
+        }) => Some((title, detail)),
+        _ => None,
+    };
 
     rsx! {
         section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
@@ -841,16 +860,71 @@ fn IssueSourceSyncStatus(project_id: String) -> Element {
                         },
                     }
                 }
-                button {
-                    class: "rounded border border-emerald-700 px-3 py-2 text-sm font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
-                    onclick: move |_| {
-                        let project_id = refresh_project_id.clone();
-                        async move {
-                            let _ = sync_issue_source(project_id).await;
-                            reload_dashboard();
+                div { class: "flex flex-col items-end gap-1",
+                    button {
+                        class: if pending {
+                            "rounded border border-emerald-700 px-3 py-2 text-sm font-medium text-emerald-100 cursor-not-allowed opacity-50"
+                        } else {
+                            "rounded border border-emerald-700 px-3 py-2 text-sm font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45"
+                        },
+                        "aria-disabled": if pending { "true" } else { "false" },
+                        "data-testid": "refresh-issue-source-button",
+                        "data-mutation-pending": if pending { "true" } else { "false" },
+                        onclick: {
+                            let project_id = refresh_project_id.clone();
+                            let key = key.clone();
+                            move |_| {
+                                let project_id = project_id.clone();
+                                let key = key.clone();
+                                let already_pending = pending;
+                                let before_ids: Vec<String> = planning_snapshot
+                                    .read_unchecked()
+                                    .as_ref()
+                                    .and_then(|res| res.as_ref().ok().cloned())
+                                    .map(|snap| snap.eligible.into_iter().map(|s| s.source_id).collect())
+                                    .unwrap_or_default();
+                                async move {
+                                    if already_pending {
+                                        return;
+                                    }
+                                    let result = store
+                                        .mutate(key, sync_issue_source(project_id.clone()))
+                                        .await;
+                                    if result.is_ok() {
+                                        match fetch_planning_snapshot(project_id).await {
+                                            Ok(snap) => {
+                                                let new_count = snap
+                                                    .eligible
+                                                    .iter()
+                                                    .filter(|s| !before_ids.contains(&s.source_id))
+                                                    .count();
+                                                let detail = match new_count {
+                                                    0 => "No new Ready Issues".to_string(),
+                                                    1 => "1 new Ready Issue".to_string(),
+                                                    n => format!("{n} new Ready Issues"),
+                                                };
+                                                store.push_success("Issue Source synced", detail);
+                                            }
+                                            Err(_) => {
+                                                store.push_success(
+                                                    "Issue Source synced",
+                                                    String::new(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        if pending { "Refreshing…" } else { "Refresh Issue Source" }
+                    }
+                    if let Some((title, detail)) = inline_error {
+                        p {
+                            class: "text-xs text-red-300",
+                            "data-sync-error": "true",
+                            "{title}: {detail}"
                         }
-                    },
-                    "Refresh Issue Source"
+                    }
                 }
             }
         }
@@ -880,29 +954,89 @@ fn IssueSourceCandidates(project_id: String, candidates: Vec<IssueSourceCandidat
 
 #[component]
 fn IssueSourceCandidateRow(project_id: String, candidate: IssueSourceCandidate) -> Element {
+    use project_store::{MutationCategory, MutationKey, MutationState};
+
+    let store = use_context::<ProjectStore>();
     let enable_project_id = project_id.clone();
     let enable_kind = candidate.kind.clone();
     let enable_locator = candidate.locator.clone();
+
+    let key = MutationKey::EnableIssueSource(
+        agentic_afk_contracts::ProjectId(project_id.clone()),
+        candidate.kind.clone(),
+        candidate.locator.clone(),
+    );
+    let pending = store.is_pending(&key);
+    let inline_error = match store.state(&key) {
+        Some(MutationState::Error {
+            category: MutationCategory::Validation,
+            title,
+            detail,
+        }) => Some((title, detail)),
+        _ => None,
+    };
+    let testid = format!(
+        "enable-issue-source-{}-{}",
+        candidate.kind, candidate.locator
+    );
 
     rsx! {
         li { class: "flex flex-col gap-2 border-b border-zinc-800 pb-3 text-sm text-zinc-100 last:border-0 last:pb-0 md:flex-row md:items-center md:justify-between",
             p { class: "break-words font-mono", "{candidate.kind} {candidate.locator}" }
             if candidate.enabled {
-                p { class: "text-xs text-emerald-200", "Enabled" }
+                p {
+                    class: "text-xs text-emerald-200",
+                    "data-candidate-enabled": "true",
+                    "Enabled"
+                }
             } else {
-                button {
-                    class: "rounded border border-emerald-700 px-3 py-2 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
-                    onclick: move |_| {
-                        let project_id = enable_project_id.clone();
-                        let kind = enable_kind.clone();
-                        let locator = enable_locator.clone();
-                        async move {
-                            if enable_issue_source(project_id, kind, locator).await.is_ok() {
-                                reload_dashboard();
+                div { class: "flex flex-col items-start gap-1 md:items-end",
+                    button {
+                        class: if pending {
+                            "rounded border border-emerald-700 px-3 py-2 text-left text-xs font-medium text-emerald-100 cursor-not-allowed opacity-50"
+                        } else {
+                            "rounded border border-emerald-700 px-3 py-2 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45"
+                        },
+                        "aria-disabled": if pending { "true" } else { "false" },
+                        "data-testid": testid,
+                        "data-mutation-pending": if pending { "true" } else { "false" },
+                        onclick: {
+                            let project_id = enable_project_id.clone();
+                            let kind = enable_kind.clone();
+                            let locator = enable_locator.clone();
+                            let key = key.clone();
+                            move |_| {
+                                let project_id = project_id.clone();
+                                let kind = kind.clone();
+                                let locator = locator.clone();
+                                let key = key.clone();
+                                let already_pending = pending;
+                                async move {
+                                    if already_pending {
+                                        return;
+                                    }
+                                    let _ = store
+                                        .mutate(
+                                            key,
+                                            enable_issue_source(project_id, kind, locator),
+                                        )
+                                        .await;
+                                }
                             }
+                        },
+                        if pending {
+                            "Enabling…"
+                        } else {
+                            "Enable {candidate.kind} {candidate.locator}"
                         }
-                    },
-                    "Enable {candidate.kind} {candidate.locator}"
+                    }
+                    if let Some((title, detail)) = inline_error {
+                        p {
+                            class: "text-xs text-red-300",
+                            "data-enable-error": "true",
+                            "{title}: {detail}"
+                        }
+                    }
                 }
             }
         }
@@ -1255,16 +1389,24 @@ async fn enable_issue_source(
     project_id: String,
     kind: String,
     locator: String,
-) -> Result<ProjectResponse, String> {
-    gloo_net::http::Request::put(&format!("/api/projects/{project_id}/issue-source"))
-        .json(&EnableIssueSourceRequest { kind, locator })
-        .map_err(|error| error.to_string())?
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
+) -> Result<ProjectResponse, project_store::MutationFailure> {
+    let response = gloo_net::http::Request::put(&format!(
+        "/api/projects/{project_id}/issue-source"
+    ))
+    .json(&EnableIssueSourceRequest { kind, locator })
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?
+    .send()
+    .await
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    response
         .json()
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
 }
 
 async fn trust_project_api(
@@ -1359,16 +1501,23 @@ async fn fetch_issue_source_sync_status(
     .map_err(|error| error.to_string())
 }
 
-async fn sync_issue_source(project_id: String) -> Result<IssueSourceSyncResponse, String> {
-    gloo_net::http::Request::post(&format!("/api/projects/{project_id}/issue-source/sync"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
+async fn sync_issue_source(
+    project_id: String,
+) -> Result<IssueSourceSyncResponse, project_store::MutationFailure> {
+    let response = gloo_net::http::Request::post(&format!(
+        "/api/projects/{project_id}/issue-source/sync"
+    ))
+    .send()
+    .await
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    response
         .json()
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
 }
 
-fn reload_dashboard() {
-    let _ = web_sys::window().map(|window| window.location().reload());
-}
