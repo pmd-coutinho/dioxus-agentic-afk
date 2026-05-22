@@ -16,6 +16,7 @@ use agentic_afk_contracts::{
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 
+use crate::plan_run_status::{AssignmentStatus, transition_assignment};
 use crate::plan_run::{
     AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, FakeAssignmentWorktreeCleaner,
     FakeImplementationPhaseRunner, FakeIntegrationBranchPusher, FakeLifecycleWriter,
@@ -246,6 +247,59 @@ impl CoordinatorError {
     }
 }
 
+/// Immutable identity and inputs of one Plan Run. Loaded once at the start
+/// of `run_plan_run` and threaded through phase fns. Fns that take only
+/// `&PlanRunInputs` cannot perform I/O — that property lets pure decision
+/// fns prove their purity at the type level.
+#[derive(Clone)]
+pub struct PlanRunInputs {
+    pub project: ProjectResponse,
+    pub plan_run: PlanRunResponse,
+    pub baseline: RefreshedBaseline,
+    pub exec_config: ProjectExecutionConfigResponse,
+    /// Cached contents of the Project's instructions file (AGENTS.md /
+    /// CLAUDE.md / PROJECT.md). Loaded once so every phase prompt uses the
+    /// same text without re-reading the file mid-run.
+    pub project_instructions: String,
+}
+
+impl PlanRunInputs {
+    pub fn new(
+        project: ProjectResponse,
+        plan_run: PlanRunResponse,
+        baseline: RefreshedBaseline,
+        exec_config: ProjectExecutionConfigResponse,
+    ) -> Self {
+        let project_instructions = load_project_instructions(&project.path);
+        Self {
+            project,
+            plan_run,
+            baseline,
+            exec_config,
+            project_instructions,
+        }
+    }
+
+    /// Stable Project identifier used as the `project_id` argument
+    /// everywhere persistence and event publishing reach for it.
+    pub fn project_id(&self) -> &str {
+        self.project.id.0.as_str()
+    }
+}
+
+/// Mutable collaborators (database, event bus, phase-runner adapters,
+/// external binary paths) used while running a Plan Run. Grouping these
+/// behind one struct keeps `run_plan_run` callsites readable and lets
+/// helpers like `transition_assignment` take a single effects reference
+/// instead of three.
+#[derive(Clone)]
+pub struct PlanRunEffects {
+    pub db: Db,
+    pub events: Arc<dyn EventPublisher>,
+    pub deps: PlanRunDeps,
+    pub gh_binary_path: PathBuf,
+}
+
 /// Run the Plan Run coordinator for an already-created Plan Run row.
 ///
 /// The HTTP handler is responsible for validating the request (project
@@ -258,32 +312,35 @@ impl CoordinatorError {
 /// Returns the finished `PlanRunResponse` for the HTTP layer to serialize
 /// as the 201 body, or a [`CoordinatorError`] for the handler to convert
 /// into an RFC-7807 problem response.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_plan_run(
-    deps: &PlanRunDeps,
-    db: &Db,
-    events: &Arc<dyn EventPublisher>,
-    gh_binary_path: &Path,
-    project: &ProjectResponse,
-    project_id: &str,
-    plan_run: &PlanRunResponse,
-    baseline: &RefreshedBaseline,
-    execution_config: &ProjectExecutionConfigResponse,
+    inputs: &PlanRunInputs,
+    effects: &PlanRunEffects,
 ) -> Result<PlanRunResponse, CoordinatorError> {
     // Resolve production runners against the per-Plan-Run Project context
     // (codex binary cwd + Issue Source kind/locator) when the caller wired
     // production binaries. Tests with injected fakes flow through
     // unchanged because `production_codex_binary` / `production_gh_binary`
     // remain `None`.
-    let resolved = resolve_deps_for_project(deps, project);
-    let deps = &resolved;
+    let resolved_deps = resolve_deps_for_project(&effects.deps, &inputs.project);
+    let effects = &PlanRunEffects {
+        deps: resolved_deps,
+        ..effects.clone()
+    };
+    let deps = &effects.deps;
+    let db = &effects.db;
+    let events = &effects.events;
+    let gh_binary_path: &Path = effects.gh_binary_path.as_path();
+    let project = &inputs.project;
+    let project_id = inputs.project_id();
+    let plan_run = &inputs.plan_run;
+    let baseline = &inputs.baseline;
+    let execution_config = &inputs.exec_config;
     let eligible = persistence::get_planning_snapshot(db, project_id)
         .await
         .map(|snapshot| snapshot.eligible)
         .unwrap_or_default();
-    let project_instructions = load_project_instructions(&project.path);
     let prompt = render_planning_prompt(
-        &project_instructions,
+        &inputs.project_instructions,
         project,
         execution_config,
         baseline,
@@ -738,11 +795,14 @@ async fn run_assignment_implement_review(
     loop {
         loop_iteration += 1;
 
-        let assignment_state =
-            persistence::set_assignment_status(db, &assignment.id, "implementing", None)
-                .await
-                .map_err(CoordinatorError::from_persistence)?;
-        events.assignment_status_changed(project_id, assignment_state);
+        transition_assignment(
+            db,
+            events,
+            project_id,
+            &assignment.id,
+            AssignmentStatus::Implementing,
+        )
+        .await?;
 
         let impl_prompt = render_implementation_prompt(
             &project_instructions,
@@ -811,11 +871,14 @@ async fn run_assignment_implement_review(
         .map_err(CoordinatorError::from_persistence)?;
         events.plan_run_phase_completed(project_id, &plan_run.id, impl_output);
 
-        let assignment_state =
-            persistence::set_assignment_status(db, &assignment.id, "implemented", None)
-                .await
-                .map_err(CoordinatorError::from_persistence)?;
-        events.assignment_status_changed(project_id, assignment_state);
+        transition_assignment(
+            db,
+            events,
+            project_id,
+            &assignment.id,
+            AssignmentStatus::Implemented,
+        )
+        .await?;
 
         let review_prompt = render_review_prompt(
             &project_instructions,
@@ -870,11 +933,14 @@ async fn run_assignment_implement_review(
         events.plan_run_phase_completed(project_id, &plan_run.id, review_output);
 
         if review_parsed.outcome == "approved" {
-            let reviewed =
-                persistence::set_assignment_status(db, &assignment.id, "reviewed", None)
-                    .await
-                    .map_err(CoordinatorError::from_persistence)?;
-            events.assignment_status_changed(project_id, reviewed);
+            transition_assignment(
+                db,
+                events,
+                project_id,
+                &assignment.id,
+                AssignmentStatus::Reviewed,
+            )
+            .await?;
             return Ok(Some(review_parsed.body));
         }
 
@@ -930,10 +996,16 @@ async fn block_assignment_for_loop(
     assignment: &IssueAssignmentResponse,
     reason: &str,
 ) -> Result<(), CoordinatorError> {
-    let blocked = persistence::block_assignment(db, &assignment.id, reason)
-        .await
-        .map_err(CoordinatorError::from_persistence)?;
-    events.assignment_status_changed(project_id, blocked);
+    transition_assignment(
+        db,
+        events,
+        project_id,
+        &assignment.id,
+        AssignmentStatus::Blocked {
+            reason: reason.to_string(),
+        },
+    )
+    .await?;
     if let Some(source) = project.enabled_issue_source.as_ref() {
         if let Err(error) = write_assignment_lifecycle(
             gh_binary_path,
@@ -1012,11 +1084,14 @@ async fn finalize_parallel_plan_run(
             Some(review_body) => {
                 reviewed_count += 1;
                 let merge_assignment = outcome.assignment.clone();
-                let merging =
-                    persistence::set_assignment_status(db, &merge_assignment.id, "merging", None)
-                        .await
-                        .map_err(CoordinatorError::from_persistence)?;
-                events.assignment_status_changed(project_id, merging);
+                transition_assignment(
+                    db,
+                    events,
+                    project_id,
+                    &merge_assignment.id,
+                    AssignmentStatus::Merging,
+                )
+                .await?;
 
                 let prompt = render_merge_prompt(
                     &project_instructions,
@@ -1039,14 +1114,16 @@ async fn finalize_parallel_plan_run(
                             &serde_json::json!({ "error": error.to_string() }),
                         )
                         .await;
-                        let blocked = persistence::block_assignment(
+                        let blocked = transition_assignment(
                             db,
+                            events,
+                            project_id,
                             &merge_assignment.id,
-                            &error.to_string(),
+                            AssignmentStatus::Blocked {
+                                reason: error.to_string(),
+                            },
                         )
-                        .await
-                        .map_err(CoordinatorError::from_persistence)?;
-                        events.assignment_status_changed(project_id, blocked.clone());
+                        .await?;
                         blocked_assignments.push(blocked);
                         continue;
                     }
@@ -1063,11 +1140,14 @@ async fn finalize_parallel_plan_run(
                             &serde_json::json!({ "error": error }),
                         )
                         .await;
-                        let blocked =
-                            persistence::block_assignment(db, &merge_assignment.id, &error)
-                                .await
-                                .map_err(CoordinatorError::from_persistence)?;
-                        events.assignment_status_changed(project_id, blocked.clone());
+                        let blocked = transition_assignment(
+                            db,
+                            events,
+                            project_id,
+                            &merge_assignment.id,
+                            AssignmentStatus::Blocked { reason: error },
+                        )
+                        .await?;
                         blocked_assignments.push(blocked);
                         continue;
                     }
@@ -1100,11 +1180,16 @@ async fn finalize_parallel_plan_run(
                                     "Merge Phase blocked without an explicit reason".to_string()
                                 })
                         });
-                    let blocked =
-                        persistence::block_assignment(db, &merge_assignment.id, &reason)
-                            .await
-                            .map_err(CoordinatorError::from_persistence)?;
-                    events.assignment_status_changed(project_id, blocked.clone());
+                    let blocked = transition_assignment(
+                        db,
+                        events,
+                        project_id,
+                        &merge_assignment.id,
+                        AssignmentStatus::Blocked {
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await?;
                     if let Some(source) = project.enabled_issue_source.as_ref() {
                         if let Err(error) = write_assignment_lifecycle(
                             gh_binary_path,
@@ -1126,11 +1211,14 @@ async fn finalize_parallel_plan_run(
                 // and complete the Source Issue. The Integration Branch
                 // push happens once at the end so the upstream sees a
                 // single push for the whole merged set.
-                let merged =
-                    persistence::set_assignment_status(db, &merge_assignment.id, "merged", None)
-                        .await
-                        .map_err(CoordinatorError::from_persistence)?;
-                events.assignment_status_changed(project_id, merged.clone());
+                let merged = transition_assignment(
+                    db,
+                    events,
+                    project_id,
+                    &merge_assignment.id,
+                    AssignmentStatus::Merged,
+                )
+                .await?;
                 // Source Issue completion only after the verified Integration
                 // Branch push. The completed lifecycle write-back is deferred
                 // until after `pusher.push` succeeds below.

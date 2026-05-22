@@ -41,8 +41,12 @@ An issue as represented in its **Issue Source**. A **Source Issue** remains the 
 _Avoid_: Control-plane issue, copied issue, internal ticket
 
 **Lifecycle Status**:
-The coarse implementation state of a **Source Issue** as reported by the **Control Plane** back to the **Issue Source**. The minimal statuses are Ready, Claimed, Running, Blocked, and Completed.
+The coarse implementation state of a **Source Issue** as reported by the **Control Plane** back to the **Issue Source**. The minimal statuses are Ready, Claimed, Running, Blocked, and Completed. Lifecycle write-back is a correctness invariant at the Claimed transition (to prevent another **Plan Run** from re-selecting the same **Source Issue**) and best-effort for transitions after Claimed.
 _Avoid_: Local-only status, dashboard state, hidden progress
+
+**Assignment Status**:
+The fine-grained execution state of one **Issue Assignment** inside its **Plan Run**, distinct from **Lifecycle Status**. The values are Implementing, Implemented, Reviewed, Merging, Merged, and Blocked. **Assignment Status** is **Control Plane** detail and is not written back to the **Issue Source**; coarse **Lifecycle Status** is.
+_Avoid_: Lifecycle Status, dashboard label, source-issue field
 
 **Issue Assignment**:
 One selected **Ready Issue** and its issue branch as it moves through implementation and the **Review Phase** within a **Plan Run**.
@@ -63,6 +67,10 @@ _Avoid_: Project checkout, agent workspace, mutable Project path
 **Planning Phase**:
 The manually started agent pass that inspects the **Project** and its issue descriptions to select `ready-for-agent` **Ready Issues** and issue branches that can start together without editing project files.
 _Avoid_: Automatic queue drain, manual issue start, planning snapshot
+
+**Planned Claim**:
+One validated planner choice from the **Planning Phase**, pairing the planner's selected **Source Issue** identity and derived issue branch with the matching eligible **Source Issue** snapshot. A **Planned Claim** is ready for **Assignment Worktree** provisioning and **Issue Assignment** creation; ineligible or capacity-exceeding planner output never becomes a **Planned Claim**.
+_Avoid_: Planner suggestion, raw selection, issue task
 
 **Max Parallel Tasks**:
 The per-**Project** cap on issue tasks that may run in parallel after the **Planning Phase** selects work. It does not govern the **Planning Phase**, which has at most one active run for a **Project**.
@@ -333,3 +341,4 @@ _Avoid_: afk, dioxus-agentic-afk
 - "blocker" was resolved as an explicit **Issue Dependency** recorded in the **Source Issue** description, not a GitHub blocked-by relationship or inferred file-level independence.
 - "next issue" was resolved by the **Planning Phase** among eligible **Ready Issues**, not by **Source Order** alone.
 - "parent issue" was resolved as grouping metadata, not execution order.
+- "push failure after local merge" is a known half-state: the **Merge Phase** records the per-**Issue Assignment** transition to `merged` before the **Integration Branch** push. If the push fails, **Assignment Status** remains `merged` locally while the **Source Issue** **Lifecycle Status** is never written to `Completed` and the **Plan Run** finishes `failed`. A future change may introduce an explicit pre-push staged state so `merged` always implies a successful push.

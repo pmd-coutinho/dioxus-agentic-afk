@@ -1749,18 +1749,19 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     // push, cleanup, and source lifecycle transitions.
     let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> =
         Arc::new(EventBusPublisher::new(state.event_bus.clone(), id.clone()));
-    match agentic_afk_orchestrator::run_plan_run(
-        &state.plan_run_deps,
-        &state.db,
-        &events,
-        &state.config.gh_binary_path,
-        &project,
-        &id,
-        &plan_run,
-        &baseline,
-        &execution_config,
-    )
-    .await
+    let inputs = agentic_afk_orchestrator::PlanRunInputs::new(
+        project.clone(),
+        plan_run.clone(),
+        baseline.clone(),
+        execution_config.clone(),
+    );
+    let effects = agentic_afk_orchestrator::PlanRunEffects {
+        db: state.db.clone(),
+        events,
+        deps: state.plan_run_deps.clone(),
+        gh_binary_path: state.config.gh_binary_path.clone(),
+    };
+    match agentic_afk_orchestrator::run_plan_run(&inputs, &effects).await
     {
         Ok(finished) => (StatusCode::CREATED, Json(finished)).into_response(),
         Err(error) => coordinator_error_to_response(error),

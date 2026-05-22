@@ -7,12 +7,16 @@ use std::process::{Command, Stdio};
 
 pub mod coordinator;
 pub mod plan_run;
+pub mod plan_run_status;
 pub mod production;
 
 pub use coordinator::{
-    CoordinatorError, EventPublisher, PlanRunDeps, render_planning_prompt, run_plan_run,
-    update_markdown_lifecycle_status, write_assignment_lifecycle,
+    CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs,
+    render_planning_prompt, run_plan_run, update_markdown_lifecycle_status,
+    write_assignment_lifecycle,
 };
+
+pub use plan_run_status::{AssignmentStatus, transition_assignment};
 
 pub use production::{
     CodexImplementationPhaseRunner, CodexMergePhaseRunner, CodexPlanningPhaseRunner,
