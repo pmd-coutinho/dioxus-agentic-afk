@@ -49,6 +49,12 @@ pub struct GitSummary {
     pub branch: Option<String>,
     pub head: Option<String>,
     pub dirty: bool,
+    /// Detected default branch from `refs/remotes/origin/HEAD`. Used to
+    /// seed the per-Project Integration Branch the first time the
+    /// developer configures execution. Falls back to `None` when origin
+    /// HEAD is not configured locally.
+    #[serde(default)]
+    pub default_branch: Option<String>,
 }
 
 /// Persisted Issue Source selected for a Project.

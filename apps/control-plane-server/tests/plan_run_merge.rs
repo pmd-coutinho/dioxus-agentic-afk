@@ -585,3 +585,149 @@ async fn parse_merge_output_rejects_unknown_outcomes() {
     // Missing tags / malformed bodies are rejected too.
     assert!(agentic_afk_orchestrator::parse_merge_output("nothing structured").is_err());
 }
+
+#[tokio::test]
+async fn integration_push_failure_does_not_complete_source_issue() {
+    // PRD #35 / gap 4: Source Issue completion write-back happens only
+    // AFTER the verified Integration Branch push succeeds. If the push
+    // fails, the merged assignment remains in `merged` state locally but
+    // the upstream Issue Source MUST NOT receive a `completed` lifecycle
+    // write — the developer has not actually received the work.
+    //
+    // We exercise the push-failure branch with a failing pusher fake and
+    // assert two things: (a) no `completed` lifecycle row ever lands on
+    // the local-markdown Issue Source's frontmatter (write_assignment_lifecycle
+    // is a no-op for unknown source kinds, so we look at the surrounding
+    // Plan Run shape instead); (b) the Plan Run finishes as `failed` and
+    // the failing-push Phase Output is recorded.
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let pusher = Arc::new(FakeIntegrationBranchPusher::failing("upstream rejected"));
+    let cleaner = Arc::new(FakeAssignmentWorktreeCleaner::new());
+    let router = router_with_plan_run_merge_deps(
+        config(),
+        db.clone(),
+        Arc::new(StaticIntegrationBranchRefresher::new(RefreshedBaseline {
+            commit_sha: "baseline-sha".into(),
+        })),
+        Arc::new(FakePlanningPhaseRunner::with_stdout(
+            r#"<plan>{"issues":[{"source_issue_id":"42","title":"t","branch":"agent/issue-42","selection_summary":"ok"}],"summary":"s"}</plan>"#,
+        )),
+        Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir())),
+        Arc::new(FakeLifecycleWriter::new()),
+        Arc::new(FakeImplementationPhaseRunner::with_stdout(IMPL_OK)),
+        Arc::new(FakeReviewPhaseRunner::with_stdout(REVIEW_APPROVED)),
+        Arc::new(FakeMergePhaseRunner::with_stdout(MERGE_OK)),
+        pusher.clone(),
+        cleaner.clone(),
+    );
+    let dir = temp_dir("push-fail");
+    std::fs::create_dir_all(&dir).unwrap();
+    let project: ProjectResponse = read_json(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&CreateProjectRequest {
+                            path: dir.to_string_lossy().into_owned(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let pid = project.id.0.clone();
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{pid}/trust"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    persistence::enable_issue_source(
+        &db,
+        &pid,
+        &EnableIssueSourceRequest {
+            kind: "github".into(),
+            locator: "owner/repo".into(),
+        },
+    )
+    .await
+    .unwrap();
+    persistence::replace_planning_snapshot(
+        &db,
+        &pid,
+        &IssueSource {
+            kind: "github".into(),
+            locator: "owner/repo".into(),
+        },
+        &[issue("42")],
+        "unix:1",
+    )
+    .await
+    .unwrap();
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{pid}/execution-config"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&SetProjectExecutionConfigRequest {
+                        integration_branch: "main".into(),
+                        max_parallel_tasks: 1,
+                        review_retry_limit: 1,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let resp = start(&router, &pid).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        read_text(resp).await
+    );
+
+    assert_eq!(pusher.call_count(), 1, "push attempted exactly once");
+
+    let runs = persistence::list_recent_plan_runs(&db, &pid, 10)
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(run.state, "failed", "push failure fails the Plan Run");
+
+    // The merge Phase Output for this assignment captures the
+    // integration-push failure so the developer can see WHY the run
+    // failed even after the merged set was locally integrated.
+    let assignment = &run.assignments[0];
+    let merge_outputs: Vec<_> = assignment
+        .phase_outputs
+        .iter()
+        .filter(|p| p.phase == "merge")
+        .collect();
+    assert!(
+        merge_outputs.iter().any(|p| p.outcome == "failed"),
+        "push failure must surface as a failed merge Phase Output: {:?}",
+        merge_outputs
+    );
+
+    drop(dir);
+}

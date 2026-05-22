@@ -6,20 +6,17 @@ use agentic_afk_contracts::{
     AppInfoResponse, AssignmentAttemptResponse, AssignmentTerminalOutcome, CreateProjectRequest,
     EffectiveConfig, EnableIssueSourceRequest, HealthResponse, IssueAssignmentResponse,
     IssueSource, IssueSourceCandidate, IssueSourceSyncResponse, IssueSourceSyncStatusResponse,
-    PhaseOutputResponse, PlanRunResponse, PlanningSnapshotResponse, ProblemDetail,
-    ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse, ProjectId,
-    ProjectResponse, ProjectSnapshot, ProjectSnapshotResponse,
-    SetProjectExecutionConfigRequest, SourceIssueSnapshot,
+    PlanRunResponse, PlanningSnapshotResponse, ProblemDetail, ProjectActivityEntryResponse,
+    ProjectEvent, ProjectExecutionConfigResponse, ProjectId, ProjectResponse, ProjectSnapshot,
+    ProjectSnapshotResponse, SetProjectExecutionConfigRequest, SourceIssueSnapshot,
 };
 use agentic_afk_git_summary::summarize_project_path;
-use agentic_afk_orchestrator::{
-    codex_process_identity, create_assignment_worktree, preflight_binary, run_initial_codex,
-};
 pub use agentic_afk_orchestrator::{
     AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, FakeAssignmentWorktreeCleaner,
     FakeImplementationPhaseRunner, FakeIntegrationBranchPusher, FakeLifecycleWriter,
     FakeMergePhaseRunner, FakePlanningPhaseRunner, FakeReviewPhaseRunner,
-    FakeWorktreeProvisioner, ImplementationPhaseRunner, IntegrationBranchPusher,
+    FakeWorktreeProvisioner, GitAssignmentWorktreeCleaner, GitIntegrationBranchPusher,
+    GitIntegrationBranchRefresher, ImplementationPhaseRunner, IntegrationBranchPusher,
     IntegrationBranchRefresher, IssueLifecycleWriter, MergePhaseRunner,
     PerSourceImplementationPhaseRunner, PerSourceMergePhaseRunner, PerSourceReviewPhaseRunner,
     PlanRunPhaseError, PlannerSelection, PlanningPhaseRunner, RefreshedBaseline,
@@ -28,6 +25,7 @@ pub use agentic_afk_orchestrator::{
     UnimplementedIntegrationBranchRefresher, UnimplementedLifecycleWriter,
     UnimplementedMergePhaseRunner, UnimplementedPlanningPhaseRunner,
     UnimplementedReviewPhaseRunner, UnimplementedWorktreeProvisioner,
+    WorktrunkAssignmentWorktreeProvisioner,
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 use axum::extract::{Path, State};
@@ -141,6 +139,33 @@ impl PlanRunDeps {
             cleaner: Arc::new(UnimplementedAssignmentWorktreeCleaner),
         }
     }
+
+    /// Wire the project-agnostic Plan Run seams to real implementations
+    /// for production. The four phase runners (planning, implementation,
+    /// review, merge) and the Issue Source lifecycle writer remain
+    /// `Unimplemented` here because their construction requires per-project
+    /// context (codex binary path bound to the Project's path, Issue
+    /// Source kind/locator) that the current `PlanRunDeps` shape does not
+    /// carry. Closing that last seam needs the coordinator-extraction
+    /// refactor (Gap 5) so the coordinator can build the runners per Plan
+    /// Run; until then this wiring delivers real Integration Branch
+    /// refresh, worktree provisioning, push, and cleanup against the
+    /// developer's working tree.
+    pub fn production(worktrunk_binary_path: PathBuf) -> Self {
+        Self {
+            refresher: Arc::new(GitIntegrationBranchRefresher),
+            planner: Arc::new(UnimplementedPlanningPhaseRunner),
+            worktree: Arc::new(WorktrunkAssignmentWorktreeProvisioner::new(
+                worktrunk_binary_path,
+            )),
+            lifecycle: Arc::new(UnimplementedLifecycleWriter),
+            implementation: Arc::new(UnimplementedImplementationPhaseRunner),
+            review: Arc::new(UnimplementedReviewPhaseRunner),
+            merger: Arc::new(UnimplementedMergePhaseRunner),
+            pusher: Arc::new(GitIntegrationBranchPusher),
+            cleaner: Arc::new(GitAssignmentWorktreeCleaner),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -200,7 +225,14 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
 fn plan_run_deps_from_env() -> PlanRunDeps {
     let mode = std::env::var("AGENTIC_AFK_TEST_PLAN_RUN_STUBS").ok();
     let Some(mode) = mode else {
-        return PlanRunDeps::unimplemented();
+        // Production wiring: real git refresher / pusher / cleaner and
+        // Worktrunk-backed provisioner. The four Codex phase runners and
+        // the Issue Source lifecycle writer remain Unimplemented placeholders
+        // pending the coordinator-extraction refactor described in PRD #40
+        // validation gap 5 (Plan Run coordinator lives in HTTP handler).
+        let worktrunk = std::env::var("AGENTIC_AFK_WORKTRUNK_BIN")
+            .unwrap_or_else(|_| "wt".to_string());
+        return PlanRunDeps::production(worktrunk.into());
     };
     let stdout = match mode.as_str() {
         "1" => r#"<plan>{"issues":[],"summary":"test stub: no eligible work"}</plan>"#.to_string(),
@@ -1800,24 +1832,17 @@ async fn re_enable_assignment(
         Err(error) => return persistence_error_to_response(error),
     };
 
-    // Best-effort Issue Source write-back: clear the blocked lifecycle
-    // back to `ready` so the next sync drops the Source Issue out of the
-    // active bucket. Failure here is logged but does not undo the
-    // re-enable; the assignment row remains the authoritative re-enable
-    // signal for the Control Plane.
-    if let Some(source) = project.enabled_issue_source.as_ref() {
-        if let Err(error) = write_assignment_lifecycle(
-            &state.config.gh_binary_path,
-            &project,
-            source,
-            &assignment.source_id,
-            "ready",
-        ) {
-            eprintln!(
-                "warning: failed to write ready Lifecycle Status back to Issue Source during re-enable: {error}"
-            );
-        }
-    }
+    // PRD #38: human re-enable clears blocked lifecycle state without
+    // redefining `ready-for-agent` readiness. The Source Issue's
+    // `ready-for-agent` label (GitHub) / `ready` frontmatter status
+    // (local markdown) still governs readiness, so re-enable does NOT
+    // write the `ready` lifecycle back. The assignment row + cleared
+    // block reason are the authoritative re-enable signal; a subsequent
+    // Issue Source sync repopulates the eligible bucket from upstream
+    // readiness state. We intentionally avoid overloading the lifecycle
+    // value here.
+    let _ = &project.enabled_issue_source;
+    let _ = &assignment.source_id;
 
     crate::project_event_publisher::publish_assignment_status_changed(
         &state.event_bus,
@@ -1854,12 +1879,33 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     let execution_config = match persistence::get_project_execution_config(&state.db, &id).await {
         Ok(Some(config)) => config,
         Ok(None) => {
-            return sync_problem_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "urn:agentic-afk:execution-config-missing",
-                "Unprocessable Entity",
-                "Project Execution Config must be set before starting a Plan Run".to_string(),
-            );
+            // PRD #34/#21: platform defaults seed the Project Execution
+            // Config on first Plan Run so a developer can start unattended
+            // work without a separate config step. Integration Branch
+            // defaults from the detected Git default branch (falling back
+            // to `main`); Max Parallel Tasks and Review Retry Limit get
+            // conservative defaults the developer can override later.
+            let project_path = std::path::Path::new(&project.path);
+            let detected_default_branch =
+                agentic_afk_git_summary::detect_default_branch(project_path)
+                    .unwrap_or_else(|| "main".to_string());
+            let default_request = SetProjectExecutionConfigRequest {
+                integration_branch: detected_default_branch,
+                max_parallel_tasks: 3,
+                review_retry_limit: 3,
+            };
+            match persistence::set_project_execution_config(&state.db, &id, &default_request).await
+            {
+                Ok(config) => {
+                    crate::project_event_publisher::publish_project_execution_config_changed(
+                        &state.event_bus,
+                        &id,
+                        config.clone(),
+                    );
+                    config
+                }
+                Err(error) => return persistence_error_to_response(error),
+            }
         }
         Err(error) => return persistence_error_to_response(error),
     };
@@ -1914,7 +1960,14 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
         .await
         .map(|snapshot| snapshot.eligible)
         .unwrap_or_default();
-    let prompt = render_planning_prompt(&project, &execution_config, &baseline, &eligible);
+    let project_instructions = load_project_instructions(&project.path);
+    let prompt = render_planning_prompt(
+        &project_instructions,
+        &project,
+        &execution_config,
+        &baseline,
+        &eligible,
+    );
     let planner_stdout = match state.plan_run_deps.planner.run(&prompt) {
         Ok(stdout) => stdout,
         Err(error) => {
@@ -2838,19 +2891,9 @@ async fn finalize_parallel_plan_run(
                     project_id,
                     merged.clone(),
                 );
-                if let Some(source) = project.enabled_issue_source.as_ref() {
-                    if let Err(error) = write_assignment_lifecycle(
-                        &state.config.gh_binary_path,
-                        project,
-                        source,
-                        &merge_assignment.source_id,
-                        "completed",
-                    ) {
-                        eprintln!(
-                            "warning: failed to write completed Lifecycle Status back to Issue Source during Merge Phase: {error}"
-                        );
-                    }
-                }
+                // PRD #35: Source Issue completion only after the verified
+                // Integration Branch push. The completed lifecycle write-back
+                // is deferred until after `pusher.push` succeeds below.
                 merged_count += 1;
                 merged_assignments.push(merged);
             }
@@ -2900,6 +2943,26 @@ async fn finalize_parallel_plan_run(
                 "Internal Server Error",
                 error.to_string(),
             );
+        }
+
+        // Push succeeded: now complete the Source Issues. PRD #35 requires
+        // completion only after the verified Integration Branch push so
+        // upstream lifecycle state never claims work the developer did not
+        // actually receive.
+        if let Some(source) = project.enabled_issue_source.as_ref() {
+            for assignment in &merged_assignments {
+                if let Err(error) = write_assignment_lifecycle(
+                    &state.config.gh_binary_path,
+                    project,
+                    source,
+                    &assignment.source_id,
+                    "completed",
+                ) {
+                    eprintln!(
+                        "warning: failed to write completed Lifecycle Status back to Issue Source after push: {error}"
+                    );
+                }
+            }
         }
     }
 
@@ -3098,6 +3161,7 @@ async fn fail_planning_phase(
 }
 
 fn render_planning_prompt(
+    project_instructions: &str,
     project: &ProjectResponse,
     config: &ProjectExecutionConfigResponse,
     baseline: &RefreshedBaseline,
@@ -3105,7 +3169,7 @@ fn render_planning_prompt(
 ) -> String {
     let template = include_str!("../../../crates/orchestrator/prompts/plan-run/plan.md");
     template
-        .replace("{{PROJECT_INSTRUCTIONS}}", "")
+        .replace("{{PROJECT_INSTRUCTIONS}}", project_instructions)
         .replace("{{PROJECT_NAME}}", &project.path)
         .replace("{{INTEGRATION_BRANCH}}", &config.integration_branch)
         .replace("{{PLAN_RUN_BASELINE}}", &baseline.commit_sha)

@@ -164,17 +164,40 @@ async fn start_plan_run_returns_403_for_untrusted_project() {
 }
 
 #[tokio::test]
-async fn start_plan_run_returns_422_when_execution_config_missing() {
+async fn start_plan_run_auto_creates_execution_config_with_platform_defaults() {
+    // PRD #34/#21: when no Execution Config exists for a trusted Project, the
+    // first Plan Run auto-creates one using platform defaults so the developer
+    // does not have to configure execution before kicking off unattended work.
     let router = fresh_router(static_refresher(), empty_plan_planner()).await;
     let project = make_project(&router).await;
     trust(&router, &project.id.0).await;
     let resp = post_plan_run(&router, &project.id.0).await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body = read_text(resp).await;
-    assert!(
-        body.contains("urn:agentic-afk:execution-config-missing"),
-        "unexpected body: {body}"
-    );
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Inspect the auto-created config through the snapshot route the
+    // Dashboard hydrates from.
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/projects/{}/snapshot", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = read_json(resp).await;
+    let config = body
+        .pointer("/snapshot/execution_config")
+        .expect("snapshot exposes execution_config");
+    // Platform defaults: max_parallel_tasks=3, review_retry_limit=3, and
+    // integration_branch falls back to "main" when origin/HEAD is not
+    // detectable in the bare temp Project directory.
+    assert_eq!(config["max_parallel_tasks"].as_i64(), Some(3));
+    assert_eq!(config["review_retry_limit"].as_i64(), Some(3));
+    assert_eq!(config["integration_branch"].as_str(), Some("main"));
 }
 
 #[tokio::test]
@@ -366,3 +389,61 @@ async fn planning_prompt_substitutes_integration_branch_and_baseline() {
     assert!(prompt.contains("Max Parallel Tasks: 7"), "{prompt}");
 }
 
+
+#[tokio::test]
+async fn planning_prompt_carries_project_instructions_and_source_brief() {
+    // PRD User Story #22: planning, implementation, review, and merge prompts
+    // include Project Instructions. The planning render path historically
+    // hardcoded an empty `{{PROJECT_INSTRUCTIONS}}`; this test pins the
+    // contract that the planning prompt receives the same AGENTS.md /
+    // CLAUDE.md content the other phases do.
+    let planner = Arc::new(FakePlanningPhaseRunner::with_stdout(
+        r#"<plan>{"issues":[],"summary":"none"}</plan>"#,
+    ));
+    let planner_for_router: Arc<dyn PlanningPhaseRunner> = planner.clone();
+    let router = fresh_router(static_refresher(), planner_for_router).await;
+
+    // Manually create a Project whose path holds an AGENTS.md so
+    // `load_project_instructions` returns project-specific text.
+    let dir = temp_project_path("planning-instructions");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("AGENTS.md"),
+        "# Project Instructions\nPlanning must respect repo conventions.",
+    )
+    .unwrap();
+
+    let project: ProjectResponse = read_json(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&CreateProjectRequest {
+                            path: dir.to_string_lossy().into_owned(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    trust(&router, &project.id.0).await;
+    set_config(&router, &project.id.0).await;
+
+    let resp = post_plan_run(&router, &project.id.0).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let prompt = planner.last_prompt().expect("planner was called");
+    assert!(
+        prompt.contains("Planning must respect repo conventions."),
+        "planning prompt must include Project Instructions: {prompt}"
+    );
+    // Sanity: planner still gets the standard placeholders.
+    assert!(prompt.contains("Integration Branch: main"), "{prompt}");
+    assert!(prompt.contains("Plan Run Baseline: deadbeef"), "{prompt}");
+}

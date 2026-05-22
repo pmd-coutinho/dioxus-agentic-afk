@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub mod plan_run;
+pub mod production;
+
+pub use production::{
+    CodexImplementationPhaseRunner, CodexMergePhaseRunner, CodexPlanningPhaseRunner,
+    CodexReviewPhaseRunner, GhLifecycleWriter, GitAssignmentWorktreeCleaner,
+    GitIntegrationBranchPusher, GitIntegrationBranchRefresher, LifecycleSourceKind,
+    WorktrunkAssignmentWorktreeProvisioner,
+};
 
 pub use plan_run::{
     AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, FakeAssignmentWorktreeCleaner,

@@ -427,6 +427,10 @@ fn ProjectOverview(id: String) -> Element {
                 ExecutionConfigCard {
                     project_id: project.id.0.clone(),
                     config: execution_config.clone(),
+                    detected_default_branch: project
+                        .git_summary
+                        .as_ref()
+                        .and_then(|gs| gs.default_branch.clone()),
                 }
                 PlanRunCard {
                     project_id: project.id.0.clone(),
@@ -458,6 +462,7 @@ fn ProjectOverview(id: String) -> Element {
 fn ExecutionConfigCard(
     project_id: String,
     config: Option<ProjectExecutionConfigResponse>,
+    detected_default_branch: Option<String>,
 ) -> Element {
     let store = use_context::<ProjectStore>();
     let key = MutationKey::SetExecutionConfig(ProjectId(project_id.clone()));
@@ -465,6 +470,7 @@ fn ExecutionConfigCard(
         config
             .as_ref()
             .map(|c| c.integration_branch.clone())
+            .or_else(|| detected_default_branch.clone())
             .unwrap_or_else(|| "main".to_string())
     });
     let mut max_parallel_tasks = use_signal(|| {
@@ -1822,6 +1828,7 @@ mod tests {
             branch: Some("master".to_string()),
             head: None,
             dirty: false,
+            default_branch: None,
         };
         let (tone, label) = derive_git_pill(Some(&summary));
         assert_eq!(tone, PillTone::Verified);
@@ -1834,6 +1841,7 @@ mod tests {
             branch: Some("feat/x".to_string()),
             head: None,
             dirty: true,
+            default_branch: None,
         };
         let (tone, label) = derive_git_pill(Some(&summary));
         assert_eq!(tone, PillTone::Stale);
@@ -1846,6 +1854,7 @@ mod tests {
             branch: None,
             head: None,
             dirty: false,
+            default_branch: None,
         };
         let (_tone, label) = derive_git_pill(Some(&summary));
         assert_eq!(label, "clean");
