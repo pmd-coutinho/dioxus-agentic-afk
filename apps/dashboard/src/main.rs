@@ -4,11 +4,11 @@ mod ui;
 
 use project_store::{
     IssueAssignmentId, MutationCategory, MutationKey, MutationState, ProjectStore, SourceIssueId,
-    Toast, ToastKind,
 };
 use ui::{
     ActionButton, ButtonVariant, Card, CardBody, CardFoot, CardHead, EmptyState, EmptyStateAccent,
-    ErrorState, HudToastRegion, PillTone, SkeletonHeading, SkeletonLine, StatusPill,
+    ErrorState, HudToastRegion, KeyValueList, KeyValueRow, PillTone, SkeletonHeading, SkeletonLine,
+    StatusPill,
 };
 
 use agentic_afk_contracts::{
@@ -31,6 +31,10 @@ fn main() {
 fn App() -> Element {
     rsx! {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
+        document::Link {
+            rel: "stylesheet",
+            href: "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600;700&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap",
+        }
         Router::<Route> {}
     }
 }
@@ -67,63 +71,30 @@ enum Route {
 fn AppShell() -> Element {
     use_context_provider(ProjectStore::new);
     rsx! {
-        main { class: "min-h-screen bg-zinc-950 text-zinc-100",
+        main { class: "min-h-screen bg-void font-body text-ink",
+            div { class: "pointer-events-none fixed inset-0 -z-10",
+                style: "background: radial-gradient(ellipse at 20% 0%, rgba(91,233,255,0.10), transparent 60%), radial-gradient(ellipse at 80% 100%, rgba(199,146,255,0.08), transparent 55%);",
+            }
             section { class: "mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-8",
-                header { class: "flex flex-col gap-1 border-b border-zinc-800 pb-5",
-                    p { class: "text-sm font-medium uppercase tracking-wide text-emerald-300", "Local Control Plane" }
-                    Link {
-                        to: Route::Home {},
-                        class: "w-fit",
-                        h1 { class: "text-3xl font-semibold", "agentic-afk" }
+                header { class: "flex items-end justify-between gap-4 border-b border-stroke pb-5",
+                    div { class: "flex flex-col gap-1",
+                        p { class: "font-mono text-[11px] uppercase tracking-[0.22em] text-cyan", "Local Control Plane" }
+                        Link {
+                            to: Route::Home {},
+                            class: "w-fit",
+                            h1 { class: "font-display text-3xl font-semibold uppercase tracking-[0.12em] text-ink",
+                                "agentic-afk"
+                            }
+                        }
+                    }
+                    nav { class: "flex items-center gap-4 font-display text-[11px] uppercase tracking-[0.22em]",
+                        Link { to: Route::Home {}, class: "text-ink-2 hover:text-cyan", "Home" }
+                        Link { to: Route::ProjectList {}, class: "text-ink-2 hover:text-cyan", "Projects" }
+                        Link { to: Route::Settings {}, class: "text-ink-2 hover:text-cyan", "Settings" }
                     }
                 }
-                ToastRegion {}
+                HudToastRegion {}
                 Outlet::<Route> {}
-            }
-        }
-    }
-}
-
-#[component]
-fn ToastRegion() -> Element {
-    let store = use_context::<ProjectStore>();
-    let toasts = store.toasts();
-    rsx! {
-        div {
-            class: "flex flex-col gap-2",
-            role: "status",
-            "aria-live": "polite",
-            for toast in toasts.read().clone().into_iter() {
-                ToastView { store, toast }
-            }
-        }
-    }
-}
-
-#[component]
-fn ToastView(store: ProjectStore, toast: Toast) -> Element {
-    let tone = match toast.kind {
-        ToastKind::Success => "border-emerald-700 bg-emerald-950/40 text-emerald-100",
-        ToastKind::Error => "border-red-700 bg-red-950/40 text-red-100",
-    };
-    let id = toast.id;
-    rsx! {
-        div {
-            class: format!("flex items-start justify-between gap-3 rounded border px-4 py-3 text-sm {tone}"),
-            "data-toast-kind": match toast.kind {
-                ToastKind::Success => "success",
-                ToastKind::Error => "error",
-            },
-            div { class: "flex flex-col gap-0.5",
-                p { class: "font-medium", "{toast.title}" }
-                if !toast.detail.is_empty() {
-                    p { class: "text-zinc-200/80", "{toast.detail}" }
-                }
-            }
-            button {
-                class: "text-xs text-zinc-300 hover:text-zinc-100",
-                onclick: move |_| store.dismiss_toast(id),
-                "Dismiss"
             }
         }
     }
@@ -135,34 +106,24 @@ fn Home() -> Element {
     let projects = use_resource(fetch_projects);
 
     rsx! {
-        match &*app_info.read_unchecked() {
-            Some(Ok(info)) => rsx! {
-                div { class: "flex flex-col gap-4",
-                    div { class: "grid gap-4 md:grid-cols-[1.2fr_0.8fr]",
-                        StatusPanel {
-                            title: "API connected".to_string(),
-                            detail: format!("{} {}", info.app_name, info.version),
-                            tone: "border-emerald-700 bg-emerald-950/35 text-emerald-50".to_string(),
-                        }
-                        SettingsPanel { info: info.clone() }
+        div { class: "flex flex-col gap-6",
+            match &*app_info.read_unchecked() {
+                Some(Ok(info)) => rsx! {
+                    div { class: "grid gap-6 md:grid-cols-[1.2fr_0.8fr]",
+                        ApiConnectedCard { info: info.clone() }
+                        SettingsCard { info: info.clone() }
                     }
-                    ProjectsSection { projects: projects.read_unchecked().clone() }
-                }
-            },
-            Some(Err(error)) => rsx! {
-                StatusPanel {
-                    title: "API disconnected".to_string(),
-                    detail: error.clone(),
-                    tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
-                }
-            },
-            None => rsx! {
-                StatusPanel {
-                    title: "Checking API connection".to_string(),
-                    detail: "Waiting for /api/app-info".to_string(),
-                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                }
-            },
+                },
+                Some(Err(error)) => rsx! {
+                    ErrorState {
+                        title: "API disconnected".to_string(),
+                        detail: error.clone(),
+                        problem_json: None,
+                    }
+                },
+                None => rsx! { ApiLoadingCard {} },
+            }
+            ProjectsSection { projects: projects.read_unchecked().clone() }
         }
     }
 }
@@ -171,7 +132,7 @@ fn Home() -> Element {
 fn ProjectList() -> Element {
     let projects = use_resource(fetch_projects);
     rsx! {
-        div { class: "flex flex-col gap-4",
+        div { class: "flex flex-col gap-6",
             ProjectsSection { projects: projects.read_unchecked().clone() }
         }
     }
@@ -181,23 +142,55 @@ fn ProjectList() -> Element {
 fn Settings() -> Element {
     let app_info = use_resource(fetch_app_info);
     rsx! {
-        div { class: "flex flex-col gap-4",
+        div { class: "flex flex-col gap-6",
             match &*app_info.read_unchecked() {
-                Some(Ok(info)) => rsx! { SettingsPanel { info: info.clone() } },
+                Some(Ok(info)) => rsx! { SettingsCard { info: info.clone() } },
                 Some(Err(error)) => rsx! {
-                    StatusPanel {
+                    ErrorState {
                         title: "API disconnected".to_string(),
                         detail: error.clone(),
-                        tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
+                        problem_json: None,
                     }
                 },
-                None => rsx! {
-                    StatusPanel {
-                        title: "Loading Settings".to_string(),
-                        detail: "Waiting for /api/app-info".to_string(),
-                        tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
+                None => rsx! { SettingsLoadingCard {} },
+            }
+        }
+    }
+}
+
+#[component]
+fn ApiConnectedCard(info: AppInfoResponse) -> Element {
+    rsx! {
+        Card {
+            CardHead {
+                title: "API connected".to_string(),
+                id_text: Some(info.version.clone()),
+            }
+            CardBody {
+                div { class: "flex items-center justify-between gap-4",
+                    div { class: "flex flex-col gap-1",
+                        p { class: "font-display text-[11px] uppercase tracking-[0.22em] text-ink-dim", "Service" }
+                        p { class: "font-mono text-[14px] text-ink", "{info.app_name}" }
                     }
-                },
+                    StatusPill { tone: PillTone::Verified, label: "Connected".to_string() }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ApiLoadingCard() -> Element {
+    rsx! {
+        Card {
+            CardHead {
+                title: "API connection".to_string(),
+                id_text: Some("Loading\u{2026}".to_string()),
+            }
+            CardBody {
+                SkeletonHeading {}
+                SkeletonLine { width_percent: 70 }
+                SkeletonLine { width_percent: 45 }
             }
         }
     }
@@ -206,25 +199,45 @@ fn Settings() -> Element {
 #[component]
 fn ProjectsSection(projects: Option<Result<Vec<ProjectResponse>, String>>) -> Element {
     rsx! {
-        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-            h2 { class: "mb-4 text-base font-semibold", "Projects" }
-            match projects {
-                Some(Ok(projects)) if projects.is_empty() => rsx! {
-                    p { class: "text-sm text-zinc-400", "No Projects" }
+        Card {
+            CardHead {
+                title: "Projects".to_string(),
+                id_text: match &projects {
+                    Some(Ok(list)) => Some(format!("{}", list.len())),
+                    _ => None,
                 },
-                Some(Ok(projects)) => rsx! {
-                    ul { class: "grid gap-3",
-                        for project in projects {
-                            ProjectRow { project }
+            }
+            CardBody {
+                match projects {
+                    Some(Ok(projects)) if projects.is_empty() => rsx! {
+                        EmptyState {
+                            title: "No Projects".to_string(),
+                            body: "Register a Project path with the Local Control Plane to start.".to_string(),
+                            accent: EmptyStateAccent::Cyan,
                         }
-                    }
-                },
-                Some(Err(error)) => rsx! {
-                    p { class: "text-sm text-red-200", "{error}" }
-                },
-                None => rsx! {
-                    p { class: "text-sm text-zinc-400", "Loading Projects" }
-                },
+                    },
+                    Some(Ok(projects)) => rsx! {
+                        ul { class: "grid gap-4",
+                            for project in projects {
+                                ProjectRow { project }
+                            }
+                        }
+                    },
+                    Some(Err(error)) => rsx! {
+                        ErrorState {
+                            title: "Projects unavailable".to_string(),
+                            detail: error.clone(),
+                            problem_json: None,
+                        }
+                    },
+                    None => rsx! {
+                        div { class: "grid gap-2",
+                            SkeletonHeading {}
+                            SkeletonLine { width_percent: 78 }
+                            SkeletonLine { width_percent: 64 }
+                        }
+                    },
+                }
             }
         }
     }
@@ -713,19 +726,53 @@ fn ActivitySection(id: String) -> Element {
 }
 
 #[component]
-fn SettingsPanel(info: AppInfoResponse) -> Element {
+fn SettingsCard(info: AppInfoResponse) -> Element {
     rsx! {
-        section { class: "rounded-lg border border-zinc-800 bg-zinc-900 p-5",
-            h2 { class: "mb-4 text-base font-semibold", "Settings" }
-            dl { class: "grid gap-3 text-sm",
-                SettingRow { label: "Bind address".to_string(), value: info.config.bind_address }
-                SettingRow { label: "Dashboard assets".to_string(), value: info.config.dashboard_asset_dir }
-                SettingRow { label: "Database".to_string(), value: info.config.database_url }
+        Card {
+            CardHead {
+                title: "Settings".to_string(),
+                id_text: Some(info.version.clone()),
+            }
+            CardBody {
+                KeyValueList {
+                    KeyValueRow {
+                        label: "Bind address".to_string(),
+                        value: info.config.bind_address.clone(),
+                    }
+                    KeyValueRow {
+                        label: "Dashboard assets".to_string(),
+                        value: info.config.dashboard_asset_dir.clone(),
+                    }
+                    KeyValueRow {
+                        label: "Database".to_string(),
+                        value: info.config.database_url.clone(),
+                    }
+                }
             }
         }
     }
 }
 
+#[component]
+fn SettingsLoadingCard() -> Element {
+    rsx! {
+        Card {
+            CardHead {
+                title: "Settings".to_string(),
+                id_text: Some("Loading\u{2026}".to_string()),
+            }
+            CardBody {
+                SkeletonHeading {}
+                SkeletonLine { width_percent: 80 }
+                SkeletonLine { width_percent: 60 }
+                SkeletonLine { width_percent: 70 }
+            }
+        }
+    }
+}
+
+/// Status panel still used by Project sub-routes (Assignment / Planning /
+/// project-load fallbacks). Issue #35 recomposes those surfaces.
 #[component]
 fn StatusPanel(title: String, detail: String, tone: String) -> Element {
     rsx! {
@@ -748,28 +795,57 @@ fn SettingRow(label: String, value: String) -> Element {
 
 #[component]
 fn ProjectRow(project: ProjectResponse) -> Element {
+    let (trust_tone, trust_label) = if project.trusted {
+        (PillTone::Verified, "Trusted")
+    } else {
+        (PillTone::Stale, "Untrusted")
+    };
+    let (git_tone, git_label) = derive_git_pill(project.git_summary.as_ref());
+
     rsx! {
-        li { class: "grid gap-2 border-b border-zinc-800 pb-3 last:border-0 last:pb-0",
-            div { class: "flex flex-col gap-1 md:flex-row md:items-baseline md:justify-between",
-                div { class: "flex items-center gap-2",
-                    Link {
-                        to: Route::ProjectOverview { id: project.id.0.clone() },
-                        class: "break-words font-mono text-sm text-emerald-200 hover:text-emerald-100",
-                        "{project.path}"
-                    }
-                    if project.trusted {
-                        span { class: "rounded bg-emerald-900/40 px-1.5 py-0.5 text-xs text-emerald-200", "Trusted" }
+        li {
+            Card {
+                CardHead {
+                    title: "Project".to_string(),
+                    id_text: Some(short_project_id(&project.id.0)),
+                }
+                CardBody {
+                    div { class: "flex flex-col gap-4",
+                        Link {
+                            to: Route::ProjectOverview { id: project.id.0.clone() },
+                            class: "w-fit break-words font-mono text-[13px] text-cyan hover:text-ink",
+                            "{project.path}"
+                        }
+                        div { class: "flex flex-wrap items-center gap-2",
+                            StatusPill { tone: trust_tone, label: trust_label.to_string() }
+                            StatusPill { tone: git_tone, label: git_label }
+                        }
+                        match project.git_summary.clone() {
+                            Some(summary) => rsx! { GitSummaryRow { summary } },
+                            None => rsx! {},
+                        }
                     }
                 }
-                p { class: "font-mono text-xs text-zinc-500", "{project.id.0}" }
-            }
-            match project.git_summary {
-                Some(summary) => rsx! { GitSummaryRow { summary } },
-                None => rsx! {
-                    p { class: "text-sm text-zinc-500", "No Git Summary" }
-                },
             }
         }
+    }
+}
+
+fn short_project_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+fn derive_git_pill(summary: Option<&GitSummary>) -> (PillTone, String) {
+    match summary {
+        None => (PillTone::Idle, "No Git".to_string()),
+        Some(s) if s.dirty => (
+            PillTone::Stale,
+            s.branch.clone().unwrap_or_else(|| "dirty".to_string()),
+        ),
+        Some(s) => (
+            PillTone::Verified,
+            s.branch.clone().unwrap_or_else(|| "clean".to_string()),
+        ),
     }
 }
 
@@ -1632,5 +1708,58 @@ fn SandboxSection(heading: String, children: Element) -> Element {
             }
             div { class: "mt-6", {children} }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_git_summary_maps_to_idle_pill() {
+        let (tone, label) = derive_git_pill(None);
+        assert_eq!(tone, PillTone::Idle);
+        assert_eq!(label, "No Git");
+    }
+
+    #[test]
+    fn clean_summary_with_branch_maps_to_verified_pill() {
+        let summary = GitSummary {
+            branch: Some("master".to_string()),
+            head: None,
+            dirty: false,
+        };
+        let (tone, label) = derive_git_pill(Some(&summary));
+        assert_eq!(tone, PillTone::Verified);
+        assert_eq!(label, "master");
+    }
+
+    #[test]
+    fn dirty_summary_maps_to_stale_pill_with_branch_label() {
+        let summary = GitSummary {
+            branch: Some("feat/x".to_string()),
+            head: None,
+            dirty: true,
+        };
+        let (tone, label) = derive_git_pill(Some(&summary));
+        assert_eq!(tone, PillTone::Stale);
+        assert_eq!(label, "feat/x");
+    }
+
+    #[test]
+    fn detached_clean_summary_falls_back_to_clean_label() {
+        let summary = GitSummary {
+            branch: None,
+            head: None,
+            dirty: false,
+        };
+        let (_tone, label) = derive_git_pill(Some(&summary));
+        assert_eq!(label, "clean");
+    }
+
+    #[test]
+    fn short_project_id_truncates_to_eight_chars() {
+        assert_eq!(short_project_id("0123456789abcdef"), "01234567");
+        assert_eq!(short_project_id("abc"), "abc");
     }
 }

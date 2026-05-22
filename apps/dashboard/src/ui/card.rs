@@ -17,7 +17,9 @@ pub fn CardHead(title: String, id_text: Option<String>) -> Element {
     rsx! {
         header {
             class: "flex items-center justify-between border-b border-stroke px-[18px] py-3 font-display text-[11px] uppercase tracking-[0.18em] text-ink-2",
-            span { "{title}" }
+            h2 { class: "font-display text-[11px] font-medium uppercase tracking-[0.18em] text-ink-2",
+                "{title}"
+            }
             if let Some(id) = id_text {
                 span { class: "font-mono tracking-[0.06em] text-cyan", "{id}" }
             }
