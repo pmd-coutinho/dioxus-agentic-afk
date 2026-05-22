@@ -32,6 +32,7 @@ use utoipa::ToSchema;
 mod abandon;
 pub mod activity_publisher;
 pub mod event_bus;
+pub mod project_event_publisher;
 mod recover;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -353,7 +354,15 @@ async fn get_project(State(state): State<Arc<AppState>>, Path(id): Path<String>)
 )]
 async fn trust_project(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match persistence::trust_project(&state.db, &id).await {
-        Ok(project) => Json(with_git_summary(project)).into_response(),
+        Ok(project) => {
+            let project = with_git_summary(project);
+            crate::project_event_publisher::publish_project_changed(
+                &state.event_bus,
+                &id,
+                project.clone(),
+            );
+            Json(project).into_response()
+        }
         Err(e) => persistence_error_to_response(e),
     }
 }
@@ -396,7 +405,26 @@ async fn enable_issue_source(
     Json(request): Json<EnableIssueSourceRequest>,
 ) -> Response {
     match persistence::enable_issue_source(&state.db, &id, &request).await {
-        Ok(project) => Json(with_git_summary(project)).into_response(),
+        Ok(project) => {
+            let project = with_git_summary(project);
+            crate::project_event_publisher::publish_project_changed(
+                &state.event_bus,
+                &id,
+                project.clone(),
+            );
+            let candidates = discover_issue_source_candidates(&project);
+            crate::project_event_publisher::publish_issue_source_candidates_changed(
+                &state.event_bus,
+                &id,
+                candidates,
+            );
+            crate::project_event_publisher::publish_planning_snapshot_changed(
+                &state.event_bus,
+                &id,
+                persistence::get_planning_snapshot(&state.db, &id).await.ok(),
+            );
+            Json(project).into_response()
+        }
         Err(e) => persistence_error_to_response(e),
     }
 }
@@ -427,6 +455,8 @@ async fn sync_issue_source(State(state): State<Arc<AppState>>, Path(id): Path<St
         );
     };
 
+    crate::project_event_publisher::publish_issue_source_sync_started(&state.event_bus, &id);
+
     let sync_result = match source.kind.as_str() {
         "local_markdown" => read_local_markdown_issues(&project.path, &source.locator),
         "github" => read_github_issues(&state.config.gh_binary_path, &source.locator),
@@ -444,12 +474,30 @@ async fn sync_issue_source(State(state): State<Arc<AppState>>, Path(id): Path<St
             )
             .await
             {
-                Ok(response) => Json(response).into_response(),
+                Ok(response) => {
+                    crate::project_event_publisher::publish_issue_source_sync_completed(
+                        &state.event_bus,
+                        &id,
+                        response.clone(),
+                    );
+                    let planning = persistence::get_planning_snapshot(&state.db, &id).await.ok();
+                    crate::project_event_publisher::publish_planning_snapshot_changed(
+                        &state.event_bus,
+                        &id,
+                        planning,
+                    );
+                    Json(response).into_response()
+                }
                 Err(e) => persistence_error_to_response(e),
             }
         }
         Err(detail) => {
             let _ = persistence::record_sync_failure(&state.db, &id, &source, &detail).await;
+            crate::project_event_publisher::publish_issue_source_sync_failed(
+                &state.event_bus,
+                &id,
+                &detail,
+            );
             sync_problem_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "urn:agentic-afk:issue-source-sync-failed",
@@ -712,6 +760,8 @@ async fn get_project_snapshot(
         })
         .collect();
 
+    let issue_source_candidates = discover_issue_source_candidates(&project);
+
     let sequence = state.event_bus.latest_sequence(&ProjectId(id.clone()));
     Json(ProjectSnapshotResponse {
         snapshot: ProjectSnapshot {
@@ -719,6 +769,7 @@ async fn get_project_snapshot(
             planning_snapshot,
             assignment_state,
             activity,
+            issue_source_candidates,
         },
         sequence,
     })
@@ -753,10 +804,27 @@ fn test_endpoints_router() -> Router<Arc<AppState>> {
     if std::env::var("AGENTIC_AFK_TEST_ENDPOINTS").as_deref() != Ok("1") {
         return Router::new();
     }
-    Router::new().route(
-        "/api/_test/projects/{id}/activity",
-        post(test_record_activity),
-    )
+    Router::new()
+        .route(
+            "/api/_test/projects/{id}/activity",
+            post(test_record_activity),
+        )
+        .route(
+            "/api/_test/projects/{id}/project-event",
+            post(test_publish_project_event),
+        )
+}
+
+/// Test-only: publish an arbitrary `ProjectEvent` for `id` so Playwright can
+/// drive lifecycle flows (e.g. Start Assignment -> Attempt -> Proposal
+/// Refreshed -> Verified) without needing worktrunk/codex binaries.
+async fn test_publish_project_event(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(event): Json<ProjectEvent>,
+) -> Response {
+    state.event_bus.publish(&ProjectId(id), event);
+    StatusCode::OK.into_response()
 }
 
 async fn test_record_activity(
@@ -1088,7 +1156,15 @@ async fn start_assignment(
         &source_id,
         "running",
     );
-    let _ = persistence::set_assignment_status(&state.db, &assignment.id, "running", None).await;
+    assignment = match persistence::set_assignment_status(&state.db, &assignment.id, "running", None).await {
+        Ok(a) => a,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    crate::project_event_publisher::publish_assignment_created(
+        &state.event_bus,
+        &id,
+        assignment.clone(),
+    );
     let _ = crate::activity_publisher::record_project_activity(
         &state.db,
         &state.event_bus,
@@ -1234,6 +1310,33 @@ async fn start_assignment(
         }
     };
     let _ = refresh_local_markdown_snapshot(&state.db, &project, &source).await;
+
+    // Publish lifecycle deltas for the live Dashboard: the attempt the
+    // initial Codex execution produced, the Change Proposal if one was
+    // opened, and the final status transition. Order matches the on-disk
+    // sequence (record_initial_attempt -> set_assignment_change_proposal ->
+    // set_assignment_status).
+    if let Some(attempt) = assignment.latest_attempt.clone() {
+        crate::project_event_publisher::publish_assignment_attempt_added(
+            &state.event_bus,
+            &id,
+            &assignment.id,
+            attempt,
+        );
+    }
+    if let Some(proposal) = assignment.change_proposal.clone() {
+        crate::project_event_publisher::publish_change_proposal_refreshed(
+            &state.event_bus,
+            &id,
+            &assignment.id,
+            proposal,
+        );
+    }
+    crate::project_event_publisher::publish_assignment_status_changed(
+        &state.event_bus,
+        &id,
+        assignment.clone(),
+    );
 
     let terminal_kind = match assignment.status.as_str() {
         "blocked" => Some("assignment_blocked"),

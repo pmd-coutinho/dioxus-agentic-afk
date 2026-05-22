@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use agentic_afk_contracts::{
-    ProblemDetail, ProjectActivityEntryResponse, ProjectEvent, ProjectId, ProjectSnapshot,
+    IssueSourceCandidate, PlanningSnapshotResponse, ProblemDetail, ProjectActivityEntryResponse,
+    ProjectAssignmentStateResponse, ProjectEvent, ProjectId, ProjectResponse, ProjectSnapshot,
 };
 use dioxus::prelude::*;
 
@@ -23,7 +24,12 @@ pub enum ApplyOutcome {
 /// Pure so tests can exercise hydrate-then-merge without a Dioxus runtime.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProjectStoreState {
+    pub project: Option<ProjectResponse>,
     pub activity: Vec<ProjectActivityEntryResponse>,
+    pub assignment_state: Option<ProjectAssignmentStateResponse>,
+    pub planning_snapshot: Option<PlanningSnapshotResponse>,
+    pub issue_source_candidates: Vec<IssueSourceCandidate>,
+    pub sync_in_progress: bool,
     pub last_seen_seq: u64,
     pub needs_rehydrate: bool,
 }
@@ -35,7 +41,12 @@ impl ProjectStoreState {
 
     /// Replace activity tail and reset sequence to the snapshot's value.
     pub fn hydrate(&mut self, snapshot: ProjectSnapshot, sequence: u64) {
+        self.project = Some(snapshot.project);
         self.activity = snapshot.activity;
+        self.assignment_state = Some(snapshot.assignment_state);
+        self.planning_snapshot = snapshot.planning_snapshot;
+        self.issue_source_candidates = snapshot.issue_source_candidates;
+        self.sync_in_progress = false;
         self.last_seen_seq = sequence;
         self.needs_rehydrate = false;
     }
@@ -58,6 +69,80 @@ impl ProjectStoreState {
         match event {
             ProjectEvent::Activity(entry) => {
                 self.activity.insert(0, entry);
+            }
+            ProjectEvent::AssignmentCreated(assignment)
+            | ProjectEvent::AssignmentStatusChanged(assignment) => {
+                let waiting = self
+                    .assignment_state
+                    .as_ref()
+                    .map(|s| s.waiting_ready_issue_count)
+                    .unwrap_or(0);
+                // Terminal statuses ("abandoned", "completed") release the
+                // Project assignment slot on the server, so the store clears
+                // its active assignment to match. Any other status keeps the
+                // assignment active in the slot.
+                let active = if matches!(assignment.status.as_str(), "abandoned" | "completed") {
+                    None
+                } else {
+                    Some(assignment)
+                };
+                self.assignment_state = Some(ProjectAssignmentStateResponse {
+                    active_assignment: active,
+                    waiting_ready_issue_count: waiting,
+                });
+            }
+            ProjectEvent::AssignmentAttemptAdded {
+                assignment_id,
+                attempt,
+            } => {
+                if let Some(state) = self.assignment_state.as_mut() {
+                    if let Some(active) = state.active_assignment.as_mut() {
+                        if active.id == assignment_id {
+                            active.latest_attempt = Some(attempt);
+                        }
+                    }
+                }
+            }
+            ProjectEvent::ChangeProposalRefreshed {
+                assignment_id,
+                change_proposal,
+            }
+            | ProjectEvent::ChangeProposalVerified {
+                assignment_id,
+                change_proposal,
+            } => {
+                if let Some(state) = self.assignment_state.as_mut() {
+                    if let Some(active) = state.active_assignment.as_mut() {
+                        if active.id == assignment_id {
+                            active.change_proposal = Some(change_proposal);
+                        }
+                    }
+                }
+            }
+            ProjectEvent::ProjectChanged(project) => {
+                self.project = Some(project);
+            }
+            ProjectEvent::PlanningSnapshotChanged { snapshot } => {
+                self.planning_snapshot = snapshot;
+            }
+            ProjectEvent::IssueSourceSyncStarted => {
+                self.sync_in_progress = true;
+            }
+            ProjectEvent::IssueSourceSyncCompleted(sync) => {
+                self.sync_in_progress = false;
+                if let Some(planning) = self.planning_snapshot.as_mut() {
+                    planning.last_successful_sync_at = sync.last_successful_sync_at;
+                    planning.last_failure = sync.last_failure;
+                }
+            }
+            ProjectEvent::IssueSourceSyncFailed { error } => {
+                self.sync_in_progress = false;
+                if let Some(planning) = self.planning_snapshot.as_mut() {
+                    planning.last_failure = Some(error);
+                }
+            }
+            ProjectEvent::IssueSourceCandidatesChanged { candidates } => {
+                self.issue_source_candidates = candidates;
             }
             ProjectEvent::Resync => unreachable!("handled above"),
         }
@@ -344,8 +429,42 @@ impl ProjectStore {
 mod tests {
     use super::*;
     use agentic_afk_contracts::{
+        AssignmentAttemptResponse, ChangeProposalResponse, IssueAssignmentResponse, IssueSource,
+        IssueSourceCandidate, IssueSourceSyncResponse, PlanningSnapshotResponse,
         ProjectAssignmentStateResponse, ProjectResponse,
     };
+
+    fn planning_snapshot_with_source(locator: &str) -> PlanningSnapshotResponse {
+        PlanningSnapshotResponse {
+            source: IssueSource {
+                kind: "github".to_string(),
+                locator: locator.to_string(),
+            },
+            last_successful_sync_at: None,
+            last_failure: None,
+            non_ready: vec![],
+            blocked: vec![],
+            active: vec![],
+            completed: vec![],
+            eligible: vec![],
+        }
+    }
+
+    fn assignment(id: &str, status: &str) -> IssueAssignmentResponse {
+        IssueAssignmentResponse {
+            id: id.to_string(),
+            project_id: ProjectId("p".to_string()),
+            source_id: "src".to_string(),
+            source_title: "t".to_string(),
+            branch: "b".to_string(),
+            worktree_path: "/w".to_string(),
+            status: status.to_string(),
+            status_detail: None,
+            change_proposal: None,
+            latest_attempt: None,
+            repair_budget: None,
+        }
+    }
 
     fn activity_entry(id: &str, kind: &str) -> ProjectActivityEntryResponse {
         ProjectActivityEntryResponse {
@@ -373,6 +492,7 @@ mod tests {
                 waiting_ready_issue_count: 0,
             },
             activity,
+            issue_source_candidates: vec![],
         }
     }
 
@@ -428,6 +548,334 @@ mod tests {
         assert_eq!(outcome, ApplyOutcome::Rehydrate);
         assert!(state.needs_rehydrate);
         assert_eq!(state.last_seen_seq, 10);
+    }
+
+    #[test]
+    fn assignment_created_event_sets_active_assignment() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 3;
+
+        let outcome = state.apply_event(
+            4,
+            ProjectEvent::AssignmentCreated(assignment("assn-1", "running")),
+        );
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert_eq!(state.last_seen_seq, 4);
+        let active = state
+            .assignment_state
+            .as_ref()
+            .and_then(|s| s.active_assignment.as_ref())
+            .expect("active assignment set");
+        assert_eq!(active.id, "assn-1");
+        assert_eq!(active.status, "running");
+    }
+
+    #[test]
+    fn assignment_status_changed_replaces_active_assignment() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 4;
+        state.assignment_state = Some(ProjectAssignmentStateResponse {
+            active_assignment: Some(assignment("assn-1", "running")),
+            waiting_ready_issue_count: 2,
+        });
+
+        let outcome = state.apply_event(
+            5,
+            ProjectEvent::AssignmentStatusChanged(assignment("assn-1", "proposal_pending")),
+        );
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        let s = state.assignment_state.as_ref().unwrap();
+        assert_eq!(s.waiting_ready_issue_count, 2);
+        assert_eq!(s.active_assignment.as_ref().unwrap().status, "proposal_pending");
+    }
+
+    fn attempt(id: &str, kind: &str) -> AssignmentAttemptResponse {
+        AssignmentAttemptResponse {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            process_id: None,
+            process_identity: None,
+            terminal_outcome: None,
+        }
+    }
+
+    #[test]
+    fn assignment_attempt_added_sets_latest_attempt_when_assignment_matches() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 4;
+        state.assignment_state = Some(ProjectAssignmentStateResponse {
+            active_assignment: Some(assignment("assn-1", "running")),
+            waiting_ready_issue_count: 0,
+        });
+
+        let outcome = state.apply_event(
+            5,
+            ProjectEvent::AssignmentAttemptAdded {
+                assignment_id: "assn-1".to_string(),
+                attempt: attempt("att-1", "initial"),
+            },
+        );
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        let active = state
+            .assignment_state
+            .as_ref()
+            .and_then(|s| s.active_assignment.as_ref())
+            .unwrap();
+        assert_eq!(active.latest_attempt.as_ref().unwrap().id, "att-1");
+    }
+
+    #[test]
+    fn change_proposal_refreshed_updates_proposal_when_assignment_matches() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 1;
+        state.assignment_state = Some(ProjectAssignmentStateResponse {
+            active_assignment: Some(assignment("assn-1", "proposal_pending")),
+            waiting_ready_issue_count: 0,
+        });
+
+        let outcome = state.apply_event(
+            2,
+            ProjectEvent::ChangeProposalRefreshed {
+                assignment_id: "assn-1".to_string(),
+                change_proposal: ChangeProposalResponse {
+                    status: "pending".to_string(),
+                    url: "https://x/pr/1".to_string(),
+                },
+            },
+        );
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        let active = state
+            .assignment_state
+            .as_ref()
+            .and_then(|s| s.active_assignment.as_ref())
+            .unwrap();
+        let proposal = active.change_proposal.as_ref().unwrap();
+        assert_eq!(proposal.status, "pending");
+        assert_eq!(proposal.url, "https://x/pr/1");
+    }
+
+    #[test]
+    fn change_proposal_verified_updates_proposal_to_verified_status() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 1;
+        let mut assn = assignment("assn-1", "proposal_pending");
+        assn.change_proposal = Some(ChangeProposalResponse {
+            status: "pending".to_string(),
+            url: "https://x/pr/1".to_string(),
+        });
+        state.assignment_state = Some(ProjectAssignmentStateResponse {
+            active_assignment: Some(assn),
+            waiting_ready_issue_count: 0,
+        });
+
+        let outcome = state.apply_event(
+            2,
+            ProjectEvent::ChangeProposalVerified {
+                assignment_id: "assn-1".to_string(),
+                change_proposal: ChangeProposalResponse {
+                    status: "verified".to_string(),
+                    url: "https://x/pr/1".to_string(),
+                },
+            },
+        );
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        let proposal = state
+            .assignment_state
+            .as_ref()
+            .and_then(|s| s.active_assignment.as_ref())
+            .and_then(|a| a.change_proposal.as_ref())
+            .unwrap();
+        assert_eq!(proposal.status, "verified");
+    }
+
+    #[test]
+    fn planning_snapshot_changed_replaces_planning_snapshot() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 0;
+        state.planning_snapshot = Some(planning_snapshot_with_source("old/repo"));
+
+        let outcome = state.apply_event(
+            1,
+            ProjectEvent::PlanningSnapshotChanged {
+                snapshot: Some(planning_snapshot_with_source("new/repo")),
+            },
+        );
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert_eq!(
+            state.planning_snapshot.as_ref().unwrap().source.locator,
+            "new/repo"
+        );
+    }
+
+    #[test]
+    fn issue_source_sync_started_sets_sync_in_progress() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 0;
+
+        let outcome = state.apply_event(1, ProjectEvent::IssueSourceSyncStarted);
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert!(state.sync_in_progress);
+    }
+
+    #[test]
+    fn issue_source_sync_completed_clears_progress_and_updates_metadata() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 1;
+        state.sync_in_progress = true;
+        state.planning_snapshot = Some(planning_snapshot_with_source("acme/repo"));
+
+        let outcome = state.apply_event(
+            2,
+            ProjectEvent::IssueSourceSyncCompleted(IssueSourceSyncResponse {
+                source: IssueSource {
+                    kind: "github".to_string(),
+                    locator: "acme/repo".to_string(),
+                },
+                last_successful_sync_at: Some("2026-05-22T10:00:00Z".to_string()),
+                last_failure: None,
+            }),
+        );
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert!(!state.sync_in_progress);
+        let p = state.planning_snapshot.as_ref().unwrap();
+        assert_eq!(
+            p.last_successful_sync_at.as_deref(),
+            Some("2026-05-22T10:00:00Z")
+        );
+        assert!(p.last_failure.is_none());
+    }
+
+    #[test]
+    fn issue_source_sync_failed_clears_progress_and_sets_last_failure() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 1;
+        state.sync_in_progress = true;
+        state.planning_snapshot = Some(planning_snapshot_with_source("acme/repo"));
+
+        let outcome = state.apply_event(
+            2,
+            ProjectEvent::IssueSourceSyncFailed {
+                error: "401 Unauthorized".to_string(),
+            },
+        );
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert!(!state.sync_in_progress);
+        assert_eq!(
+            state.planning_snapshot.as_ref().unwrap().last_failure.as_deref(),
+            Some("401 Unauthorized")
+        );
+    }
+
+    #[test]
+    fn issue_source_candidates_changed_replaces_candidates() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 0;
+        state.issue_source_candidates = vec![IssueSourceCandidate {
+            kind: "github".into(),
+            locator: "old/repo".into(),
+            enabled: false,
+        }];
+
+        let outcome = state.apply_event(
+            1,
+            ProjectEvent::IssueSourceCandidatesChanged {
+                candidates: vec![
+                    IssueSourceCandidate {
+                        kind: "github".into(),
+                        locator: "acme/repo".into(),
+                        enabled: true,
+                    },
+                    IssueSourceCandidate {
+                        kind: "local_markdown".into(),
+                        locator: ".scratch/issues".into(),
+                        enabled: false,
+                    },
+                ],
+            },
+        );
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert_eq!(state.issue_source_candidates.len(), 2);
+        assert_eq!(state.issue_source_candidates[0].locator, "acme/repo");
+        assert!(state.issue_source_candidates[0].enabled);
+    }
+
+    #[test]
+    fn hydrate_populates_project_assignment_planning_and_candidates() {
+        let mut state = ProjectStoreState::new();
+        let snapshot = ProjectSnapshot {
+            project: ProjectResponse {
+                id: ProjectId("p".to_string()),
+                path: "/p".to_string(),
+                trusted: true,
+                git_summary: None,
+                enabled_issue_source: Some(IssueSource {
+                    kind: "github".into(),
+                    locator: "acme/repo".into(),
+                }),
+            },
+            planning_snapshot: Some(planning_snapshot_with_source("acme/repo")),
+            assignment_state: ProjectAssignmentStateResponse {
+                active_assignment: Some(assignment("assn-1", "running")),
+                waiting_ready_issue_count: 3,
+            },
+            activity: vec![activity_entry("a-1", "started")],
+            issue_source_candidates: vec![IssueSourceCandidate {
+                kind: "github".into(),
+                locator: "acme/repo".into(),
+                enabled: true,
+            }],
+        };
+
+        state.hydrate(snapshot, 42);
+
+        assert_eq!(state.last_seen_seq, 42);
+        assert!(state.project.is_some());
+        assert_eq!(state.project.as_ref().unwrap().path, "/p");
+        assert_eq!(
+            state.assignment_state.as_ref().unwrap().waiting_ready_issue_count,
+            3
+        );
+        assert_eq!(
+            state.planning_snapshot.as_ref().unwrap().source.locator,
+            "acme/repo"
+        );
+        assert_eq!(state.activity.len(), 1);
+        assert_eq!(state.issue_source_candidates.len(), 1);
+    }
+
+    #[test]
+    fn assignment_status_changed_to_abandoned_clears_active_assignment() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 0;
+        state.assignment_state = Some(ProjectAssignmentStateResponse {
+            active_assignment: Some(assignment("assn-1", "running")),
+            waiting_ready_issue_count: 0,
+        });
+
+        let outcome = state.apply_event(
+            1,
+            ProjectEvent::AssignmentStatusChanged(assignment("assn-1", "abandoned")),
+        );
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert!(
+            state
+                .assignment_state
+                .as_ref()
+                .unwrap()
+                .active_assignment
+                .is_none()
+        );
     }
 
     #[test]

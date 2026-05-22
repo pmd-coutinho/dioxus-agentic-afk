@@ -5,7 +5,7 @@ use project_store::{ProjectStore, Toast, ToastKind};
 
 use agentic_afk_contracts::{
     AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueSourceCandidate,
-    IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse,
+    IssueSourceSyncResponse, PlanningSnapshotResponse,
     ProjectActivityEntryResponse, ProjectAssignmentStateResponse, ProjectResponse,
     ProjectEvent, ProjectSnapshotResponse, SourceIssueSnapshot,
 };
@@ -622,68 +622,39 @@ fn ProjectActivity(id: String) -> Element {
 
 #[component]
 fn IssueSourcePanels(id: String) -> Element {
-    let reload = use_context::<ProjectStore>().reload_counter();
-    let project_resource_id = id.clone();
-    let project = use_resource(move || {
-        let _ = reload.read();
-        fetch_project(project_resource_id.clone())
-    });
-    let candidate_project_id = id.clone();
-    let issue_source_candidates = use_resource(move || {
-        let _ = reload.read();
-        fetch_issue_source_candidates(candidate_project_id.clone())
-    });
+    let store_state = use_context::<ProjectStore>().state_signal();
+    let s = store_state.read();
+    // `enabled_issue_source` on the hydrated project may be stale after a
+    // candidate is enabled mid-session (we don't emit a project-changed
+    // event). The candidate list is updated via SSE on enable, so derive
+    // the "source enabled" flag from any candidate marked enabled instead.
+    let has_enabled_source = s
+        .project
+        .as_ref()
+        .map(|p| p.enabled_issue_source.is_some())
+        .unwrap_or(false)
+        || s.issue_source_candidates.iter().any(|c| c.enabled);
+    let candidates = s.issue_source_candidates.clone();
+    drop(s);
 
     rsx! {
-        match &*project.read_unchecked() {
-            Some(Ok(project)) if project.enabled_issue_source.is_some() => rsx! {
-                IssueSourceSyncStatus { project_id: id.clone() }
-            },
-            _ => rsx! {},
+        if has_enabled_source {
+            IssueSourceSyncStatus { project_id: id.clone() }
         }
-        match &*issue_source_candidates.read_unchecked() {
-            Some(Ok(candidates)) => rsx! {
-                IssueSourceCandidates {
-                    project_id: id.clone(),
-                    candidates: candidates.clone(),
-                }
-            },
-            Some(Err(error)) => rsx! {
-                StatusPanel {
-                    title: "Issue Source candidates unavailable".to_string(),
-                    detail: error.clone(),
-                    tone: "border-red-700 bg-red-950/40 text-red-100".to_string(),
-                }
-            },
-            None => rsx! {
-                StatusPanel {
-                    title: "Loading Issue Source candidates".to_string(),
-                    detail: id.clone(),
-                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                }
-            },
+        IssueSourceCandidates {
+            project_id: id.clone(),
+            candidates,
         }
     }
 }
 
 #[component]
 fn AssignmentPanel(id: String) -> Element {
-    let reload = use_context::<ProjectStore>().reload_counter();
-    let assignment_project_id = id.clone();
-    let assignment_state = use_resource(move || {
-        let _ = reload.read();
-        fetch_assignment_state(assignment_project_id.clone())
-    });
+    let state = use_context::<ProjectStore>().state_signal();
+    let assignment_state = state.read().assignment_state.clone();
     rsx! {
-        match &*assignment_state.read_unchecked() {
-            Some(Ok(state)) => rsx! { AssignmentState { project_id: id.clone(), state: state.clone() } },
-            Some(Err(error)) => rsx! {
-                StatusPanel {
-                    title: "Issue Assignment state unavailable".to_string(),
-                    detail: error.clone(),
-                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                }
-            },
+        match assignment_state {
+            Some(s) => rsx! { AssignmentState { project_id: id.clone(), state: s } },
             None => rsx! {
                 StatusPanel {
                     title: "Issue Assignment".to_string(),
@@ -697,35 +668,22 @@ fn AssignmentPanel(id: String) -> Element {
 
 #[component]
 fn PlanningPanel(id: String) -> Element {
-    let reload = use_context::<ProjectStore>().reload_counter();
-    let planning_project_id = id.clone();
-    let planning_snapshot = use_resource(move || {
-        let _ = reload.read();
-        fetch_planning_snapshot(planning_project_id.clone())
-    });
-    let project_resource_id = id.clone();
-    let project = use_resource(move || {
-        let _ = reload.read();
-        fetch_project(project_resource_id.clone())
-    });
+    let store_state = use_context::<ProjectStore>().state_signal();
+    let s = store_state.read();
+    let snapshot = s.planning_snapshot.clone();
+    let trusted = s.project.as_ref().map(|p| p.trusted).unwrap_or(false);
+    drop(s);
 
     rsx! {
-        match (&*planning_snapshot.read_unchecked(), &*project.read_unchecked()) {
-            (Some(Ok(snapshot)), Some(Ok(project))) => rsx! {
+        match snapshot {
+            Some(snapshot) => rsx! {
                 PlanningSnapshot {
                     project_id: id.clone(),
-                    trusted: project.trusted,
-                    snapshot: snapshot.clone(),
+                    trusted,
+                    snapshot,
                 }
             },
-            (Some(Err(error)), _) => rsx! {
-                StatusPanel {
-                    title: "Planning snapshot unavailable".to_string(),
-                    detail: error.clone(),
-                    tone: "border-zinc-700 bg-zinc-900 text-zinc-100".to_string(),
-                }
-            },
-            _ => rsx! {
+            None => rsx! {
                 StatusPanel {
                     title: "Loading planning snapshot".to_string(),
                     detail: id.clone(),
@@ -839,21 +797,22 @@ fn IssueSourceSyncStatus(project_id: String) -> Element {
     use project_store::{MutationCategory, MutationKey, MutationState};
 
     let store = use_context::<ProjectStore>();
-    let reload = store.reload_counter();
-    let sync_project_id = project_id.clone();
-    let sync_status = use_resource(move || {
-        let _ = reload.read();
-        fetch_issue_source_sync_status(sync_project_id.clone())
-    });
-    let snapshot_project_id = project_id.clone();
-    let planning_snapshot = use_resource(move || {
-        let _ = reload.read();
-        fetch_planning_snapshot(snapshot_project_id.clone())
-    });
+    let store_state = store.state_signal();
+    let s = store_state.read();
+    let last_successful_sync_at = s
+        .planning_snapshot
+        .as_ref()
+        .and_then(|p| p.last_successful_sync_at.clone());
+    let last_failure = s
+        .planning_snapshot
+        .as_ref()
+        .and_then(|p| p.last_failure.clone());
+    let sync_in_progress = s.sync_in_progress;
+    drop(s);
     let refresh_project_id = project_id.clone();
 
     let key = MutationKey::SyncIssueSource(agentic_afk_contracts::ProjectId(project_id.clone()));
-    let pending = store.is_pending(&key);
+    let pending = store.is_pending(&key) || sync_in_progress;
     let inline_error = match store.state(&key) {
         Some(MutationState::Error {
             category: MutationCategory::Validation,
@@ -868,21 +827,11 @@ fn IssueSourceSyncStatus(project_id: String) -> Element {
             div { class: "flex flex-col gap-3 md:flex-row md:items-start md:justify-between",
                 div {
                     h2 { class: "text-base font-semibold", "Last sync status" }
-                    match &*sync_status.read_unchecked() {
-                        Some(Ok(status)) => rsx! {
-                            p { class: "mt-2 font-mono text-sm text-zinc-300",
-                                {status.last_successful_sync_at.clone().unwrap_or_else(|| "Never synced".to_string())}
-                            }
-                            if let Some(failure) = status.last_failure.clone() {
-                                p { class: "mt-2 text-sm text-red-100", "{failure}" }
-                            }
-                        },
-                        Some(Err(error)) => rsx! {
-                            p { class: "mt-2 text-sm text-red-100", "{error}" }
-                        },
-                        None => rsx! {
-                            p { class: "mt-2 text-sm text-zinc-500", "Loading" }
-                        },
+                    p { class: "mt-2 font-mono text-sm text-zinc-300",
+                        {last_successful_sync_at.clone().unwrap_or_else(|| "Never synced".to_string())}
+                    }
+                    if let Some(failure) = last_failure.clone() {
+                        p { class: "mt-2 text-sm text-red-100", "{failure}" }
                     }
                 }
                 div { class: "flex flex-col items-end gap-1",
@@ -902,12 +851,6 @@ fn IssueSourceSyncStatus(project_id: String) -> Element {
                                 let project_id = project_id.clone();
                                 let key = key.clone();
                                 let already_pending = pending;
-                                let before_ids: Vec<String> = planning_snapshot
-                                    .read_unchecked()
-                                    .as_ref()
-                                    .and_then(|res| res.as_ref().ok().cloned())
-                                    .map(|snap| snap.eligible.into_iter().map(|s| s.source_id).collect())
-                                    .unwrap_or_default();
                                 async move {
                                     if already_pending {
                                         return;
@@ -916,27 +859,10 @@ fn IssueSourceSyncStatus(project_id: String) -> Element {
                                         .mutate(key, sync_issue_source(project_id.clone()))
                                         .await;
                                     if result.is_ok() {
-                                        match fetch_planning_snapshot(project_id).await {
-                                            Ok(snap) => {
-                                                let new_count = snap
-                                                    .eligible
-                                                    .iter()
-                                                    .filter(|s| !before_ids.contains(&s.source_id))
-                                                    .count();
-                                                let detail = match new_count {
-                                                    0 => "No new Ready Issues".to_string(),
-                                                    1 => "1 new Ready Issue".to_string(),
-                                                    n => format!("{n} new Ready Issues"),
-                                                };
-                                                store.push_success("Issue Source synced", detail);
-                                            }
-                                            Err(_) => {
-                                                store.push_success(
-                                                    "Issue Source synced",
-                                                    String::new(),
-                                                );
-                                            }
-                                        }
+                                        // The SSE `IssueSourceSyncCompleted` /
+                                        // `PlanningSnapshotChanged` deltas
+                                        // refresh the panel without a fetch.
+                                        store.push_success("Issue Source synced", String::new());
                                     }
                                 }
                             }
@@ -1374,42 +1300,6 @@ async fn fetch_project_snapshot(
         .map_err(|error| error.to_string())
 }
 
-async fn fetch_planning_snapshot(project_id: String) -> Result<PlanningSnapshotResponse, String> {
-    gloo_net::http::Request::get(&format!("/api/projects/{project_id}/planning-snapshot"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .json()
-        .await
-        .map_err(|error| error.to_string())
-}
-
-async fn fetch_assignment_state(
-    project_id: String,
-) -> Result<ProjectAssignmentStateResponse, String> {
-    gloo_net::http::Request::get(&format!("/api/projects/{project_id}/assignment-state"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .json()
-        .await
-        .map_err(|error| error.to_string())
-}
-
-async fn fetch_issue_source_candidates(
-    project_id: String,
-) -> Result<Vec<IssueSourceCandidate>, String> {
-    gloo_net::http::Request::get(&format!(
-        "/api/projects/{project_id}/issue-source-candidates"
-    ))
-    .send()
-    .await
-    .map_err(|error| error.to_string())?
-    .json()
-    .await
-    .map_err(|error| error.to_string())
-}
-
 async fn enable_issue_source(
     project_id: String,
     kind: String,
@@ -1510,20 +1400,6 @@ async fn post_assignment_mutation(
         .json()
         .await
         .map_err(|error| project_store::MutationFailure::network(error.to_string()))
-}
-
-async fn fetch_issue_source_sync_status(
-    project_id: String,
-) -> Result<IssueSourceSyncStatusResponse, String> {
-    gloo_net::http::Request::get(&format!(
-        "/api/projects/{project_id}/issue-source/sync-status"
-    ))
-    .send()
-    .await
-    .map_err(|error| error.to_string())?
-    .json()
-    .await
-    .map_err(|error| error.to_string())
 }
 
 async fn sync_issue_source(

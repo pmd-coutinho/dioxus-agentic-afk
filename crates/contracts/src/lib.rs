@@ -219,6 +219,11 @@ pub struct ProjectSnapshot {
     pub planning_snapshot: Option<PlanningSnapshotResponse>,
     pub assignment_state: ProjectAssignmentStateResponse,
     pub activity: Vec<ProjectActivityEntryResponse>,
+    /// Advisory Issue Source candidates discovered from Project evidence.
+    /// Bundled into the snapshot so the Dashboard does not need a
+    /// separate fetch for the Issue Source panel.
+    #[serde(default)]
+    pub issue_source_candidates: Vec<IssueSourceCandidate>,
 }
 
 /// HTTP response body for `GET /api/projects/{id}/snapshot`. Carries the
@@ -241,6 +246,49 @@ pub enum ProjectEvent {
     /// `activity` REST endpoint exposes so the Dashboard can append it
     /// directly to its activity list without an additional fetch.
     Activity(ProjectActivityEntryResponse),
+    /// A new Issue Assignment became active for the Project.
+    AssignmentCreated(IssueAssignmentResponse),
+    /// An existing Issue Assignment transitioned to a new lifecycle status.
+    AssignmentStatusChanged(IssueAssignmentResponse),
+    /// A new Assignment Attempt was recorded against an active assignment.
+    AssignmentAttemptAdded {
+        assignment_id: String,
+        attempt: AssignmentAttemptResponse,
+    },
+    /// The Change Proposal for an active assignment was re-read from the host.
+    ChangeProposalRefreshed {
+        assignment_id: String,
+        change_proposal: ChangeProposalResponse,
+    },
+    /// The Change Proposal for an active assignment passed required checks.
+    ChangeProposalVerified {
+        assignment_id: String,
+        change_proposal: ChangeProposalResponse,
+    },
+    /// The Project's Planning Snapshot was regenerated (e.g. after a sync
+    /// or after enabling a new Issue Source). `snapshot` is `None` when the
+    /// snapshot was cleared because no Issue Source is currently enabled.
+    PlanningSnapshotChanged {
+        snapshot: Option<PlanningSnapshotResponse>,
+    },
+    /// An Issue Source sync started; the Dashboard should reflect a
+    /// transient "syncing" state until a matching Completed or Failed event
+    /// arrives.
+    IssueSourceSyncStarted,
+    /// An Issue Source sync completed successfully; carries the new sync
+    /// metadata so the Dashboard can stop showing the in-progress state.
+    IssueSourceSyncCompleted(IssueSourceSyncResponse),
+    /// An Issue Source sync failed; the Dashboard surfaces `error` as the
+    /// last failure message and clears the in-progress state.
+    IssueSourceSyncFailed { error: String },
+    /// The set of advisory Issue Source candidates was recomputed (e.g.
+    /// after a candidate was enabled or after re-scanning Project evidence).
+    IssueSourceCandidatesChanged {
+        candidates: Vec<IssueSourceCandidate>,
+    },
+    /// Top-level Project metadata changed (trusted flag, enabled Issue
+    /// Source, etc.).
+    ProjectChanged(ProjectResponse),
     /// The client's `Last-Event-ID` predates the per-Project ring buffer.
     /// The client must re-fetch `/snapshot` to recover authoritative state.
     Resync,
@@ -259,6 +307,26 @@ pub struct ProblemDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_event_variants_serialize_with_type_tag() {
+        let candidates = ProjectEvent::IssueSourceCandidatesChanged {
+            candidates: vec![],
+        };
+        let s = serde_json::to_string(&candidates).unwrap();
+        assert!(s.contains("\"type\":\"issue_source_candidates_changed\""));
+        let planning = ProjectEvent::PlanningSnapshotChanged { snapshot: None };
+        let s = serde_json::to_string(&planning).unwrap();
+        assert!(s.contains("\"type\":\"planning_snapshot_changed\""));
+        let failed = ProjectEvent::IssueSourceSyncFailed {
+            error: "x".into(),
+        };
+        let s = serde_json::to_string(&failed).unwrap();
+        println!("Failed: {s}");
+        let started = ProjectEvent::IssueSourceSyncStarted;
+        let s = serde_json::to_string(&started).unwrap();
+        println!("Started: {s}");
+    }
 
     #[test]
     fn project_id_is_uuid_format() {

@@ -16,6 +16,10 @@ import { expect, test, type Page, type Route } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import {
+  mockProjectSnapshot,
+  publishProjectEvent,
+} from './helpers/project-snapshot';
 
 const EMPTY_PLANNING = {
   source: { kind: 'local-fs', locator: 'issues/' },
@@ -26,11 +30,6 @@ const EMPTY_PLANNING = {
   blocked: [],
   completed: [],
   non_ready: [],
-};
-
-const EMPTY_ASSIGNMENT_STATE = {
-  active_assignment: null,
-  waiting_ready_issue_count: 0,
 };
 
 function assignmentResponse(id: string, status: string, projectId: string) {
@@ -94,26 +93,12 @@ test('Start Assignment: pending state disables button, success refetches, no rel
   request,
 }) => {
   const projectId = await createTrustedProject(request, 'start-ok');
-  let planningCalls = 0;
   let postCalls = 0;
+  let planning = { ...EMPTY_PLANNING, eligible: [eligibleIssue()] };
 
-  await page.route(
-    `**/api/projects/${projectId}/planning-snapshot`,
-    async (route) => {
-      planningCalls += 1;
-      // First load: one eligible issue. After Start Assignment succeeds, the
-      // panel refetches; report it as active so we can prove the refetch ran.
-      const snapshot =
-        planningCalls === 1
-          ? { ...EMPTY_PLANNING, eligible: [eligibleIssue()] }
-          : { ...EMPTY_PLANNING, active: [eligibleIssue()] };
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(snapshot),
-      });
-    },
-  );
+  await mockProjectSnapshot(page, projectId, () => ({
+    planning_snapshot: planning,
+  }));
 
   await page.route(
     `**/api/projects/${projectId}/source-issues/issue-A/assignment`,
@@ -141,9 +126,15 @@ test('Start Assignment: pending state disables button, success refetches, no rel
   await button.click({ force: true }).catch(() => {});
   await button.click({ force: true }).catch(() => {});
 
-  // After settle: panel refetched and now shows the issue under Active.
+  // Simulate the live SSE delta that the real backend would emit after
+  // start_assignment succeeds: the eligible issue moves into `active`.
+  planning = { ...EMPTY_PLANNING, active: [eligibleIssue()] };
+  await publishProjectEvent(request, projectId, {
+    type: 'planning_snapshot_changed',
+    snapshot: planning,
+  });
+  // The Dashboard's live store applies the delta and the panel re-renders.
   await expect(page.getByRole('heading', { name: 'Active Issues' })).toBeVisible();
-  // Eligible Ready Issues group should now show "None".
   const eligibleGroup = page.getByRole('heading', { name: 'Eligible Ready Issues' }).locator('..');
   await expect(eligibleGroup.getByText('None')).toBeVisible();
 
@@ -157,16 +148,9 @@ test('Start Assignment: 422 validation error renders inline, no reload', async (
 }) => {
   const projectId = await createTrustedProject(request, 'start-err');
 
-  await page.route(
-    `**/api/projects/${projectId}/planning-snapshot`,
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ ...EMPTY_PLANNING, eligible: [eligibleIssue()] }),
-      });
-    },
-  );
+  await mockProjectSnapshot(page, projectId, () => ({
+    planning_snapshot: { ...EMPTY_PLANNING, eligible: [eligibleIssue()] },
+  }));
 
   await page.route(
     `**/api/projects/${projectId}/source-issues/issue-A/assignment`,
@@ -204,32 +188,14 @@ test('Abandon Assignment: pending state, success refetches Assignment panel, no 
   request,
 }) => {
   const projectId = await createTrustedProject(request, 'abandon-ok');
-  let stateCalls = 0;
   let postCalls = 0;
 
-  await page.route(
-    `**/api/projects/${projectId}/assignment-state`,
-    async (route) => {
-      stateCalls += 1;
-      if (stateCalls === 1) {
-        await route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            active_assignment: assignmentResponse('assn-1', 'blocked', projectId),
-            waiting_ready_issue_count: 0,
-          }),
-        });
-      } else {
-        // Post-mutation refetch: assignment cleared.
-        await route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(EMPTY_ASSIGNMENT_STATE),
-        });
-      }
+  await mockProjectSnapshot(page, projectId, () => ({
+    assignment_state: {
+      active_assignment: assignmentResponse('assn-1', 'blocked', projectId),
+      waiting_ready_issue_count: 0,
     },
-  );
+  }));
 
   await page.route(
     `**/api/projects/${projectId}/assignments/assn-1/abandon`,
@@ -254,9 +220,15 @@ test('Abandon Assignment: pending state, success refetches Assignment panel, no 
   await expect(button).toBeDisabled();
   await expect(button).toHaveAttribute('data-mutation-pending', 'true');
 
+  // Live SSE delta: assignment transitions to terminal `abandoned` status,
+  // which clears the active_assignment slot in the store.
+  await publishProjectEvent(request, projectId, {
+    type: 'assignment_status_changed',
+    ...assignmentResponse('assn-1', 'abandoned', projectId),
+  });
+
   await expect(page.getByText('No active Issue Assignment')).toBeVisible();
   expect(postCalls).toBe(1);
-  expect(stateCalls).toBeGreaterThanOrEqual(2);
   await expectNoReload(page);
 });
 
@@ -266,19 +238,12 @@ test('Abandon Assignment: 422 validation error renders inline, no reload', async
 }) => {
   const projectId = await createTrustedProject(request, 'abandon-err');
 
-  await page.route(
-    `**/api/projects/${projectId}/assignment-state`,
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          active_assignment: assignmentResponse('assn-1', 'blocked', projectId),
-          waiting_ready_issue_count: 0,
-        }),
-      });
+  await mockProjectSnapshot(page, projectId, () => ({
+    assignment_state: {
+      active_assignment: assignmentResponse('assn-1', 'blocked', projectId),
+      waiting_ready_issue_count: 0,
     },
-  );
+  }));
 
   await page.route(
     `**/api/projects/${projectId}/assignments/assn-1/abandon`,
@@ -314,24 +279,14 @@ test('Recover Assignment: pending state, success refetches, no reload', async ({
   request,
 }) => {
   const projectId = await createTrustedProject(request, 'recover-ok');
-  let stateCalls = 0;
   let postCalls = 0;
 
-  await page.route(
-    `**/api/projects/${projectId}/assignment-state`,
-    async (route) => {
-      stateCalls += 1;
-      const status = stateCalls === 1 ? 'blocked' : 'proposal_pending';
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          active_assignment: assignmentResponse('assn-1', status, projectId),
-          waiting_ready_issue_count: 0,
-        }),
-      });
+  await mockProjectSnapshot(page, projectId, () => ({
+    assignment_state: {
+      active_assignment: assignmentResponse('assn-1', 'blocked', projectId),
+      waiting_ready_issue_count: 0,
     },
-  );
+  }));
 
   await page.route(
     `**/api/projects/${projectId}/assignments/assn-1/recover`,
@@ -356,7 +311,12 @@ test('Recover Assignment: pending state, success refetches, no reload', async ({
   await expect(button).toBeDisabled();
   await expect(button).toHaveAttribute('data-mutation-pending', 'true');
 
-  // After settle: status transitions and Recover button disappears.
+  // Live SSE delta: recover transitions assignment to proposal_pending.
+  await publishProjectEvent(request, projectId, {
+    type: 'assignment_status_changed',
+    ...assignmentResponse('assn-1', 'proposal_pending', projectId),
+  });
+
   await expect(page.getByText('Change Proposal awaiting checks')).toBeVisible();
   await expect(page.getByTestId('recover-assignment-button')).toHaveCount(0);
   expect(postCalls).toBe(1);
@@ -369,19 +329,12 @@ test('Recover Assignment: 500 transient error keeps button enabled, no reload', 
 }) => {
   const projectId = await createTrustedProject(request, 'recover-err');
 
-  await page.route(
-    `**/api/projects/${projectId}/assignment-state`,
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          active_assignment: assignmentResponse('assn-1', 'blocked', projectId),
-          waiting_ready_issue_count: 0,
-        }),
-      });
+  await mockProjectSnapshot(page, projectId, () => ({
+    assignment_state: {
+      active_assignment: assignmentResponse('assn-1', 'blocked', projectId),
+      waiting_ready_issue_count: 0,
     },
-  );
+  }));
 
   await page.route(
     `**/api/projects/${projectId}/assignments/assn-1/recover`,
@@ -419,24 +372,14 @@ test('Refresh Proposal State: pending state, success refetches, no reload', asyn
   request,
 }) => {
   const projectId = await createTrustedProject(request, 'refresh-ok');
-  let stateCalls = 0;
   let postCalls = 0;
 
-  await page.route(
-    `**/api/projects/${projectId}/assignment-state`,
-    async (route) => {
-      stateCalls += 1;
-      const status = stateCalls === 1 ? 'proposal_pending' : 'proposal_verified';
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          active_assignment: assignmentResponse('assn-1', status, projectId),
-          waiting_ready_issue_count: 0,
-        }),
-      });
+  await mockProjectSnapshot(page, projectId, () => ({
+    assignment_state: {
+      active_assignment: assignmentResponse('assn-1', 'proposal_pending', projectId),
+      waiting_ready_issue_count: 0,
     },
-  );
+  }));
 
   await page.route(
     `**/api/projects/${projectId}/assignments/assn-1/refresh-proposal-state`,
@@ -461,6 +404,12 @@ test('Refresh Proposal State: pending state, success refetches, no reload', asyn
   await expect(button).toBeDisabled();
   await expect(button).toHaveAttribute('data-mutation-pending', 'true');
 
+  // Live SSE delta: proposal moves to verified status.
+  await publishProjectEvent(request, projectId, {
+    type: 'assignment_status_changed',
+    ...assignmentResponse('assn-1', 'proposal_verified', projectId),
+  });
+
   await expect(page.getByText('Verified — awaiting human merge')).toBeVisible();
   expect(postCalls).toBe(1);
   await expectNoReload(page);
@@ -472,19 +421,12 @@ test('Refresh Proposal State: 422 validation error renders inline, no reload', a
 }) => {
   const projectId = await createTrustedProject(request, 'refresh-err');
 
-  await page.route(
-    `**/api/projects/${projectId}/assignment-state`,
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          active_assignment: assignmentResponse('assn-1', 'proposal_pending', projectId),
-          waiting_ready_issue_count: 0,
-        }),
-      });
+  await mockProjectSnapshot(page, projectId, () => ({
+    assignment_state: {
+      active_assignment: assignmentResponse('assn-1', 'proposal_pending', projectId),
+      waiting_ready_issue_count: 0,
     },
-  );
+  }));
 
   await page.route(
     `**/api/projects/${projectId}/assignments/assn-1/refresh-proposal-state`,
