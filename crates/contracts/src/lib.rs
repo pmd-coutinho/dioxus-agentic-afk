@@ -102,7 +102,7 @@ pub struct PlanningSnapshotResponse {
     pub last_successful_sync_at: Option<String>,
     pub last_failure: Option<String>,
     pub non_ready: Vec<SourceIssueSnapshot>,
-    pub blocked: Vec<SourceIssueSnapshot>,
+    pub dependency_blocked: Vec<SourceIssueSnapshot>,
     pub active: Vec<SourceIssueSnapshot>,
     pub completed: Vec<SourceIssueSnapshot>,
     pub eligible: Vec<SourceIssueSnapshot>,
@@ -352,17 +352,13 @@ mod tests {
 
     #[test]
     fn project_event_variants_serialize_with_type_tag() {
-        let candidates = ProjectEvent::IssueSourceCandidatesChanged {
-            candidates: vec![],
-        };
+        let candidates = ProjectEvent::IssueSourceCandidatesChanged { candidates: vec![] };
         let s = serde_json::to_string(&candidates).unwrap();
         assert!(s.contains("\"type\":\"issue_source_candidates_changed\""));
         let planning = ProjectEvent::PlanningSnapshotChanged { snapshot: None };
         let s = serde_json::to_string(&planning).unwrap();
         assert!(s.contains("\"type\":\"planning_snapshot_changed\""));
-        let failed = ProjectEvent::IssueSourceSyncFailed {
-            error: "x".into(),
-        };
+        let failed = ProjectEvent::IssueSourceSyncFailed { error: "x".into() };
         let s = serde_json::to_string(&failed).unwrap();
         println!("Failed: {s}");
         let started = ProjectEvent::IssueSourceSyncStarted;

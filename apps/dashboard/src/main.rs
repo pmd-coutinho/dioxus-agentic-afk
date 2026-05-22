@@ -15,7 +15,8 @@ use agentic_afk_contracts::{
     AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueAssignmentResponse,
     IssueSourceCandidate, IssueSourceSyncResponse, PlanRunResponse, PlanningSnapshotResponse,
     ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse, ProjectId,
-    ProjectResponse, ProjectSnapshotResponse, SetProjectExecutionConfigRequest, SourceIssueSnapshot,
+    ProjectResponse, ProjectSnapshotResponse, SetProjectExecutionConfigRequest,
+    SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
 use std::cell::RefCell;
@@ -331,9 +332,7 @@ fn use_project_live_subscription(store: ProjectStore, project_id: String) {
     if project_changed || needs_rehydrate {
         // Close any existing subscription before re-hydrating.
         subscription.read().borrow_mut().take();
-        last_project_id
-            .clone()
-            .set(Some(project_id.clone()));
+        last_project_id.clone().set(Some(project_id.clone()));
         store.clear_rehydrate_flag();
 
         let project_id_for_task = project_id.clone();
@@ -406,7 +405,6 @@ fn TrustProjectButton(project_id: String) -> Element {
         }
     }
 }
-
 
 #[component]
 fn ProjectOverview(id: String) -> Element {
@@ -754,9 +752,7 @@ fn ReEnableAssignmentButton(project_id: String, assignment_id: String) -> Elemen
 }
 
 #[component]
-fn AssignmentPhaseOutputRow(
-    phase_output: agentic_afk_contracts::PhaseOutputResponse,
-) -> Element {
+fn AssignmentPhaseOutputRow(phase_output: agentic_afk_contracts::PhaseOutputResponse) -> Element {
     let tone = match phase_output.outcome.as_str() {
         "ready_for_review" | "approved" | "merged" => PillTone::Verified,
         "rejected" | "failed" | "blocked" => PillTone::Failed,
@@ -1272,7 +1268,10 @@ fn IssueSourceCandidateRow(project_id: String, candidate: IssueSourceCandidate) 
         "enable-issue-source-{}-{}",
         candidate.kind, candidate.locator
     );
-    let error_marker = format!("enable-issue-source-{}-{}", candidate.kind, candidate.locator);
+    let error_marker = format!(
+        "enable-issue-source-{}-{}",
+        candidate.kind, candidate.locator
+    );
 
     rsx! {
         li { class: "flex flex-col gap-2 border-b border-stroke pb-3 last:border-0 last:pb-0 md:flex-row md:items-center md:justify-between",
@@ -1355,7 +1354,7 @@ fn PlanningSnapshot(
                         PlanningGroup {
                             project_id: project_id.clone(),
                             title: "Blocked Ready Issues".to_string(),
-                            issues: snapshot.blocked,
+                            issues: snapshot.dependency_blocked,
                         }
                         PlanningGroup {
                             project_id: project_id.clone(),
@@ -1375,11 +1374,7 @@ fn PlanningSnapshot(
 }
 
 #[component]
-fn PlanningGroup(
-    project_id: String,
-    title: String,
-    issues: Vec<SourceIssueSnapshot>,
-) -> Element {
+fn PlanningGroup(project_id: String, title: String, issues: Vec<SourceIssueSnapshot>) -> Element {
     rsx! {
         section { class: "min-w-0 border border-stroke bg-panel/40 p-4",
             h3 { class: "font-display text-[11px] uppercase tracking-[0.18em] text-ink-2", "{title}" }
@@ -1481,9 +1476,7 @@ async fn fetch_project(project_id: String) -> Result<ProjectResponse, String> {
         .ok_or_else(|| format!("Project {project_id} not found"))
 }
 
-async fn fetch_project_snapshot(
-    project_id: String,
-) -> Result<ProjectSnapshotResponse, String> {
+async fn fetch_project_snapshot(project_id: String) -> Result<ProjectSnapshotResponse, String> {
     gloo_net::http::Request::get(&format!("/api/projects/{project_id}/snapshot"))
         .send()
         .await
@@ -1498,14 +1491,13 @@ async fn enable_issue_source(
     kind: String,
     locator: String,
 ) -> Result<ProjectResponse, project_store::MutationFailure> {
-    let response = gloo_net::http::Request::put(&format!(
-        "/api/projects/{project_id}/issue-source"
-    ))
-    .json(&EnableIssueSourceRequest { kind, locator })
-    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?
-    .send()
-    .await
-    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let response =
+        gloo_net::http::Request::put(&format!("/api/projects/{project_id}/issue-source"))
+            .json(&EnableIssueSourceRequest { kind, locator })
+            .map_err(|error| project_store::MutationFailure::network(error.to_string()))?
+            .send()
+            .await
+            .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
     let status = response.status();
     if !(200..300).contains(&status) {
         let body = response.text().await.unwrap_or_default();
@@ -1539,14 +1531,13 @@ async fn set_execution_config_api(
     project_id: String,
     request: SetProjectExecutionConfigRequest,
 ) -> Result<ProjectExecutionConfigResponse, project_store::MutationFailure> {
-    let response = gloo_net::http::Request::put(&format!(
-        "/api/projects/{project_id}/execution-config"
-    ))
-    .json(&request)
-    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?
-    .send()
-    .await
-    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let response =
+        gloo_net::http::Request::put(&format!("/api/projects/{project_id}/execution-config"))
+            .json(&request)
+            .map_err(|error| project_store::MutationFailure::network(error.to_string()))?
+            .send()
+            .await
+            .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
     let status = response.status();
     if !(200..300).contains(&status) {
         let body = response.text().await.unwrap_or_default();
@@ -1600,12 +1591,11 @@ async fn start_plan_run_api(
 async fn sync_issue_source(
     project_id: String,
 ) -> Result<IssueSourceSyncResponse, project_store::MutationFailure> {
-    let response = gloo_net::http::Request::post(&format!(
-        "/api/projects/{project_id}/issue-source/sync"
-    ))
-    .send()
-    .await
-    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let response =
+        gloo_net::http::Request::post(&format!("/api/projects/{project_id}/issue-source/sync"))
+            .send()
+            .await
+            .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
     let status = response.status();
     if !(200..300).contains(&status) {
         let body = response.text().await.unwrap_or_default();
@@ -1616,7 +1606,6 @@ async fn sync_issue_source(
         .await
         .map_err(|error| project_store::MutationFailure::network(error.to_string()))
 }
-
 
 #[component]
 fn DesignSandbox() -> Element {
@@ -1879,5 +1868,4 @@ mod tests {
         assert_eq!(tone, PillTone::Stale);
         assert_eq!(label, "Untrusted");
     }
-
 }

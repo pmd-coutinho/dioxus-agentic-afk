@@ -453,7 +453,6 @@ impl ProjectStore {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,7 +470,7 @@ mod tests {
             last_successful_sync_at: None,
             last_failure: None,
             non_ready: vec![],
-            blocked: vec![],
+            dependency_blocked: vec![],
             active: vec![],
             completed: vec![],
             eligible: vec![],
@@ -849,11 +848,8 @@ mod tests {
     fn enable_issue_source_keys_distinguish_by_kind_and_locator() {
         let mut table = MutationsTable::new();
         let project = ProjectId("p1".to_string());
-        let github = MutationKey::EnableIssueSource(
-            project.clone(),
-            "github".into(),
-            "acme/repo".into(),
-        );
+        let github =
+            MutationKey::EnableIssueSource(project.clone(), "github".into(), "acme/repo".into());
         let local = MutationKey::EnableIssueSource(
             project,
             "local_markdown".into(),
@@ -886,8 +882,7 @@ mod tests {
         let assignment_b = IssueAssignmentId("assn-B".to_string());
 
         let mut table = MutationsTable::new();
-        let re_enable_a =
-            MutationKey::ReEnableAssignment(project.clone(), assignment_a.clone());
+        let re_enable_a = MutationKey::ReEnableAssignment(project.clone(), assignment_a.clone());
         let re_enable_b = MutationKey::ReEnableAssignment(project, assignment_b);
 
         table.set_pending(re_enable_a.clone());

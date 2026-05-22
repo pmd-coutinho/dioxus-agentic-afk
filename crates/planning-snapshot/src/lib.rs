@@ -19,8 +19,9 @@ pub struct RawPlanningSnapshot {
 /// - `non_ready`: `readiness != "ready"`
 /// - `completed`: ready AND `lifecycle_status == "completed"`
 /// - `active`: ready AND `lifecycle_status` in `{ "claimed", "running", "blocked" }`
-/// - `blocked`: ready AND has at least one **Issue Dependency** whose id is in the
-///   set of ready issue ids
+/// - `dependency_blocked`: ready AND has at least one **Issue Dependency** whose id
+///   is in the set of ready issue ids (distinct from Lifecycle Status `Blocked`,
+///   which lands in `active` — see ADR-0036).
 /// - `eligible`: ready AND none of the above
 pub fn normalize(raw: RawPlanningSnapshot) -> PlanningSnapshotResponse {
     let RawPlanningSnapshot {
@@ -37,7 +38,7 @@ pub fn normalize(raw: RawPlanningSnapshot) -> PlanningSnapshotResponse {
         .collect::<std::collections::HashSet<_>>();
 
     let mut non_ready = Vec::new();
-    let mut blocked = Vec::new();
+    let mut dependency_blocked = Vec::new();
     let mut active = Vec::new();
     let mut completed = Vec::new();
     let mut eligible = Vec::new();
@@ -57,7 +58,7 @@ pub fn normalize(raw: RawPlanningSnapshot) -> PlanningSnapshotResponse {
             .iter()
             .any(|dependency| ready_ids.contains(dependency))
         {
-            blocked.push(issue);
+            dependency_blocked.push(issue);
         } else {
             eligible.push(issue);
         }
@@ -68,7 +69,7 @@ pub fn normalize(raw: RawPlanningSnapshot) -> PlanningSnapshotResponse {
         last_successful_sync_at,
         last_failure,
         non_ready,
-        blocked,
+        dependency_blocked,
         active,
         completed,
         eligible,
@@ -117,7 +118,7 @@ mod tests {
     fn ready_no_deps_is_eligible() {
         let out = normalize(raw(vec![issue("1", "ready", "ready", &[])]));
         assert_eq!(ids(&out.eligible), vec!["1"]);
-        assert!(out.blocked.is_empty());
+        assert!(out.dependency_blocked.is_empty());
         assert!(out.active.is_empty());
         assert!(out.completed.is_empty());
         assert!(out.non_ready.is_empty());
@@ -129,7 +130,7 @@ mod tests {
             issue("1", "ready", "ready", &["2"]),
             issue("2", "ready", "ready", &[]),
         ]));
-        assert_eq!(ids(&out.blocked), vec!["1"]);
+        assert_eq!(ids(&out.dependency_blocked), vec!["1"]);
         assert_eq!(ids(&out.eligible), vec!["2"]);
     }
 
@@ -156,7 +157,7 @@ mod tests {
     fn ready_lifecycle_blocked_is_active_not_blocked_bucket() {
         let out = normalize(raw(vec![issue("1", "ready", "blocked", &[])]));
         assert_eq!(ids(&out.active), vec!["1"]);
-        assert!(out.blocked.is_empty());
+        assert!(out.dependency_blocked.is_empty());
     }
 
     #[test]
@@ -175,7 +176,7 @@ mod tests {
         ]));
         assert_eq!(ids(&out.eligible), vec!["1"]);
         assert_eq!(ids(&out.non_ready), vec!["2"]);
-        assert!(out.blocked.is_empty());
+        assert!(out.dependency_blocked.is_empty());
     }
 
     #[test]
@@ -188,7 +189,7 @@ mod tests {
             issue("n", "open", "ready", &[]),
         ]));
         assert_eq!(ids(&out.eligible), vec!["e"]);
-        assert_eq!(ids(&out.blocked), vec!["b"]);
+        assert_eq!(ids(&out.dependency_blocked), vec!["b"]);
         assert_eq!(ids(&out.active), vec!["a"]);
         assert_eq!(ids(&out.completed), vec!["c"]);
         assert_eq!(ids(&out.non_ready), vec!["n"]);
