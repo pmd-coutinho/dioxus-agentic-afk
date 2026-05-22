@@ -31,6 +31,10 @@ test('claimed Issue Assignment renders inside the active Plan Run card', async (
 
   await page.goto(`/projects/${project.id}`);
 
+  // Wait for the Plan Run card to mount so the SSE subscription is live
+  // before we publish events through the test endpoint.
+  await expect(page.getByTestId('plan-run-card')).toBeVisible();
+
   const planRunId = randomUUID();
   await request.post(`/api/_test/projects/${project.id}/project-event`, {
     data: {

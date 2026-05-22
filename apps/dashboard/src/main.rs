@@ -660,6 +660,11 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
         .clone()
         .unwrap_or_else(|| String::from("(no selection summary)"));
     let phase_outputs = assignment.phase_outputs.clone();
+    let review_rejection_count = assignment.review_rejection_count;
+    let block_reason = assignment.block_reason.clone();
+    let is_blocked = assignment.status == "blocked";
+    let project_id = assignment.project_id.0.clone();
+    let assignment_id = assignment.id.clone();
     rsx! {
         div { class: "flex flex-col gap-1 rounded border border-line/40 bg-surface-2/40 p-2",
             "data-testid": "plan-run-assignment-row",
@@ -671,6 +676,18 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
             }
             p { class: "font-mono text-[11px] text-ink-2", "{assignment.branch}" }
             p { class: "text-[11px] text-ink-2", "{summary}" }
+            if review_rejection_count > 0 {
+                p { class: "font-mono text-[11px] text-coral",
+                    "data-testid": "assignment-review-rejection-count",
+                    "Review rejections: {review_rejection_count}"
+                }
+            }
+            if let Some(reason) = block_reason.clone() {
+                p { class: "font-mono text-[11px] text-coral",
+                    "data-testid": "assignment-block-reason",
+                    "Blocked: {reason}"
+                }
+            }
             if !phase_outputs.is_empty() {
                 div { class: "mt-1 flex flex-col gap-0.5",
                     "data-testid": "assignment-phase-outputs",
@@ -679,6 +696,54 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
                     }
                 }
             }
+            if is_blocked {
+                ReEnableAssignmentButton {
+                    project_id,
+                    assignment_id,
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ReEnableAssignmentButton(project_id: String, assignment_id: String) -> Element {
+    let store = use_context::<ProjectStore>();
+    let key = MutationKey::ReEnableAssignment(
+        ProjectId(project_id.clone()),
+        IssueAssignmentId(assignment_id.clone()),
+    );
+    rsx! {
+        ActionButton {
+            mutation_key: key.clone(),
+            variant: ButtonVariant::Primary,
+            testid: "re-enable-assignment-button".to_string(),
+            error_marker: "re-enable-assignment".to_string(),
+            on_press: {
+                let key = key.clone();
+                let project_id = project_id.clone();
+                let assignment_id = assignment_id.clone();
+                move |_| {
+                    let key = key.clone();
+                    let project_id = project_id.clone();
+                    let assignment_id = assignment_id.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let result = store
+                            .mutate(
+                                key,
+                                re_enable_assignment_api(project_id, assignment_id),
+                            )
+                            .await;
+                        if result.is_ok() {
+                            store.push_success(
+                                "Issue Assignment re-enabled",
+                                "A later Plan Run may pick this Source Issue again",
+                            );
+                        }
+                    });
+                }
+            },
+            "Re-enable Issue Assignment"
         }
     }
 }
@@ -1589,6 +1654,27 @@ async fn set_execution_config_api(
     ))
     .json(&request)
     .map_err(|error| project_store::MutationFailure::network(error.to_string()))?
+    .send()
+    .await
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
+}
+
+async fn re_enable_assignment_api(
+    project_id: String,
+    assignment_id: String,
+) -> Result<IssueAssignmentResponse, project_store::MutationFailure> {
+    let response = gloo_net::http::Request::post(&format!(
+        "/api/projects/{project_id}/assignments/{assignment_id}/re-enable"
+    ))
     .send()
     .await
     .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;

@@ -401,6 +401,10 @@ fn router_with_full_deps(
             "/api/projects/{id}/plan-runs",
             post(start_plan_run).get(list_plan_runs),
         )
+        .route(
+            "/api/projects/{id}/assignments/{assignment_id}/re-enable",
+            post(re_enable_assignment),
+        )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
         .with_state(state)
@@ -1943,6 +1947,71 @@ async fn set_execution_config(
     }
 }
 
+/// Human re-enable for a blocked Issue Assignment (issue #44). Clears the
+/// blocked Lifecycle Status both on the assignment row and on the upstream
+/// Issue Source, and resets the review rejection counter so a later Plan
+/// Run may pick up the Source Issue again. Does NOT redefine
+/// `ready-for-agent` readiness — that remains a separate Source Issue
+/// concern.
+async fn re_enable_assignment(
+    State(state): State<Arc<AppState>>,
+    Path((id, assignment_id)): Path<(String, String)>,
+) -> Response {
+    let assignment = match persistence::get_project_assignment(&state.db, &id, &assignment_id).await
+    {
+        Ok(assignment) => assignment,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    if assignment.status != "blocked" {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:assignment-not-blocked",
+            "Unprocessable Entity",
+            format!(
+                "Issue Assignment {assignment_id} is not blocked (status={})",
+                assignment.status
+            ),
+        );
+    }
+    let project = match persistence::get_project(&state.db, &id).await {
+        Ok(project) => project,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    let project = with_git_summary(project);
+
+    let updated = match persistence::re_enable_blocked_assignment(&state.db, &assignment_id).await {
+        Ok(updated) => updated,
+        Err(error) => return persistence_error_to_response(error),
+    };
+
+    // Best-effort Issue Source write-back: clear the blocked lifecycle
+    // back to `ready` so the next sync drops the Source Issue out of the
+    // active bucket. Failure here is logged but does not undo the
+    // re-enable; the assignment row remains the authoritative re-enable
+    // signal for the Control Plane.
+    if let Some(source) = project.enabled_issue_source.as_ref() {
+        if let Err(error) = write_assignment_lifecycle(
+            &state.config.gh_binary_path,
+            &project,
+            source,
+            &assignment.source_id,
+            "ready",
+        ) {
+            eprintln!(
+                "warning: failed to write ready Lifecycle Status back to Issue Source during re-enable: {error}"
+            );
+        }
+    }
+
+    crate::project_event_publisher::publish_assignment_status_changed(
+        &state.event_bus,
+        &id,
+        updated.clone(),
+    );
+
+    Json(updated).into_response()
+}
+
 async fn list_plan_runs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     if let Err(error) = persistence::get_project(&state.db, &id).await {
         return persistence_error_to_response(error);
@@ -2358,213 +2427,303 @@ async fn run_implementation_and_review(
             Err(error) => return Err(persistence_error_to_response(error)),
         };
 
-    // Transition assignment status -> implementing.
-    let assignment_state = match persistence::set_assignment_status(
-        &state.db,
-        &assignment.id,
-        "implementing",
-        None,
-    )
-    .await
-    {
-        Ok(state) => state,
-        Err(error) => return Err(persistence_error_to_response(error)),
-    };
-    crate::project_event_publisher::publish_assignment_status_changed(
-        &state.event_bus,
-        project_id,
-        assignment_state,
-    );
+    // Bounded Review Loop (issue #44). Each pass writes durable Phase
+    // Outputs so review-loop evidence survives worktree cleanup. The
+    // accumulated `review_findings` from the prior rejection are threaded
+    // into the next implementation prompt so the agent addresses them.
+    let mut review_findings = String::new();
+    let mut loop_iteration: i64 = 0;
+    loop {
+        loop_iteration += 1;
 
-    let impl_prompt = render_implementation_prompt(
-        &project_instructions,
-        project,
-        plan_run,
-        baseline,
-        &exec_config,
-        assignment,
-        &raw_text,
-    );
-    let impl_stdout = match state.plan_run_deps.implementation.run(&impl_prompt) {
-        Ok(stdout) => stdout,
-        Err(error) => {
-            return Err(fail_assignment(
-                state,
-                project_id,
-                plan_run,
-                assignment,
-                "implementation",
-                &error.to_string(),
-                "urn:agentic-afk:implementation-phase-failed",
-            )
-            .await);
-        }
-    };
-    let impl_parsed = match agentic_afk_orchestrator::parse_implementation_output(&impl_stdout) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return Err(fail_assignment(
-                state,
-                project_id,
-                plan_run,
-                assignment,
-                "implementation",
-                &error,
-                "urn:agentic-afk:implementation-output-unparseable",
-            )
-            .await);
-        }
-    };
-    if impl_parsed.outcome != "ready_for_review" {
-        return Err(fail_assignment(
-            state,
-            project_id,
-            plan_run,
-            assignment,
-            "implementation",
-            &format!(
-                "implementation outcome `{}` does not enter Review Phase in this slice",
-                impl_parsed.outcome
-            ),
-            "urn:agentic-afk:implementation-not-ready",
-        )
-        .await);
-    }
-    let impl_output = persistence::record_assignment_phase_output(
-        &state.db,
-        &plan_run.id,
-        &assignment.id,
-        "implementation",
-        &impl_parsed.outcome,
-        &impl_parsed.body,
-    )
-    .await
-    .map_err(persistence_error_to_response)?;
-    crate::project_event_publisher::publish_plan_run_phase_completed(
-        &state.event_bus,
-        project_id,
-        &plan_run.id,
-        impl_output.clone(),
-    );
-
-    let assignment_state = match persistence::set_assignment_status(
-        &state.db,
-        &assignment.id,
-        "implemented",
-        None,
-    )
-    .await
-    {
-        Ok(state) => state,
-        Err(error) => return Err(persistence_error_to_response(error)),
-    };
-    crate::project_event_publisher::publish_assignment_status_changed(
-        &state.event_bus,
-        project_id,
-        assignment_state,
-    );
-
-    let review_prompt = render_review_prompt(
-        &project_instructions,
-        project,
-        plan_run,
-        baseline,
-        &exec_config,
-        assignment,
-        &raw_text,
-        &impl_parsed.body,
-    );
-    let review_stdout = match state.plan_run_deps.review.run(&review_prompt) {
-        Ok(stdout) => stdout,
-        Err(error) => {
-            return Err(fail_assignment(
-                state,
-                project_id,
-                plan_run,
-                assignment,
-                "review",
-                &error.to_string(),
-                "urn:agentic-afk:review-phase-failed",
-            )
-            .await);
-        }
-    };
-    let review_parsed = match agentic_afk_orchestrator::parse_review_output(&review_stdout) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return Err(fail_assignment(
-                state,
-                project_id,
-                plan_run,
-                assignment,
-                "review",
-                &error,
-                "urn:agentic-afk:review-output-unparseable",
-            )
-            .await);
-        }
-    };
-    let review_output = persistence::record_assignment_phase_output(
-        &state.db,
-        &plan_run.id,
-        &assignment.id,
-        "review",
-        &review_parsed.outcome,
-        &review_parsed.body,
-    )
-    .await
-    .map_err(persistence_error_to_response)?;
-    crate::project_event_publisher::publish_plan_run_phase_completed(
-        &state.event_bus,
-        project_id,
-        &plan_run.id,
-        review_output.clone(),
-    );
-
-    if review_parsed.outcome != "approved" {
-        // The Review Loop (issue #44) will turn this into another
-        // implementation pass. This slice surfaces the rejection by
-        // marking the assignment as `rejected` and the Plan Run as
-        // failed.
-        let rejected = persistence::set_assignment_status(
+        // Transition assignment status -> implementing.
+        let assignment_state = persistence::set_assignment_status(
             &state.db,
             &assignment.id,
-            "rejected",
-            Some("review rejected; Review Loop not implemented in this slice"),
+            "implementing",
+            None,
         )
         .await
         .map_err(persistence_error_to_response)?;
         crate::project_event_publisher::publish_assignment_status_changed(
             &state.event_bus,
             project_id,
-            rejected,
+            assignment_state,
         );
-        if let Ok(run) =
-            persistence::finish_plan_run(&state.db, &plan_run.id, "failed").await
-        {
-            crate::project_event_publisher::publish_plan_run_completed(
-                &state.event_bus,
-                project_id,
-                run,
-            );
-        }
-        return Err(sync_problem_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "urn:agentic-afk:review-rejected",
-            "Internal Server Error",
-            "Review Phase rejected the assignment".to_string(),
-        ));
-    }
 
-    let reviewed = persistence::set_assignment_status(&state.db, &assignment.id, "reviewed", None)
+        let impl_prompt = render_implementation_prompt(
+            &project_instructions,
+            project,
+            plan_run,
+            baseline,
+            &exec_config,
+            assignment,
+            &raw_text,
+            &review_findings,
+        );
+        let impl_stdout = match state.plan_run_deps.implementation.run(&impl_prompt) {
+            Ok(stdout) => stdout,
+            Err(error) => {
+                return Err(fail_assignment(
+                    state,
+                    project_id,
+                    plan_run,
+                    assignment,
+                    "implementation",
+                    &error.to_string(),
+                    "urn:agentic-afk:implementation-phase-failed",
+                )
+                .await);
+            }
+        };
+        let impl_parsed = match agentic_afk_orchestrator::parse_implementation_output(&impl_stdout)
+        {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return Err(fail_assignment(
+                    state,
+                    project_id,
+                    plan_run,
+                    assignment,
+                    "implementation",
+                    &error,
+                    "urn:agentic-afk:implementation-output-unparseable",
+                )
+                .await);
+            }
+        };
+        if impl_parsed.outcome != "ready_for_review" {
+            return Err(fail_assignment(
+                state,
+                project_id,
+                plan_run,
+                assignment,
+                "implementation",
+                &format!(
+                    "implementation outcome `{}` does not enter Review Phase",
+                    impl_parsed.outcome
+                ),
+                "urn:agentic-afk:implementation-not-ready",
+            )
+            .await);
+        }
+        let impl_output = persistence::record_assignment_phase_output(
+            &state.db,
+            &plan_run.id,
+            &assignment.id,
+            "implementation",
+            &impl_parsed.outcome,
+            &impl_parsed.body,
+        )
         .await
         .map_err(persistence_error_to_response)?;
+        crate::project_event_publisher::publish_plan_run_phase_completed(
+            &state.event_bus,
+            project_id,
+            &plan_run.id,
+            impl_output.clone(),
+        );
+
+        let assignment_state = persistence::set_assignment_status(
+            &state.db,
+            &assignment.id,
+            "implemented",
+            None,
+        )
+        .await
+        .map_err(persistence_error_to_response)?;
+        crate::project_event_publisher::publish_assignment_status_changed(
+            &state.event_bus,
+            project_id,
+            assignment_state,
+        );
+
+        let review_prompt = render_review_prompt(
+            &project_instructions,
+            project,
+            plan_run,
+            baseline,
+            &exec_config,
+            assignment,
+            &raw_text,
+            &impl_parsed.body,
+        );
+        let review_stdout = match state.plan_run_deps.review.run(&review_prompt) {
+            Ok(stdout) => stdout,
+            Err(error) => {
+                return Err(fail_assignment(
+                    state,
+                    project_id,
+                    plan_run,
+                    assignment,
+                    "review",
+                    &error.to_string(),
+                    "urn:agentic-afk:review-phase-failed",
+                )
+                .await);
+            }
+        };
+        let review_parsed = match agentic_afk_orchestrator::parse_review_output(&review_stdout) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return Err(fail_assignment(
+                    state,
+                    project_id,
+                    plan_run,
+                    assignment,
+                    "review",
+                    &error,
+                    "urn:agentic-afk:review-output-unparseable",
+                )
+                .await);
+            }
+        };
+        let review_output = persistence::record_assignment_phase_output(
+            &state.db,
+            &plan_run.id,
+            &assignment.id,
+            "review",
+            &review_parsed.outcome,
+            &review_parsed.body,
+        )
+        .await
+        .map_err(persistence_error_to_response)?;
+        crate::project_event_publisher::publish_plan_run_phase_completed(
+            &state.event_bus,
+            project_id,
+            &plan_run.id,
+            review_output.clone(),
+        );
+
+        if review_parsed.outcome == "approved" {
+            let reviewed =
+                persistence::set_assignment_status(&state.db, &assignment.id, "reviewed", None)
+                    .await
+                    .map_err(persistence_error_to_response)?;
+            crate::project_event_publisher::publish_assignment_status_changed(
+                &state.event_bus,
+                project_id,
+                reviewed,
+            );
+            return Ok(());
+        }
+
+        // Rejected: bump the per-assignment Review Loop counter, then
+        // either block (if we've reached the Project Review Retry Limit)
+        // or loop into another implementation pass with the findings.
+        let rejection_count = persistence::increment_review_rejection(&state.db, &assignment.id)
+            .await
+            .map_err(persistence_error_to_response)?;
+        review_findings = extract_review_findings(&review_parsed.body);
+
+        if rejection_count >= exec_config.review_retry_limit {
+            let reason = format!(
+                "Review Loop exhausted: {rejection_count} rejection(s) reached the Project Review Retry Limit ({}).",
+                exec_config.review_retry_limit
+            );
+            return Err(block_review_loop_exhaustion(
+                state,
+                project,
+                project_id,
+                plan_run,
+                assignment,
+                &reason,
+            )
+            .await);
+        }
+
+        // Sanity guard: avoid an unbounded loop if the limit is set
+        // higher than the agent stubs can produce. The retry limit cap
+        // above is the canonical bound; this is just defense in depth.
+        if loop_iteration > exec_config.review_retry_limit + 1 {
+            let reason = format!(
+                "Review Loop ran {loop_iteration} iterations without converging; blocking."
+            );
+            return Err(block_review_loop_exhaustion(
+                state,
+                project,
+                project_id,
+                plan_run,
+                assignment,
+                &reason,
+            )
+            .await);
+        }
+    }
+}
+
+fn extract_review_findings(body: &serde_json::Value) -> String {
+    body.get("findings")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|text| format!("- {text}")))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// Move the assignment into a coarse `blocked` lifecycle, write that
+/// lifecycle back to the Issue Source so the next sync reflects the block,
+/// finish the Plan Run as failed, and return a Response so the caller can
+/// short-circuit. Used when the Review Loop exhausts the retry limit.
+async fn block_review_loop_exhaustion(
+    state: &AppState,
+    project: &ProjectResponse,
+    project_id: &str,
+    plan_run: &PlanRunResponse,
+    assignment: &IssueAssignmentResponse,
+    reason: &str,
+) -> Response {
+    let blocked = match persistence::block_assignment(&state.db, &assignment.id, reason).await {
+        Ok(updated) => updated,
+        Err(error) => return persistence_error_to_response(error),
+    };
     crate::project_event_publisher::publish_assignment_status_changed(
         &state.event_bus,
         project_id,
-        reviewed,
+        blocked.clone(),
     );
-    Ok(())
+
+    // Write the coarse `blocked` Lifecycle Status back to the Issue Source
+    // so the next sync reflects the block; the next Plan Run's planning
+    // snapshot will not surface this Source Issue as eligible (it lands in
+    // the `active` bucket via the lifecycle).
+    if let Some(source) = project.enabled_issue_source.as_ref() {
+        if let Err(error) = write_assignment_lifecycle(
+            &state.config.gh_binary_path,
+            project,
+            source,
+            &assignment.source_id,
+            "blocked",
+        ) {
+            // A lifecycle write-back failure should not corrupt the block
+            // itself; record it on the activity stream / fail Plan Run
+            // anyway but make it visible.
+            eprintln!(
+                "warning: failed to write blocked Lifecycle Status back to Issue Source: {error}"
+            );
+        }
+    }
+
+    if let Ok(run) = persistence::finish_plan_run(&state.db, &plan_run.id, "failed").await {
+        crate::project_event_publisher::publish_plan_run_completed(
+            &state.event_bus,
+            project_id,
+            run,
+        );
+    }
+
+    // Surface the blocked Plan Run as the canonical CREATED outcome so the
+    // Dashboard sees review-retry state inline with the response. The
+    // Plan Run carries the blocked assignment via its `assignments` list.
+    let refreshed = match persistence::get_plan_run(&state.db, &plan_run.id).await {
+        Ok(run) => run,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    (StatusCode::CREATED, Json(refreshed)).into_response()
 }
 
 async fn fail_assignment(
@@ -2629,6 +2788,7 @@ fn render_implementation_prompt(
     config: &ProjectExecutionConfigResponse,
     assignment: &IssueAssignmentResponse,
     source_issue_brief: &str,
+    review_findings: &str,
 ) -> String {
     let template = include_str!("../../../crates/orchestrator/prompts/plan-run/implement.md");
     template
@@ -2641,7 +2801,7 @@ fn render_implementation_prompt(
         .replace("{{SOURCE_ISSUE_TITLE}}", &assignment.source_title)
         .replace("{{ISSUE_BRANCH}}", &assignment.branch)
         .replace("{{SOURCE_ISSUE_BRIEF}}", source_issue_brief)
-        .replace("{{REVIEW_FINDINGS}}", "")
+        .replace("{{REVIEW_FINDINGS}}", review_findings)
 }
 
 #[allow(clippy::too_many_arguments)]

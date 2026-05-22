@@ -323,7 +323,10 @@ async fn unparseable_implementation_output_blocks_the_assignment() {
 }
 
 #[tokio::test]
-async fn rejected_review_marks_assignment_rejected_and_fails_plan_run() {
+async fn rejected_review_with_exhausted_retry_limit_blocks_assignment_and_fails_plan_run() {
+    // The Review Retry Limit defaults to 1 in `build_fixture`, so a single
+    // rejection exhausts the Review Loop (issue #44) and blocks the
+    // assignment instead of returning HTTP 500.
     let fixture = build_fixture(
         r#"<impl>{"outcome":"ready_for_review","summary":"s","commits":[],"verification":[],"gaps":[]}</impl>"#,
         r#"<review>{"outcome":"rejected","findings":["missing tests"],"summary":"needs more","verification":[],"gaps":[]}</review>"#,
@@ -332,19 +335,18 @@ async fn rejected_review_marks_assignment_rejected_and_fails_plan_run() {
     .await;
     let pid = fixture.project.id.0.clone();
     let resp = start(&fixture.router, &pid).await;
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = read_text(resp).await;
-    assert!(
-        body.contains("urn:agentic-afk:review-rejected"),
-        "unexpected body: {body}"
-    );
+    // Blocked Plan Run surfaces as the canonical CREATED outcome so the
+    // Dashboard can render review-retry state without a 500 round trip.
+    assert_eq!(resp.status(), StatusCode::CREATED);
     let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 10)
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].state, "failed");
-    assert_eq!(runs[0].assignments[0].status, "rejected");
-    // Review Phase Output is still persisted as evidence.
+    assert_eq!(runs[0].assignments[0].status, "blocked");
+    assert_eq!(runs[0].assignments[0].review_rejection_count, 1);
+    assert!(runs[0].assignments[0].block_reason.is_some());
+    // Review Phase Output is still persisted as durable Review Loop evidence.
     assert!(
         runs[0]
             .assignments[0]

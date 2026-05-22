@@ -696,11 +696,14 @@ pub(crate) async fn get_issue_assignment(
             Option<String>,
             Option<String>,
             Option<String>,
+            i64,
+            Option<String>,
         ),
     >(
         r#"
         SELECT id, project_id, source_id, source_title, branch, worktree_path, status,
-               status_detail, plan_run_id, selection_summary
+               status_detail, plan_run_id, selection_summary,
+               review_rejection_count, block_reason
         FROM issue_assignments
         WHERE id = ?
         "#,
@@ -719,6 +722,8 @@ pub(crate) async fn get_issue_assignment(
         status_detail,
         plan_run_id,
         selection_summary,
+        review_rejection_count,
+        block_reason,
     )) = row
     else {
         return Err(PersistenceError::AssignmentNotFound(
@@ -766,7 +771,87 @@ pub(crate) async fn get_issue_assignment(
         plan_run_id,
         selection_summary,
         phase_outputs,
+        review_rejection_count,
+        block_reason,
     })
+}
+
+/// Increment the review rejection counter for one Issue Assignment, then
+/// return the updated count.
+pub async fn increment_review_rejection(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<i64, PersistenceError> {
+    let result =
+        sqlx::query("UPDATE issue_assignments SET review_rejection_count = review_rejection_count + 1 WHERE id = ?")
+            .bind(assignment_id)
+            .execute(db)
+            .await?;
+    if result.rows_affected() == 0 {
+        return Err(PersistenceError::AssignmentNotFound(
+            assignment_id.to_string(),
+        ));
+    }
+    let row = sqlx::query_as::<_, (i64,)>(
+        "SELECT review_rejection_count FROM issue_assignments WHERE id = ?",
+    )
+    .bind(assignment_id)
+    .fetch_one(db)
+    .await?;
+    Ok(row.0)
+}
+
+/// Move an Issue Assignment into the coarse blocked lifecycle state with a
+/// human-readable reason. Used when the Review Loop exhausts the per-Project
+/// Review Retry Limit (issue #44) and for other phase-level block paths.
+pub async fn block_assignment(
+    db: &Db,
+    assignment_id: &str,
+    reason: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    let result = sqlx::query(
+        "UPDATE issue_assignments SET status = 'blocked', status_detail = ?, block_reason = ? WHERE id = ?",
+    )
+    .bind(reason)
+    .bind(reason)
+    .bind(assignment_id)
+    .execute(db)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(PersistenceError::AssignmentNotFound(
+            assignment_id.to_string(),
+        ));
+    }
+    get_issue_assignment(db, assignment_id).await
+}
+
+/// Clear the blocked lifecycle of an Issue Assignment without redefining
+/// `ready-for-agent` readiness. Resets the review rejection counter so a
+/// later Plan Run may pick up the Source Issue again. Returns the updated
+/// assignment.
+pub async fn re_enable_blocked_assignment(
+    db: &Db,
+    assignment_id: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    let current = get_issue_assignment(db, assignment_id).await?;
+    if current.status != "blocked" {
+        return Err(PersistenceError::InvalidIssueSource(format!(
+            "Issue Assignment {assignment_id} is not blocked (status={})",
+            current.status
+        )));
+    }
+    let result = sqlx::query(
+        "UPDATE issue_assignments SET status = 're_enabled', status_detail = NULL, block_reason = NULL, review_rejection_count = 0 WHERE id = ?",
+    )
+    .bind(assignment_id)
+    .execute(db)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(PersistenceError::AssignmentNotFound(
+            assignment_id.to_string(),
+        ));
+    }
+    get_issue_assignment(db, assignment_id).await
 }
 
 /// Insert a provisional Issue Assignment nested under a Plan Run.

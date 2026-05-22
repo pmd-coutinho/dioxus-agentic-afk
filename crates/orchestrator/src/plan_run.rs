@@ -118,54 +118,103 @@ pub trait ReviewPhaseRunner: Send + Sync {
     fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError>;
 }
 
-/// Test runner that returns canned stdout and records the last prompt.
+/// Test runner that returns canned stdout. A single stdout repeats on each
+/// call; pass multiple stdouts via `with_stdouts` to return successive
+/// values (the last one repeats after the queue is exhausted), which the
+/// Review Loop tests rely on (issue #44).
 pub struct FakeImplementationPhaseRunner {
-    stdout: String,
-    last_prompt: Mutex<Option<String>>,
+    stdouts: Mutex<Vec<String>>,
+    prompts: Mutex<Vec<String>>,
 }
 
 impl FakeImplementationPhaseRunner {
     pub fn with_stdout(stdout: impl Into<String>) -> Self {
+        Self::with_stdouts(vec![stdout.into()])
+    }
+
+    pub fn with_stdouts<S: Into<String>>(stdouts: impl IntoIterator<Item = S>) -> Self {
+        let stdouts: Vec<String> = stdouts.into_iter().map(Into::into).collect();
+        assert!(
+            !stdouts.is_empty(),
+            "FakeImplementationPhaseRunner needs at least one stdout"
+        );
         Self {
-            stdout: stdout.into(),
-            last_prompt: Mutex::new(None),
+            stdouts: Mutex::new(stdouts),
+            prompts: Mutex::new(Vec::new()),
         }
     }
 
     pub fn last_prompt(&self) -> Option<String> {
-        self.last_prompt.lock().unwrap().clone()
+        self.prompts.lock().unwrap().last().cloned()
+    }
+
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.prompts.lock().unwrap().len()
     }
 }
 
 impl ImplementationPhaseRunner for FakeImplementationPhaseRunner {
     fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
-        *self.last_prompt.lock().unwrap() = Some(prompt.to_string());
-        Ok(self.stdout.clone())
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        let mut queue = self.stdouts.lock().unwrap();
+        let stdout = if queue.len() == 1 {
+            queue[0].clone()
+        } else {
+            queue.remove(0)
+        };
+        Ok(stdout)
     }
 }
 
 pub struct FakeReviewPhaseRunner {
-    stdout: String,
-    last_prompt: Mutex<Option<String>>,
+    stdouts: Mutex<Vec<String>>,
+    prompts: Mutex<Vec<String>>,
 }
 
 impl FakeReviewPhaseRunner {
     pub fn with_stdout(stdout: impl Into<String>) -> Self {
+        Self::with_stdouts(vec![stdout.into()])
+    }
+
+    pub fn with_stdouts<S: Into<String>>(stdouts: impl IntoIterator<Item = S>) -> Self {
+        let stdouts: Vec<String> = stdouts.into_iter().map(Into::into).collect();
+        assert!(
+            !stdouts.is_empty(),
+            "FakeReviewPhaseRunner needs at least one stdout"
+        );
         Self {
-            stdout: stdout.into(),
-            last_prompt: Mutex::new(None),
+            stdouts: Mutex::new(stdouts),
+            prompts: Mutex::new(Vec::new()),
         }
     }
 
     pub fn last_prompt(&self) -> Option<String> {
-        self.last_prompt.lock().unwrap().clone()
+        self.prompts.lock().unwrap().last().cloned()
+    }
+
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.prompts.lock().unwrap().len()
     }
 }
 
 impl ReviewPhaseRunner for FakeReviewPhaseRunner {
     fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
-        *self.last_prompt.lock().unwrap() = Some(prompt.to_string());
-        Ok(self.stdout.clone())
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        let mut queue = self.stdouts.lock().unwrap();
+        let stdout = if queue.len() == 1 {
+            queue[0].clone()
+        } else {
+            queue.remove(0)
+        };
+        Ok(stdout)
     }
 }
 

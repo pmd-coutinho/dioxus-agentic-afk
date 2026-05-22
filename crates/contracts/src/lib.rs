@@ -140,6 +140,15 @@ pub struct IssueAssignmentResponse {
     /// `claimed` assignments that have not yet run a phase.
     #[serde(default)]
     pub phase_outputs: Vec<PhaseOutputResponse>,
+    /// Number of rejected Review Phases recorded against this assignment.
+    /// Reset to zero when a human re-enables a blocked assignment.
+    #[serde(default)]
+    pub review_rejection_count: i64,
+    /// Human-readable reason captured when an assignment was blocked by an
+    /// exhausted Review Loop (or another phase failure). `None` for
+    /// assignments that have never been blocked.
+    #[serde(default)]
+    pub block_reason: Option<String>,
 }
 
 // --- Plan Run contracts (ADR-0034) ---

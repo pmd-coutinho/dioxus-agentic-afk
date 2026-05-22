@@ -185,6 +185,7 @@ pub enum MutationKey {
     EnableIssueSource(ProjectId, String, String),
     SetExecutionConfig(ProjectId),
     StartPlanRun(ProjectId),
+    ReEnableAssignment(ProjectId, IssueAssignmentId),
 }
 
 /// Identifier for a Source Issue (the upstream issue tracker's issue id).
@@ -508,6 +509,8 @@ mod tests {
             plan_run_id: None,
             selection_summary: None,
             phase_outputs: vec![],
+            review_rejection_count: 0,
+            block_reason: None,
         }
     }
 
