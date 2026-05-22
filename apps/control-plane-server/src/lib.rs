@@ -205,6 +205,7 @@ pub fn router_with_bus(config: ControlPlaneConfig, db: Db, event_bus: event_bus:
         .route("/api/projects/{id}/activity", get(get_project_activity))
         .route("/api/projects/{id}/snapshot", get(get_project_snapshot))
         .route("/api/projects/{id}/events", get(get_project_events))
+        .merge(test_endpoints_router())
         .route(
             "/api/projects/{id}/source-issues/{source_id}/lifecycle-status",
             axum::routing::put(update_lifecycle_status),
@@ -731,18 +732,81 @@ async fn get_project_snapshot(
 /// Last-Event-ID` before emitting live events. When the requested sequence
 /// predates the ring (or the server has restarted), the first emitted event
 /// is `Resync`, signalling the client to re-hydrate via `/snapshot`.
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    last_event_id: Option<u64>,
+}
+
+/// Test-only request body for `POST /api/_test/projects/{id}/activity`.
+#[derive(Debug, Deserialize)]
+struct TestRecordActivityRequest {
+    kind: String,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
+/// Mounted only when `AGENTIC_AFK_TEST_ENDPOINTS=1`. Records a Project
+/// Activity entry via the production `activity_publisher`, so Playwright can
+/// drive the live-update flow without needing the full assignment pipeline
+/// (worktrunk + codex binaries) available in CI.
+fn test_endpoints_router() -> Router<Arc<AppState>> {
+    if std::env::var("AGENTIC_AFK_TEST_ENDPOINTS").as_deref() != Ok("1") {
+        return Router::new();
+    }
+    Router::new().route(
+        "/api/_test/projects/{id}/activity",
+        post(test_record_activity),
+    )
+}
+
+async fn test_record_activity(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<TestRecordActivityRequest>,
+) -> Response {
+    match crate::activity_publisher::record_project_activity(
+        &state.db,
+        &state.event_bus,
+        &id,
+        None,
+        &request.kind,
+        request.detail.as_deref(),
+    )
+    .await
+    {
+        Ok(entry) => {
+            let wire = ProjectActivityEntryResponse {
+                id: entry.id,
+                project_id: entry.project_id,
+                assignment_id: entry.assignment_id,
+                kind: entry.kind,
+                detail: entry.detail,
+                recorded_at: entry.recorded_at,
+            };
+            (StatusCode::OK, Json(wire)).into_response()
+        }
+        Err(error) => persistence_error_to_response(error),
+    }
+}
+
 async fn get_project_events(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<EventsQuery>,
     headers: axum::http::HeaderMap,
 ) -> Response {
     if let Err(error) = persistence::get_project(&state.db, &id).await {
         return persistence_error_to_response(error);
     }
+    // `Last-Event-ID` header (sent by browsers on EventSource auto-reconnect)
+    // takes precedence. On first connect the browser does not send the
+    // header, so the Dashboard passes the snapshot sequence via the
+    // `last_event_id` query parameter instead.
     let last_event_id = headers
         .get(axum::http::header::HeaderName::from_static("last-event-id"))
         .and_then(|value| value.to_str().ok())
-        .and_then(|raw| raw.parse::<u64>().ok());
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .or(query.last_event_id);
     let project_id = ProjectId(id);
     let stream = state.event_bus.subscribe(&project_id, last_event_id);
     use futures_util::StreamExt as _;

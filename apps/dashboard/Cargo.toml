@@ -10,4 +10,5 @@ agentic-afk-contracts.workspace = true
 dioxus = { version = "=0.7.9", features = ["web", "router"] }
 gloo-net = "0.6.0"
 serde_json.workspace = true
-web-sys = { version = "0.3.82", features = ["Location", "Window"] }
+wasm-bindgen = "0.2.100"
+web-sys = { version = "0.3.82", features = ["Event", "EventSource", "EventSourceInit", "Location", "MessageEvent", "Window"] }

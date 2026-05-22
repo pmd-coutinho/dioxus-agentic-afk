@@ -3,8 +3,68 @@
 use std::collections::HashMap;
 use std::future::Future;
 
-use agentic_afk_contracts::{ProblemDetail, ProjectId};
+use agentic_afk_contracts::{
+    ProblemDetail, ProjectActivityEntryResponse, ProjectEvent, ProjectId, ProjectSnapshot,
+};
 use dioxus::prelude::*;
+
+/// Outcome of applying one sequenced `ProjectEvent` to `ProjectStoreState`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplyOutcome {
+    /// Event was sequential and merged into state.
+    Merged,
+    /// Event sequence is `<= last_seen_seq`; ignored.
+    Stale,
+    /// Sequence gap or explicit `Resync`; client must rehydrate via `/snapshot`.
+    Rehydrate,
+}
+
+/// Pure store state hydrated from `/snapshot` then driven by SSE deltas.
+/// Pure so tests can exercise hydrate-then-merge without a Dioxus runtime.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProjectStoreState {
+    pub activity: Vec<ProjectActivityEntryResponse>,
+    pub last_seen_seq: u64,
+    pub needs_rehydrate: bool,
+}
+
+impl ProjectStoreState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace activity tail and reset sequence to the snapshot's value.
+    pub fn hydrate(&mut self, snapshot: ProjectSnapshot, sequence: u64) {
+        self.activity = snapshot.activity;
+        self.last_seen_seq = sequence;
+        self.needs_rehydrate = false;
+    }
+
+    /// Apply one sequenced `ProjectEvent`. Enforces sequence monotonicity:
+    /// stale events are ignored, sequential events merge into state, gaps and
+    /// explicit `Resync` events flag the store as needing rehydrate.
+    pub fn apply_event(&mut self, sequence: u64, event: ProjectEvent) -> ApplyOutcome {
+        if matches!(event, ProjectEvent::Resync) {
+            self.needs_rehydrate = true;
+            return ApplyOutcome::Rehydrate;
+        }
+        if sequence <= self.last_seen_seq {
+            return ApplyOutcome::Stale;
+        }
+        if sequence > self.last_seen_seq + 1 {
+            self.needs_rehydrate = true;
+            return ApplyOutcome::Rehydrate;
+        }
+        match event {
+            ProjectEvent::Activity(entry) => {
+                self.activity.insert(0, entry);
+            }
+            ProjectEvent::Resync => unreachable!("handled above"),
+        }
+        self.last_seen_seq = sequence;
+        ApplyOutcome::Merged
+    }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum MutationKey {
@@ -161,6 +221,7 @@ pub struct ProjectStore {
     toasts: Signal<Vec<Toast>>,
     next_toast_id: Signal<u64>,
     reload_counter: Signal<u64>,
+    state: Signal<ProjectStoreState>,
 }
 
 impl ProjectStore {
@@ -170,7 +231,33 @@ impl ProjectStore {
             toasts: Signal::new(Vec::new()),
             next_toast_id: Signal::new(1),
             reload_counter: Signal::new(0),
+            state: Signal::new(ProjectStoreState::new()),
         }
+    }
+
+    /// Read-side signal for the SSE-driven Project state. Components read
+    /// `store.state().read().activity` etc.
+    pub fn state_signal(&self) -> Signal<ProjectStoreState> {
+        self.state
+    }
+
+    /// Replace activity tail and reset sequence to the snapshot's value.
+    pub fn hydrate(&self, snapshot: ProjectSnapshot, sequence: u64) {
+        self.state.clone().write().hydrate(snapshot, sequence);
+    }
+
+    /// Apply one sequenced `ProjectEvent` to the live state.
+    pub fn apply_event(&self, sequence: u64, event: ProjectEvent) -> ApplyOutcome {
+        self.state.clone().write().apply_event(sequence, event)
+    }
+
+    pub fn needs_rehydrate(&self) -> bool {
+        self.state.read().needs_rehydrate
+    }
+
+    /// Clear the rehydrate flag once a rehydrate has been kicked off.
+    pub fn clear_rehydrate_flag(&self) {
+        self.state.clone().write().needs_rehydrate = false;
     }
 
     pub fn reload_counter(&self) -> Signal<u64> {
@@ -256,6 +343,112 @@ impl ProjectStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentic_afk_contracts::{
+        ProjectAssignmentStateResponse, ProjectResponse,
+    };
+
+    fn activity_entry(id: &str, kind: &str) -> ProjectActivityEntryResponse {
+        ProjectActivityEntryResponse {
+            id: id.to_string(),
+            project_id: "p".to_string(),
+            assignment_id: None,
+            kind: kind.to_string(),
+            detail: None,
+            recorded_at: "0".to_string(),
+        }
+    }
+
+    fn snapshot_with_activity(activity: Vec<ProjectActivityEntryResponse>) -> ProjectSnapshot {
+        ProjectSnapshot {
+            project: ProjectResponse {
+                id: ProjectId("p".to_string()),
+                path: String::new(),
+                trusted: true,
+                git_summary: None,
+                enabled_issue_source: None,
+            },
+            planning_snapshot: None,
+            assignment_state: ProjectAssignmentStateResponse {
+                active_assignment: None,
+                waiting_ready_issue_count: 0,
+            },
+            activity,
+        }
+    }
+
+    #[test]
+    fn sequential_event_merges_and_bumps_seq() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 5;
+
+        let outcome = state.apply_event(6, ProjectEvent::Activity(activity_entry("a1", "started")));
+
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert_eq!(state.last_seen_seq, 6);
+        assert_eq!(state.activity.len(), 1);
+        assert_eq!(state.activity[0].id, "a1");
+        assert!(!state.needs_rehydrate);
+    }
+
+    #[test]
+    fn stale_event_is_ignored() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 5;
+        state.activity.push(activity_entry("a-old", "k"));
+
+        let outcome = state.apply_event(5, ProjectEvent::Activity(activity_entry("dup", "k")));
+
+        assert_eq!(outcome, ApplyOutcome::Stale);
+        assert_eq!(state.last_seen_seq, 5);
+        assert_eq!(state.activity.len(), 1);
+        assert_eq!(state.activity[0].id, "a-old");
+        assert!(!state.needs_rehydrate);
+    }
+
+    #[test]
+    fn sequence_gap_triggers_rehydrate_without_merge() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 5;
+
+        let outcome = state.apply_event(8, ProjectEvent::Activity(activity_entry("a", "k")));
+
+        assert_eq!(outcome, ApplyOutcome::Rehydrate);
+        assert!(state.needs_rehydrate);
+        assert_eq!(state.last_seen_seq, 5);
+        assert!(state.activity.is_empty());
+    }
+
+    #[test]
+    fn resync_event_triggers_rehydrate() {
+        let mut state = ProjectStoreState::new();
+        state.last_seen_seq = 10;
+
+        let outcome = state.apply_event(99, ProjectEvent::Resync);
+
+        assert_eq!(outcome, ApplyOutcome::Rehydrate);
+        assert!(state.needs_rehydrate);
+        assert_eq!(state.last_seen_seq, 10);
+    }
+
+    #[test]
+    fn hydrate_then_merge_produces_combined_state() {
+        let mut state = ProjectStoreState::new();
+        let snapshot_activity = vec![
+            activity_entry("a-old-1", "started"),
+            activity_entry("a-old-2", "started"),
+        ];
+        state.hydrate(snapshot_with_activity(snapshot_activity), 7);
+
+        let _ = state.apply_event(8, ProjectEvent::Activity(activity_entry("a-new-1", "k")));
+        let _ = state.apply_event(9, ProjectEvent::Activity(activity_entry("a-new-2", "k")));
+
+        assert_eq!(state.last_seen_seq, 9);
+        assert!(!state.needs_rehydrate);
+        let ids: Vec<&str> = state.activity.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["a-new-2", "a-new-1", "a-old-1", "a-old-2"]);
+    }
+
+
 
     #[test]
     fn parses_validation_error_from_problem_json_4xx() {

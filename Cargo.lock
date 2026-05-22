@@ -42,6 +42,7 @@ dependencies = [
  "dioxus",
  "gloo-net",
  "serde_json",
+ "wasm-bindgen",
  "web-sys",
 ]
 
