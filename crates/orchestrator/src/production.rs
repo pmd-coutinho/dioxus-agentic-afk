@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use agentic_afk_contracts::{IssueSource, ProjectResponse};
+
 use crate::plan_run::{
     AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, ImplementationPhaseRunner,
     IntegrationBranchPusher, IntegrationBranchRefresher, IssueLifecycleWriter, MergePhaseRunner,
@@ -188,128 +190,47 @@ impl AssignmentWorktreeCleaner for GitAssignmentWorktreeCleaner {
     }
 }
 
-/// Issue Source kind passed to the production lifecycle writer.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum LifecycleSourceKind {
-    Github,
-    LocalMarkdown,
-}
-
 /// Real Issue Source lifecycle writer for the `Claimed` write-back the
-/// Plan Run coordinator emits when a planner selection is durably
-/// claimed. The merge / blocked write-backs go through the existing
-/// `write_assignment_lifecycle` helper in the control-plane-server, which
-/// already handles both Issue Source kinds; this adapter handles the
-/// `Claimed` boundary the orchestrator owns directly.
+/// Plan Run coordinator emits when a planner selection is durably claimed.
+/// Delegates to the canonical `write_assignment_lifecycle` helper in
+/// `coordinator.rs` so the `Claimed` write-back uses the exact same label
+/// scheme (`agentic-afk:claimed`) and local-markdown body format
+/// (`Lifecycle Status: claimed`) as the later blocked / completed
+/// write-backs.
 pub struct GhLifecycleWriter {
     pub gh_binary_path: PathBuf,
-    pub source_kind: LifecycleSourceKind,
-    pub source_locator: String,
-    pub project_path: PathBuf,
+    pub project: ProjectResponse,
+    pub source: IssueSource,
+}
+
+impl GhLifecycleWriter {
+    /// Construct a lifecycle writer from a Project + its enabled Issue
+    /// Source. Used by the Plan Run coordinator to wire production deps
+    /// per Plan Run once the project context is known.
+    pub fn for_project(
+        gh_binary_path: impl Into<PathBuf>,
+        project: ProjectResponse,
+        source: IssueSource,
+    ) -> Self {
+        Self {
+            gh_binary_path: gh_binary_path.into(),
+            project,
+            source,
+        }
+    }
 }
 
 impl IssueLifecycleWriter for GhLifecycleWriter {
     fn write_claimed(&self, source_id: &str) -> Result<(), PlanRunPhaseError> {
-        match self.source_kind {
-            LifecycleSourceKind::Github => write_github_claimed_label(
-                &self.gh_binary_path,
-                &self.source_locator,
-                source_id,
-            ),
-            LifecycleSourceKind::LocalMarkdown => write_local_markdown_claimed(
-                &self.project_path,
-                &self.source_locator,
-                source_id,
-            ),
-        }
-    }
-}
-
-fn write_github_claimed_label(
-    gh_binary_path: &Path,
-    locator: &str,
-    source_id: &str,
-) -> Result<(), PlanRunPhaseError> {
-    let output = Command::new(gh_binary_path)
-        .args([
-            "issue",
-            "edit",
+        crate::coordinator::write_assignment_lifecycle(
+            &self.gh_binary_path,
+            &self.project,
+            &self.source,
             source_id,
-            "--repo",
-            locator,
-            "--add-label",
-            "agentic-afk:claimed",
-            "--remove-label",
-            "agentic-afk:ready",
-        ])
-        .output()
-        .map_err(|e| {
-            PlanRunPhaseError::LifecycleWrite(format!("gh issue edit failed to spawn: {e}"))
-        })?;
-    if !output.status.success() {
-        return Err(PlanRunPhaseError::LifecycleWrite(format!(
-            "gh issue edit {source_id} on {locator}: {}",
-            command_output(&output)
-        )));
+            "claimed",
+        )
+        .map_err(PlanRunPhaseError::LifecycleWrite)
     }
-    Ok(())
-}
-
-fn write_local_markdown_claimed(
-    project_path: &Path,
-    relative_dir: &str,
-    source_id: &str,
-) -> Result<(), PlanRunPhaseError> {
-    // Local markdown Issue Source: rewrite the issue file's frontmatter
-    // `lifecycle_status` field to `claimed`. Best-effort: if the file is
-    // missing or has no frontmatter, surface as a lifecycle-write error
-    // for the coordinator to record.
-    let issue_path = project_path
-        .join(relative_dir)
-        .join(format!("{source_id}.md"));
-    let text = std::fs::read_to_string(&issue_path).map_err(|e| {
-        PlanRunPhaseError::LifecycleWrite(format!(
-            "failed to read local markdown issue {}: {e}",
-            issue_path.display()
-        ))
-    })?;
-    let rewritten = update_frontmatter_status(&text, "claimed").ok_or_else(|| {
-        PlanRunPhaseError::LifecycleWrite(format!(
-            "local markdown issue {} has no frontmatter to update",
-            issue_path.display()
-        ))
-    })?;
-    std::fs::write(&issue_path, rewritten).map_err(|e| {
-        PlanRunPhaseError::LifecycleWrite(format!(
-            "failed to write local markdown issue {}: {e}",
-            issue_path.display()
-        ))
-    })?;
-    Ok(())
-}
-
-fn update_frontmatter_status(text: &str, new_status: &str) -> Option<String> {
-    // Expect a leading `---\n...\n---\n` frontmatter block. Replace any
-    // existing `lifecycle_status:` line; otherwise insert one at the end
-    // of the frontmatter.
-    let rest = text.strip_prefix("---\n")?;
-    let end = rest.find("\n---")?;
-    let frontmatter = &rest[..end];
-    let body = &rest[end + 4..]; // skip "\n---"
-    let mut found = false;
-    let mut new_fm = Vec::new();
-    for line in frontmatter.lines() {
-        if line.starts_with("lifecycle_status:") {
-            new_fm.push(format!("lifecycle_status: {new_status}"));
-            found = true;
-        } else {
-            new_fm.push(line.to_string());
-        }
-    }
-    if !found {
-        new_fm.push(format!("lifecycle_status: {new_status}"));
-    }
-    Some(format!("---\n{}\n---{}", new_fm.join("\n"), body))
 }
 
 // --- Codex-driven phase runners ---
@@ -440,24 +361,45 @@ impl MergePhaseRunner for CodexMergePhaseRunner {
 mod tests {
     use super::*;
 
-    #[test]
-    fn update_frontmatter_status_replaces_existing_field() {
-        let text = "---\ntitle: Foo\nlifecycle_status: ready\n---\nbody\n";
-        let updated = update_frontmatter_status(text, "claimed").unwrap();
-        assert!(updated.contains("lifecycle_status: claimed"));
-        assert!(updated.contains("body"));
-        assert!(!updated.contains("lifecycle_status: ready"));
+    fn project_with_path(path: &Path) -> ProjectResponse {
+        ProjectResponse {
+            id: agentic_afk_contracts::ProjectId("test-project".to_string()),
+            path: path.to_string_lossy().into_owned(),
+            git_summary: None,
+            trusted: true,
+            enabled_issue_source: None,
+        }
     }
 
     #[test]
-    fn update_frontmatter_status_inserts_when_missing() {
-        let text = "---\ntitle: Foo\n---\nbody\n";
-        let updated = update_frontmatter_status(text, "claimed").unwrap();
-        assert!(updated.contains("lifecycle_status: claimed"));
-    }
+    fn gh_lifecycle_writer_writes_local_markdown_claimed() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let project_path = std::env::temp_dir()
+            .join(format!("agentic-afk-lifecycle-{}-{nonce}", std::process::id()));
+        let issues_dir = project_path.join("issues");
+        std::fs::create_dir_all(&issues_dir).unwrap();
+        let issue_path = issues_dir.join("42.md");
+        std::fs::write(
+            &issue_path,
+            "# 42 — Sample issue\n\nLifecycle Status: ready\n\nbody\n",
+        )
+        .unwrap();
 
-    #[test]
-    fn update_frontmatter_status_returns_none_without_frontmatter() {
-        assert!(update_frontmatter_status("no frontmatter here", "claimed").is_none());
+        let project = project_with_path(&project_path);
+        let source = IssueSource {
+            kind: "local_markdown".to_string(),
+            locator: "issues".to_string(),
+        };
+        let writer = GhLifecycleWriter::for_project(PathBuf::from("gh"), project, source);
+        let result = writer.write_claimed("42");
+
+        let updated = std::fs::read_to_string(&issue_path).unwrap();
+        let _ = std::fs::remove_dir_all(&project_path);
+        result.expect("local markdown claimed write");
+        assert!(updated.contains("Lifecycle Status: claimed"));
+        assert!(!updated.contains("Lifecycle Status: ready"));
     }
 }

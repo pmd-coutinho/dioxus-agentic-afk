@@ -30,7 +30,9 @@ use crate::plan_run::{
     UnimplementedWorktreeProvisioner,
 };
 use crate::production::{
-    GitAssignmentWorktreeCleaner, GitIntegrationBranchPusher, GitIntegrationBranchRefresher,
+    CodexImplementationPhaseRunner, CodexMergePhaseRunner, CodexPlanningPhaseRunner,
+    CodexReviewPhaseRunner, GhLifecycleWriter, GitAssignmentWorktreeCleaner,
+    GitIntegrationBranchPusher, GitIntegrationBranchRefresher,
     WorktrunkAssignmentWorktreeProvisioner,
 };
 
@@ -54,6 +56,16 @@ pub struct PlanRunDeps {
     /// Clean up the Assignment Worktree and deterministic branch after a
     /// successful merge so the worktree does not linger past completion.
     pub cleaner: Arc<dyn AssignmentWorktreeCleaner>,
+    /// When set, the Plan Run coordinator builds per-Plan-Run production
+    /// Codex phase runners (`planner`, `implementation`, `review`, `merger`)
+    /// against this binary and the Project path, replacing the placeholder
+    /// runners. `None` means tests own the runner wiring directly.
+    pub production_codex_binary: Option<PathBuf>,
+    /// When set, the Plan Run coordinator builds a per-Plan-Run production
+    /// `IssueLifecycleWriter` against this `gh` binary and the Project's
+    /// enabled Issue Source. `None` means tests own the lifecycle writer
+    /// directly.
+    pub production_gh_binary: Option<PathBuf>,
 }
 
 impl PlanRunDeps {
@@ -68,19 +80,25 @@ impl PlanRunDeps {
             merger: Arc::new(UnimplementedMergePhaseRunner),
             pusher: Arc::new(UnimplementedIntegrationBranchPusher),
             cleaner: Arc::new(UnimplementedAssignmentWorktreeCleaner),
+            production_codex_binary: None,
+            production_gh_binary: None,
         }
     }
 
-    /// Wire the project-agnostic Plan Run seams to real implementations
-    /// for production. The four phase runners (planning, implementation,
-    /// review, merge) and the Issue Source lifecycle writer remain
-    /// `Unimplemented` here because their construction requires per-project
-    /// context (codex binary path bound to the Project's path, Issue
-    /// Source kind/locator) that the current `PlanRunDeps` shape does not
-    /// carry. Until that final wiring lands this delivers real Integration
-    /// Branch refresh, worktree provisioning, push, and cleanup against
-    /// the developer's working tree.
-    pub fn production(worktrunk_binary_path: PathBuf) -> Self {
+    /// Wire the Plan Run seams to real implementations for production. The
+    /// Integration Branch refresher / pusher / cleaner and the Worktrunk
+    /// provisioner are project-agnostic and constructed eagerly. The four
+    /// Codex phase runners and the Issue Source lifecycle writer need
+    /// per-Plan-Run project context (the Project path the Codex binary
+    /// runs in, the Project's enabled Issue Source kind/locator) so the
+    /// coordinator resolves them lazily per Plan Run via
+    /// [`resolve_deps_for_project`]. The placeholder runners stored here
+    /// only fire if the coordinator ever skipped resolution.
+    pub fn production(
+        worktrunk_binary_path: PathBuf,
+        codex_binary_path: PathBuf,
+        gh_binary_path: PathBuf,
+    ) -> Self {
         Self {
             refresher: Arc::new(GitIntegrationBranchRefresher),
             planner: Arc::new(UnimplementedPlanningPhaseRunner),
@@ -93,6 +111,8 @@ impl PlanRunDeps {
             merger: Arc::new(UnimplementedMergePhaseRunner),
             pusher: Arc::new(GitIntegrationBranchPusher),
             cleaner: Arc::new(GitAssignmentWorktreeCleaner),
+            production_codex_binary: Some(codex_binary_path),
+            production_gh_binary: Some(gh_binary_path),
         }
     }
 
@@ -123,8 +143,50 @@ impl PlanRunDeps {
             )),
             pusher: Arc::new(FakeIntegrationBranchPusher::new()),
             cleaner: Arc::new(FakeAssignmentWorktreeCleaner::new()),
+            production_codex_binary: None,
+            production_gh_binary: None,
         }
     }
+}
+
+/// Resolve production phase runners and lifecycle writer using the given
+/// Project as per-Plan-Run context. If `deps` carries production binary
+/// paths, returns a new `PlanRunDeps` whose Codex runners point at the
+/// Project path and whose lifecycle writer is bound to the Project's
+/// enabled Issue Source. Otherwise returns a clone of `deps` unchanged so
+/// tests keep their injected fakes.
+pub fn resolve_deps_for_project(
+    deps: &PlanRunDeps,
+    project: &agentic_afk_contracts::ProjectResponse,
+) -> PlanRunDeps {
+    let mut resolved = deps.clone();
+    if let Some(codex_binary) = deps.production_codex_binary.clone() {
+        let project_path = std::path::PathBuf::from(&project.path);
+        resolved.planner = Arc::new(CodexPlanningPhaseRunner::new(
+            codex_binary.clone(),
+            project_path.clone(),
+        ));
+        resolved.implementation = Arc::new(CodexImplementationPhaseRunner::new(
+            codex_binary.clone(),
+            project_path.clone(),
+        ));
+        resolved.review = Arc::new(CodexReviewPhaseRunner::new(
+            codex_binary.clone(),
+            project_path.clone(),
+        ));
+        resolved.merger = Arc::new(CodexMergePhaseRunner::new(codex_binary, project_path));
+    }
+    if let (Some(gh_binary), Some(source)) = (
+        deps.production_gh_binary.clone(),
+        project.enabled_issue_source.clone(),
+    ) {
+        resolved.lifecycle = Arc::new(GhLifecycleWriter::for_project(
+            gh_binary,
+            project.clone(),
+            source,
+        ));
+    }
+    resolved
 }
 
 /// Publishes Plan Run lifecycle events to a downstream consumer (the
@@ -208,6 +270,13 @@ pub async fn run_plan_run(
     baseline: &RefreshedBaseline,
     execution_config: &ProjectExecutionConfigResponse,
 ) -> Result<PlanRunResponse, CoordinatorError> {
+    // Resolve production runners against the per-Plan-Run Project context
+    // (codex binary cwd + Issue Source kind/locator) when the caller wired
+    // production binaries. Tests with injected fakes flow through
+    // unchanged because `production_codex_binary` / `production_gh_binary`
+    // remain `None`.
+    let resolved = resolve_deps_for_project(deps, project);
+    let deps = &resolved;
     let eligible = persistence::get_planning_snapshot(db, project_id)
         .await
         .map(|snapshot| snapshot.eligible)
@@ -1536,3 +1605,59 @@ fn parse_local_markdown_issue_minimal(
 /// Reusable absolute path for the gh CLI. Avoids unused-import warnings
 /// at top-level when callers do not want PathBuf.
 pub type GhBinaryPath = PathBuf;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentic_afk_contracts::ProjectId;
+
+    fn test_project() -> agentic_afk_contracts::ProjectResponse {
+        agentic_afk_contracts::ProjectResponse {
+            id: ProjectId("p".to_string()),
+            path: "/tmp/p".to_string(),
+            trusted: true,
+            git_summary: None,
+            enabled_issue_source: Some(IssueSource {
+                kind: "github".to_string(),
+                locator: "owner/repo".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn resolve_deps_passes_through_when_production_binaries_unset() {
+        let deps = PlanRunDeps::default_test_deps();
+        let resolved = resolve_deps_for_project(&deps, &test_project());
+        // Production binaries None: planner runner should still be the
+        // FakePlanningPhaseRunner default test deps installs.
+        let stdout = resolved
+            .planner
+            .run("ignored")
+            .expect("fake planner returns stdout");
+        assert!(stdout.contains("<plan>"));
+        // Lifecycle writer should still be the FakeLifecycleWriter, which
+        // accepts writes without error.
+        resolved
+            .lifecycle
+            .write_claimed("42")
+            .expect("fake lifecycle writer accepts writes");
+    }
+
+    #[test]
+    fn resolve_deps_swaps_in_production_codex_and_lifecycle_when_binaries_set() {
+        let mut deps = PlanRunDeps::default_test_deps();
+        deps.production_codex_binary = Some(PathBuf::from("/bin/true"));
+        deps.production_gh_binary = Some(PathBuf::from("gh"));
+        let resolved = resolve_deps_for_project(&deps, &test_project());
+        // Production binaries set: lifecycle writer should now be the
+        // GhLifecycleWriter, which dispatches to the canonical
+        // `write_assignment_lifecycle` helper. Calling it for a
+        // non-existent gh binary surfaces a LifecycleWrite error rather
+        // than the FakeLifecycleWriter's silent Ok.
+        let result = resolved.lifecycle.write_claimed("42");
+        assert!(
+            result.is_err(),
+            "production lifecycle writer should surface gh failure, got {result:?}",
+        );
+    }
+}

@@ -17,7 +17,7 @@ pub use coordinator::{
 pub use production::{
     CodexImplementationPhaseRunner, CodexMergePhaseRunner, CodexPlanningPhaseRunner,
     CodexReviewPhaseRunner, GhLifecycleWriter, GitAssignmentWorktreeCleaner,
-    GitIntegrationBranchPusher, GitIntegrationBranchRefresher, LifecycleSourceKind,
+    GitIntegrationBranchPusher, GitIntegrationBranchRefresher,
     WorktrunkAssignmentWorktreeProvisioner,
 };
 

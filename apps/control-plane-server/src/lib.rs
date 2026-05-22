@@ -160,17 +160,18 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
     router_with_bus(config, db, event_bus::EventBus::new())
 }
 
-fn plan_run_deps_from_env() -> PlanRunDeps {
+fn plan_run_deps_from_env(config: &ControlPlaneConfig) -> PlanRunDeps {
     let mode = std::env::var("AGENTIC_AFK_TEST_PLAN_RUN_STUBS").ok();
     let Some(mode) = mode else {
-        // Production wiring: real git refresher / pusher / cleaner and
-        // Worktrunk-backed provisioner. The four Codex phase runners and
-        // the Issue Source lifecycle writer remain Unimplemented placeholders
-        // pending the coordinator-extraction refactor described in PRD #40
-        // validation gap 5 (Plan Run coordinator lives in HTTP handler).
-        let worktrunk = std::env::var("AGENTIC_AFK_WORKTRUNK_BIN")
-            .unwrap_or_else(|_| "wt".to_string());
-        return PlanRunDeps::production(worktrunk.into());
+        // Production wiring: real git refresher / pusher / cleaner, the
+        // Worktrunk-backed provisioner, the four Codex phase runners
+        // (resolved per Plan Run against the project path), and the GH /
+        // local-markdown lifecycle writer.
+        return PlanRunDeps::production(
+            config.worktrunk_binary_path.clone(),
+            config.codex_binary_path.clone(),
+            config.gh_binary_path.clone(),
+        );
     };
     let stdout = match mode.as_str() {
         "1" => r#"<plan>{"issues":[],"summary":"test stub: no eligible work"}</plan>"#.to_string(),
@@ -208,7 +209,8 @@ fn default_test_deps() -> PlanRunDeps {
 /// tests that need to publish activity through the same bus the SSE
 /// endpoint subscribes from.
 pub fn router_with_bus(config: ControlPlaneConfig, db: Db, event_bus: event_bus::EventBus) -> Router {
-    router_with_full_deps(config, db, event_bus, plan_run_deps_from_env())
+    let deps = plan_run_deps_from_env(&config);
+    router_with_full_deps(config, db, event_bus, deps)
 }
 
 /// Build a router with caller-provided Plan Run phase dependencies. Tests
@@ -341,6 +343,8 @@ pub fn router_with_plan_run_merge_deps(
             merger,
             pusher,
             cleaner,
+            production_codex_binary: None,
+            production_gh_binary: None,
         },
     )
 }
