@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Dashboard primitives — design exploration</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;1,9..144,400&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:   #14130F;
+    --ink:  #ECE6D6;
+    --ink-2:#A09988;
+    --rule: #2A2823;
+    --accA: #FFB000;
+    --accB: #A0421C;
+    --accC: #5BE9FF;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+    font-family: 'Inter Tight', system-ui, sans-serif; font-size: 15px; line-height: 1.55;
+  }
+  .shell { max-width: 1240px; margin: 0 auto; padding: 64px 48px 96px; }
+
+  .eyebrow { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--ink-2); }
+  h1 {
+    font-family: 'Fraunces', serif; font-style: italic; font-weight: 400;
+    font-size: 56px; line-height: 1.05; margin: 14px 0 8px;
+    font-variation-settings: "opsz" 144;
+  }
+  .lede { color: var(--ink-2); max-width: 64ch; font-size: 17px; margin-bottom: 56px; }
+  .lede b { color: var(--ink); font-weight: 500; }
+
+  .frames {
+    display: grid; gap: 28px;
+    grid-template-columns: repeat(3, 1fr);
+  }
+  @media (max-width: 1100px) { .frames { grid-template-columns: 1fr; } }
+
+  .frame {
+    border: 1px solid var(--rule);
+    background: #0E0D0A;
+    display: flex; flex-direction: column;
+    transition: transform 240ms ease-out, border-color 240ms ease-out;
+  }
+  .frame:hover { transform: translateY(-3px); border-color: currentColor; }
+  .frame.a { color: var(--accA); }
+  .frame.b { color: var(--accB); }
+  .frame.c { color: var(--accC); }
+
+  .frame .head {
+    padding: 20px 22px; border-bottom: 1px solid var(--rule);
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .frame .tag { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase; }
+  .frame .num { font-family: 'Fraunces', serif; font-style: italic; font-size: 28px; color: currentColor; }
+
+  .frame .body { padding: 22px; flex: 1; color: var(--ink); }
+  .frame h2 {
+    margin: 0 0 6px; font-size: 24px; font-weight: 500; line-height: 1.15; letter-spacing: -0.01em;
+  }
+  .frame .sub { color: var(--ink-2); font-size: 14px; margin-bottom: 18px; }
+  .frame dl { margin: 0; display: grid; grid-template-columns: 84px 1fr; gap: 6px 14px; font-size: 13px; }
+  .frame dl dt { color: var(--ink-2); font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .frame dl dd { margin: 0; color: var(--ink); }
+
+  .frame .foot {
+    border-top: 1px solid var(--rule);
+    padding: 16px 22px; display: flex; gap: 14px; align-items: center;
+  }
+  .frame .foot a {
+    color: currentColor; text-decoration: none;
+    font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase;
+    border: 1px solid currentColor; padding: 8px 14px;
+    transition: background 200ms ease-out, color 200ms ease-out;
+  }
+  .frame .foot a:hover { background: currentColor; color: var(--bg); }
+  .frame .foot .meta { color: var(--ink-2); font-size: 12px; }
+
+  .vignette { padding: 18px 22px; border-top: 1px solid var(--rule); font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink-2); white-space: pre; overflow: hidden; }
+
+  .matrix {
+    margin-top: 80px; border: 1px solid var(--rule);
+  }
+  .matrix h3 { padding: 18px 22px; margin: 0; border-bottom: 1px solid var(--rule); font-family: 'Fraunces', serif; font-style: italic; font-weight: 400; font-size: 22px; }
+  .matrix table { width: 100%; border-collapse: collapse; }
+  .matrix th, .matrix td {
+    text-align: left; padding: 12px 22px; border-bottom: 1px solid var(--rule);
+    font-size: 13px; vertical-align: top;
+  }
+  .matrix th {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--ink-2); font-weight: 500; background: rgba(255,255,255,0.015);
+  }
+  .matrix td:first-child { color: var(--ink-2); font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .matrix .a-col { color: var(--accA); }
+  .matrix .b-col { color: var(--accB); }
+  .matrix .c-col { color: var(--accC); }
+
+  footer { margin-top: 64px; color: var(--ink-2); font-size: 12px; font-family: 'JetBrains Mono', monospace; border-top: 1px solid var(--rule); padding-top: 18px; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <p class="eyebrow">Issue #33 · phase (b) · frontend-design</p>
+  <h1>Three directions for the Dashboard primitive library.</h1>
+  <p class="lede">
+    These are not progressive refinements — they are <b>three distinct visual languages</b>. Each implements the same seven primitives (Card, StatusPill, ActionButton, ToastRegion, EmptyState, ErrorState, LoadingSkeleton) with the same loading, empty, and error states, so the comparison is on tone, not feature parity. Open each, then pick the one to port into Dioxus.
+  </p>
+
+  <div class="frames">
+    <article class="frame a">
+      <header class="head">
+        <span class="tag">Direction A</span>
+        <span class="num">01</span>
+      </header>
+      <div class="body">
+        <h2>Terminal Brutalist</h2>
+        <p class="sub">tmux / k9s / lazygit. Mono everywhere, sodium-amber accent.</p>
+        <dl>
+          <dt>type</dt><dd>IBM Plex Mono</dd>
+          <dt>density</dt><dd>tight · 4px grid</dd>
+          <dt>motion</dt><dd>blink &amp; step</dd>
+          <dt>accent</dt><dd>#FFB000</dd>
+        </dl>
+      </div>
+      <div class="vignette">┌─ ASSIGNMENT ──────── #a3f2 ┐
+│ status   RUNNING ▮         │
+│ branch   feat/issue-33     │
+│ [ ABANDON ]  [ RECOVER ]   │
+└────────────────────────────┘</div>
+      <footer class="foot">
+        <a href="./a-terminal.html">Open ↗</a>
+        <span class="meta">a-terminal.html</span>
+      </footer>
+    </article>
+
+    <article class="frame b">
+      <header class="head">
+        <span class="tag">Direction B</span>
+        <span class="num">02</span>
+      </header>
+      <div class="body">
+        <h2>Editorial &amp; Considered</h2>
+        <p class="sub">Stripe Press / FT weekend. Serif italic display, generous space, ochre + rust.</p>
+        <dl>
+          <dt>type</dt><dd>Fraunces · Geist · JetBrains Mono</dd>
+          <dt>density</dt><dd>airy · 8px grid</dd>
+          <dt>motion</dt><dd>200ms ease-out</dd>
+          <dt>accent</dt><dd>#A0421C</dd>
+        </dl>
+      </div>
+      <div class="vignette">—————  Assignment
+
+  Currently running
+  for four minutes eleven seconds.
+
+  Open →    Abandon —</div>
+      <footer class="foot">
+        <a href="./b-editorial.html">Open ↗</a>
+        <span class="meta">b-editorial.html</span>
+      </footer>
+    </article>
+
+    <article class="frame c">
+      <header class="head">
+        <span class="tag">Direction C</span>
+        <span class="num">03</span>
+      </header>
+      <div class="body">
+        <h2>HUD // Mission Control</h2>
+        <p class="sub">Cockpit panel. Frosted glass, gradient mesh, cyan/coral signal palette.</p>
+        <dl>
+          <dt>type</dt><dd>Plex Sans Cond. · Inter Tight · JBM</dd>
+          <dt>density</dt><dd>medium · notched edges</dd>
+          <dt>motion</dt><dd>cyan glow · 120ms</dd>
+          <dt>accent</dt><dd>#5BE9FF</dd>
+        </dl>
+      </div>
+      <div class="vignette">╔═══ ASSIGNMENT · A3F2 ═════╗
+║ ● RUNNING    uptime 04:11 ║
+║ feat/issue-33             ║
+║ ▰ ABANDON   ▱ RECOVER     ║
+╚═══════════════════════════╝</div>
+      <footer class="foot">
+        <a href="./c-hud.html">Open ↗</a>
+        <span class="meta">c-hud.html</span>
+      </footer>
+    </article>
+  </div>
+
+  <section class="matrix">
+    <h3>At a glance</h3>
+    <table>
+      <thead><tr>
+        <th></th>
+        <th class="a-col">A · Terminal</th>
+        <th class="b-col">B · Editorial</th>
+        <th class="c-col">C · HUD</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>Reads as</td>
+          <td>a power-user TUI</td>
+          <td>an editor's notebook</td>
+          <td>a cockpit panel</td>
+        </tr>
+        <tr><td>Card frame</td>
+          <td>square 1px + ASCII corner</td>
+          <td>no frame, hairline rule</td>
+          <td>frosted glass, notched corners</td>
+        </tr>
+        <tr><td>Headline font</td>
+          <td>IBM Plex Mono · tracked caps</td>
+          <td>Fraunces italic 28–64px</td>
+          <td>Plex Sans Cond. · tracked caps</td>
+        </tr>
+        <tr><td>Numbers</td>
+          <td>tabular · same size as body</td>
+          <td>oversized italic serif headlines</td>
+          <td>JetBrains Mono telemetry readouts</td>
+        </tr>
+        <tr><td>StatusPill (Running)</td>
+          <td>blinking ● + uppercase</td>
+          <td>thin rule + pulsing dot</td>
+          <td>glowing cyan dot, notched outline</td>
+        </tr>
+        <tr><td>ActionButton hover</td>
+          <td>inverts (ink↔bg)</td>
+          <td>arrow nudges right · 200ms</td>
+          <td>floods cyan + glow halo · 120ms</td>
+        </tr>
+        <tr><td>Pending motion</td>
+          <td>blinking caret · 0.6s steps</td>
+          <td>circular ease-out spinner</td>
+          <td>light sweep across surface</td>
+        </tr>
+        <tr><td>Skeleton</td>
+          <td>block ▒ characters, flicker</td>
+          <td>2.2s left-to-right shimmer</td>
+          <td>scanline sweep, cyan tint</td>
+        </tr>
+        <tr><td>EmptyState glyph</td>
+          <td>ASCII box-drawing</td>
+          <td>oversized italic em-dash</td>
+          <td>glowing diamond outline</td>
+        </tr>
+        <tr><td>ErrorState framing</td>
+          <td>red-bordered panel</td>
+          <td>editor's note · top rule + serif</td>
+          <td>coral cartouche · glow shadow</td>
+        </tr>
+        <tr><td>Best for</td>
+          <td>devs who already live in tmux/k9s</td>
+          <td>a tool you want to take seriously</td>
+          <td>a tool you want to feel powerful</td>
+        </tr>
+        <tr><td>Risk</td>
+          <td>can feel dated if overplayed</td>
+          <td>can feel slow at high information density</td>
+          <td>can drift into AI-cliché if glow is overused</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    docs/design/primitives-exploration/index.html · drafted 2026-05-22 · dioxus-agentic-afk #33
+  </footer>
+</div>
+</body>
+</html>

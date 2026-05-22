@@ -367,6 +367,25 @@ impl ProjectStore {
         self.mutations.read().get(key).cloned()
     }
 
+    /// Force a mutation entry into a specific state. Used by the `/design`
+    /// sandbox to demo `ActionButton`'s pending and error variants without
+    /// firing a real API call.
+    pub fn force_state(&self, key: MutationKey, state: MutationState) {
+        match state {
+            MutationState::Pending => self.mutations.clone().write().set_pending(key),
+            MutationState::Done => self.mutations.clone().write().set_done(key),
+            MutationState::Error {
+                category,
+                title,
+                detail,
+            } => self
+                .mutations
+                .clone()
+                .write()
+                .set_error(key, category, title, detail),
+        }
+    }
+
     /// Wrap an API call: record `Pending`, await, then record `Done` or
     /// categorized `Error`. Transient/System errors also push a toast.
     /// Returns the future's `Ok` value so callers can announce success.

@@ -1,12 +1,20 @@
 mod project_store;
 mod sse_client;
+mod ui;
 
-use project_store::{ProjectStore, Toast, ToastKind};
+use project_store::{
+    IssueAssignmentId, MutationCategory, MutationKey, MutationState, ProjectStore, SourceIssueId,
+    Toast, ToastKind,
+};
+use ui::{
+    ActionButton, ButtonVariant, Card, CardBody, CardFoot, CardHead, EmptyState, EmptyStateAccent,
+    ErrorState, HudToastRegion, PillTone, SkeletonHeading, SkeletonLine, StatusPill,
+};
 
 use agentic_afk_contracts::{
     AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueSourceCandidate,
     IssueSourceSyncResponse, PlanningSnapshotResponse,
-    ProjectActivityEntryResponse, ProjectAssignmentStateResponse, ProjectResponse,
+    ProjectActivityEntryResponse, ProjectAssignmentStateResponse, ProjectId, ProjectResponse,
     ProjectEvent, ProjectSnapshotResponse, SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
@@ -51,6 +59,8 @@ enum Route {
         #[end_nest]
         #[route("/settings")]
         Settings {},
+        #[route("/design")]
+        DesignSandbox {},
 }
 
 #[component]
@@ -1422,3 +1432,205 @@ async fn sync_issue_source(
         .map_err(|error| project_store::MutationFailure::network(error.to_string()))
 }
 
+
+#[component]
+fn DesignSandbox() -> Element {
+    let store = use_context::<ProjectStore>();
+
+    use_hook(|| {
+        let pending_key = MutationKey::SyncIssueSource(ProjectId("demo".into()));
+        let err_key = MutationKey::StartAssignment(
+            ProjectId("demo".into()),
+            SourceIssueId("issue-A".into()),
+        );
+        store.force_state(pending_key, MutationState::Pending);
+        store.force_state(
+            err_key,
+            MutationState::Error {
+                category: MutationCategory::Validation,
+                title: "project trust required".into(),
+                detail: "trust the project from settings before booting an agent".into(),
+            },
+        );
+    });
+
+    let idle_key = MutationKey::AbandonAssignment(
+        ProjectId("demo".into()),
+        IssueAssignmentId("assn-A".into()),
+    );
+    let pending_key = MutationKey::SyncIssueSource(ProjectId("demo".into()));
+    let err_key = MutationKey::StartAssignment(
+        ProjectId("demo".into()),
+        SourceIssueId("issue-A".into()),
+    );
+
+    rsx! {
+        document::Link {
+            rel: "stylesheet",
+            href: "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600;700&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap",
+        }
+        div { class: "min-h-screen bg-void text-ink font-body",
+            div { class: "mx-auto max-w-[1240px] px-10 py-14",
+                p { class: "font-mono text-[11px] uppercase tracking-[0.18em] text-ink-dim", "primitives sandbox" }
+                h1 { class: "mt-3 font-display text-5xl font-bold uppercase tracking-wide", "HUD // Mission Control" }
+                p { class: "mt-3 max-w-[64ch] text-ink-2",
+                    "Every primitive in every state. Cyan signal, coral danger, mint verified, amber in-flight."
+                }
+
+                SandboxSection { heading: "StatusPill".to_string(),
+                    div { class: "flex flex-wrap gap-4",
+                        StatusPill { tone: PillTone::Idle, label: "Idle".to_string() }
+                        StatusPill { tone: PillTone::Pending, label: "Pending".to_string() }
+                        StatusPill { tone: PillTone::Running, label: "Running".to_string() }
+                        StatusPill { tone: PillTone::Verified, label: "Verified".to_string() }
+                        StatusPill { tone: PillTone::Stale, label: "Stale".to_string() }
+                        StatusPill { tone: PillTone::Failed, label: "Failed".to_string() }
+                    }
+                }
+
+                SandboxSection { heading: "ActionButton".to_string(),
+                    p { class: "mb-4 text-ink-2 text-sm",
+                        "Pending and error visuals come from "
+                        code { class: "font-mono text-cyan", "ProjectStore" }
+                        " automatically."
+                    }
+                    div { class: "grid gap-6 md:grid-cols-3",
+                        div {
+                            p { class: "mb-3 font-mono text-[10px] uppercase tracking-[0.22em] text-ink-dim", "Idle" }
+                            ActionButton {
+                                mutation_key: idle_key.clone(),
+                                variant: ButtonVariant::Destructive,
+                                on_press: move |_| {},
+                                "Abandon Assignment"
+                            }
+                        }
+                        div {
+                            p { class: "mb-3 font-mono text-[10px] uppercase tracking-[0.22em] text-ink-dim", "Pending (store)" }
+                            ActionButton {
+                                mutation_key: pending_key.clone(),
+                                variant: ButtonVariant::Default,
+                                on_press: move |_| {},
+                                "Syncing"
+                            }
+                        }
+                        div {
+                            p { class: "mb-3 font-mono text-[10px] uppercase tracking-[0.22em] text-ink-dim", "Validation error (store)" }
+                            ActionButton {
+                                mutation_key: err_key.clone(),
+                                variant: ButtonVariant::Primary,
+                                on_press: move |_| {},
+                                "Start Assignment"
+                            }
+                        }
+                    }
+                }
+
+                SandboxSection { heading: "Card".to_string(),
+                    div { class: "grid gap-5 md:grid-cols-2",
+                        Card {
+                            CardHead { title: "Assignment".to_string(), id_text: Some("A3F2·1C".to_string()) }
+                            CardBody {
+                                dl { class: "grid grid-cols-2 gap-x-6 gap-y-3 font-mono",
+                                    div {
+                                        dt { class: "text-[10px] uppercase tracking-[0.14em] text-ink-dim", "Status" }
+                                        dd { class: "mt-0.5",
+                                            StatusPill { tone: PillTone::Running, label: "Running".to_string() }
+                                        }
+                                    }
+                                    div {
+                                        dt { class: "text-[10px] uppercase tracking-[0.14em] text-ink-dim", "Uptime" }
+                                        dd { class: "mt-0.5 text-[22px] leading-none",
+                                            "04:11"
+                                            span { class: "ml-1 text-[11px] text-ink-dim", "m" }
+                                        }
+                                    }
+                                }
+                            }
+                            CardFoot {
+                                ActionButton {
+                                    mutation_key: MutationKey::TrustProject(ProjectId("demo-card".into())),
+                                    variant: ButtonVariant::Primary,
+                                    on_press: move |_| {},
+                                    "Open"
+                                }
+                            }
+                        }
+                        Card {
+                            CardHead { title: "Loading".to_string(), id_text: Some("LOADING\u{2026}".to_string()) }
+                            CardBody {
+                                SkeletonHeading {}
+                                SkeletonLine { width_percent: 86 }
+                                SkeletonLine { width_percent: 62 }
+                                SkeletonLine { width_percent: 74 }
+                            }
+                        }
+                    }
+                }
+
+                SandboxSection { heading: "EmptyState".to_string(),
+                    div { class: "grid gap-5 md:grid-cols-2",
+                        EmptyState {
+                            title: "No Assignments".to_string(),
+                            body: "Pick a Ready Issue to boot an agent against this Project.".to_string(),
+                            accent: EmptyStateAccent::Cyan,
+                            ActionButton {
+                                mutation_key: MutationKey::TrustProject(ProjectId("demo-empty".into())),
+                                variant: ButtonVariant::Primary,
+                                on_press: move |_| {},
+                                "Pick an Issue"
+                            }
+                        }
+                        EmptyState {
+                            title: "Activity Feed Quiet".to_string(),
+                            body: "Lifecycle events will surface here as the agent makes progress.".to_string(),
+                            accent: EmptyStateAccent::Magenta,
+                        }
+                    }
+                }
+
+                SandboxSection { heading: "ErrorState".to_string(),
+                    ErrorState {
+                        title: "Control Plane Unavailable".to_string(),
+                        detail: "The Project snapshot endpoint returned 503 three times in a row.".to_string(),
+                        problem_json: Some("{\n  \"type\":   \"https://errors.afk.local/control-plane-unavailable\",\n  \"title\":  \"control plane unavailable\",\n  \"detail\": \"snapshot endpoint returned 503 after 3 retries\"\n}".to_string()),
+                        ActionButton {
+                            mutation_key: MutationKey::TrustProject(ProjectId("demo-err".into())),
+                            variant: ButtonVariant::Default,
+                            on_press: move |_| {},
+                            "Retry"
+                        }
+                    }
+                }
+
+                SandboxSection { heading: "ToastRegion".to_string(),
+                    p { class: "mb-4 text-ink-2 text-sm",
+                        "Toasts come from "
+                        code { class: "font-mono text-cyan", "ProjectStore" }
+                        "."
+                    }
+                    div { class: "mb-4 flex gap-3",
+                        button {
+                            class: "hud-notch-btn font-display text-[12px] uppercase tracking-[0.18em] border border-stroke px-4 py-2 text-mint",
+                            onclick: move |_| store.push_success("Sync \u{00B7} Complete", "Issue Source produced 4 new Ready Issues"),
+                            "+ success toast"
+                        }
+                    }
+                    HudToastRegion {}
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SandboxSection(heading: String, children: Element) -> Element {
+    rsx! {
+        section { class: "mt-16",
+            h2 { class: "mb-1 flex items-center gap-3 font-display text-xs uppercase tracking-[0.22em] text-cyan",
+                span { class: "h-[14px] w-[14px] rotate-45 border border-cyan bg-cyan/40 shadow-[0_0_12px_rgba(91,233,255,0.5)]" }
+                "{heading}"
+            }
+            div { class: "mt-6", {children} }
+        }
+    }
+}

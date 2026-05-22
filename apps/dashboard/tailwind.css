@@ -1,3 +1,107 @@
 @import "tailwindcss";
 
 @source "./src";
+
+@theme {
+  --color-void: #06081A;
+  --color-void-2: #0B0E22;
+  --color-panel: rgba(15, 21, 48, 0.62);
+  --color-stroke: rgba(91, 233, 255, 0.16);
+  --color-stroke-2: rgba(255, 255, 255, 0.06);
+  --color-ink: #DCE8F7;
+  --color-ink-2: #98A8C4;
+  --color-ink-dim: #5B6A8C;
+  --color-cyan: #5BE9FF;
+  --color-cyan-2: #00BCD4;
+  --color-mint: #6EE7B7;
+  --color-amber: #FFC857;
+  --color-coral: #FF6E6E;
+  --color-magenta: #C792FF;
+
+  --font-display: "IBM Plex Sans Condensed", "Inter Tight", sans-serif;
+  --font-body: "Inter Tight", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer utilities {
+  .hud-notch-btn {
+    clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+  }
+  .hud-notch-tile {
+    clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+  }
+  .hud-glass {
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+  }
+  .hud-bracket-corners {
+    position: relative;
+  }
+  .hud-bracket-corners::before,
+  .hud-bracket-corners::after {
+    content: "";
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    border: 1px solid var(--color-cyan);
+    pointer-events: none;
+  }
+  .hud-bracket-corners::before {
+    top: -1px;
+    left: -1px;
+    border-right: 0;
+    border-bottom: 0;
+  }
+  .hud-bracket-corners::after {
+    bottom: -1px;
+    right: -1px;
+    border-left: 0;
+    border-top: 0;
+  }
+  .hud-pending-sweep {
+    position: relative;
+    overflow: hidden;
+  }
+  .hud-pending-sweep::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+    animation: hud-sweep 1.2s linear infinite;
+  }
+  .hud-scanline {
+    position: relative;
+    overflow: hidden;
+  }
+  .hud-scanline::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent 0%, rgba(91, 233, 255, 0.5) 50%, transparent 100%);
+    animation: hud-scanline 1.8s linear infinite;
+    mix-blend-mode: screen;
+  }
+  .hud-pulse-dot::before {
+    animation: hud-pulse 1.2s ease-in-out infinite;
+  }
+}
+
+@keyframes hud-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+@keyframes hud-scanline {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+@keyframes hud-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hud-pending-sweep::after,
+  .hud-scanline::after,
+  .hud-pulse-dot::before {
+    animation: none;
+  }
+}
