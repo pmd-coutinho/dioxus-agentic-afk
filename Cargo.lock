@@ -80,6 +80,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentic-afk-planning-snapshot"
+version = "0.1.0"
+dependencies = [
+ "agentic-afk-contracts",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
