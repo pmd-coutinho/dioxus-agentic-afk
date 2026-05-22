@@ -1,21 +1,24 @@
-mod verify;
-
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentic_afk_contracts::{
-    AppInfoResponse, AssignmentAttemptResponse, AssignmentTerminalOutcome, ChangeProposalResponse,
-    CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest, FailedCheckFact,
-    HealthResponse, IssueAssignmentResponse, IssueSource, IssueSourceCandidate,
-    IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse,
-    ProblemDetail, ProjectActivityEntryResponse, ProjectAssignmentStateResponse, ProjectEvent,
-    ProjectId, ProjectResponse, ProjectSnapshot, ProjectSnapshotResponse, RepairAssignmentRequest,
-    RepairBudgetResponse, SourceIssueSnapshot,
+    AppInfoResponse, AssignmentAttemptResponse, AssignmentTerminalOutcome, CreateProjectRequest,
+    EffectiveConfig, EnableIssueSourceRequest, HealthResponse, IssueAssignmentResponse,
+    IssueSource, IssueSourceCandidate, IssueSourceSyncResponse, IssueSourceSyncStatusResponse,
+    PhaseOutputResponse, PlanRunResponse, PlanningSnapshotResponse, ProblemDetail,
+    ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse, ProjectId,
+    ProjectResponse, ProjectSnapshot, ProjectSnapshotResponse,
+    SetProjectExecutionConfigRequest, SourceIssueSnapshot,
 };
 use agentic_afk_git_summary::summarize_project_path;
 use agentic_afk_orchestrator::{
     codex_process_identity, create_assignment_worktree, preflight_binary, run_initial_codex,
+};
+pub use agentic_afk_orchestrator::{
+    FakePlanningPhaseRunner, IntegrationBranchRefresher, PlanRunPhaseError, PlanningPhaseRunner,
+    RefreshedBaseline, StaticIntegrationBranchRefresher, UnimplementedIntegrationBranchRefresher,
+    UnimplementedPlanningPhaseRunner,
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 use axum::extract::{Path, State};
@@ -29,11 +32,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use utoipa::OpenApi;
 use utoipa::ToSchema;
 
-mod abandon;
 pub mod activity_publisher;
 pub mod event_bus;
 pub mod project_event_publisher;
-mod recover;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneConfig {
@@ -91,9 +92,26 @@ pub(crate) struct AppState {
     pub(crate) config: ControlPlaneConfig,
     pub(crate) db: Db,
     pub(crate) event_bus: event_bus::EventBus,
+    pub(crate) plan_run_deps: PlanRunDeps,
 }
 
-mod repair;
+/// Plan Run phase dependencies wired into the router. Tests inject fakes;
+/// production wires real-git / Codex implementations (placeholder until
+/// later ADR-0034 slices land).
+#[derive(Clone)]
+pub struct PlanRunDeps {
+    pub refresher: Arc<dyn IntegrationBranchRefresher>,
+    pub planner: Arc<dyn PlanningPhaseRunner>,
+}
+
+impl PlanRunDeps {
+    pub fn unimplemented() -> Self {
+        Self {
+            refresher: Arc::new(UnimplementedIntegrationBranchRefresher),
+            planner: Arc::new(UnimplementedPlanningPhaseRunner),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct SetLifecycleStatusRequest {
@@ -114,9 +132,7 @@ pub struct SetLifecycleStatusRequest {
         get_issue_source_sync_status,
         sync_issue_source,
         get_planning_snapshot,
-        get_assignment_state,
         update_lifecycle_status,
-        start_assignment,
         get_project_activity,
         get_project_snapshot
     ),
@@ -133,15 +149,10 @@ pub struct SetLifecycleStatusRequest {
         IssueSourceSyncResponse,
         IssueSourceSyncStatusResponse,
         PlanningSnapshotResponse,
-        ProjectAssignmentStateResponse,
         IssueAssignmentResponse,
-        ChangeProposalResponse,
         AssignmentAttemptResponse,
         AssignmentTerminalOutcome,
         SourceIssueSnapshot,
-        RepairBudgetResponse,
-        RepairAssignmentRequest,
-        FailedCheckFact,
         ProjectActivityEntryResponse,
         ProjectSnapshot,
         ProjectSnapshotResponse,
@@ -156,16 +167,69 @@ pub fn router(config: ControlPlaneConfig, db: Db) -> Router {
     router_with_bus(config, db, event_bus::EventBus::new())
 }
 
+fn plan_run_deps_from_env() -> PlanRunDeps {
+    if std::env::var("AGENTIC_AFK_TEST_PLAN_RUN_STUBS").as_deref() == Ok("1") {
+        let refresher = Arc::new(StaticIntegrationBranchRefresher::new(RefreshedBaseline {
+            commit_sha: "test-baseline".to_string(),
+        }));
+        let planner = Arc::new(FakePlanningPhaseRunner::with_stdout(
+            r#"<plan>{"issues":[],"summary":"test stub: no eligible work"}</plan>"#,
+        ));
+        PlanRunDeps { refresher, planner }
+    } else {
+        PlanRunDeps::unimplemented()
+    }
+}
+
 /// Build a router that shares a caller-provided `EventBus`. Useful for
 /// tests that need to publish activity through the same bus the SSE
 /// endpoint subscribes from.
 pub fn router_with_bus(config: ControlPlaneConfig, db: Db, event_bus: event_bus::EventBus) -> Router {
+    router_with_full_deps(config, db, event_bus, plan_run_deps_from_env())
+}
+
+/// Build a router with caller-provided Plan Run phase dependencies. Tests
+/// pass fakes; production wires real-git / Codex impls (later slices).
+pub fn router_with_plan_run_deps(
+    config: ControlPlaneConfig,
+    db: Db,
+    refresher: Arc<dyn IntegrationBranchRefresher>,
+    planner: Arc<dyn PlanningPhaseRunner>,
+) -> Router {
+    router_with_full_deps(
+        config,
+        db,
+        event_bus::EventBus::new(),
+        PlanRunDeps { refresher, planner },
+    )
+}
+
+/// Same as `router_with_plan_run_deps` but exposes the `EventBus` for tests
+/// that want to subscribe to live SSE deltas through the same channel the
+/// router publishes to.
+pub fn router_with_plan_run_deps_and_bus(
+    config: ControlPlaneConfig,
+    db: Db,
+    event_bus: event_bus::EventBus,
+    refresher: Arc<dyn IntegrationBranchRefresher>,
+    planner: Arc<dyn PlanningPhaseRunner>,
+) -> Router {
+    router_with_full_deps(config, db, event_bus, PlanRunDeps { refresher, planner })
+}
+
+fn router_with_full_deps(
+    config: ControlPlaneConfig,
+    db: Db,
+    event_bus: event_bus::EventBus,
+    plan_run_deps: PlanRunDeps,
+) -> Router {
     let asset_dir = config.dashboard_asset_dir.clone();
     let index = asset_dir.join("index.html");
     let state = Arc::new(AppState {
         config,
         db,
         event_bus,
+        plan_run_deps,
     });
 
     Router::new()
@@ -199,10 +263,6 @@ pub fn router_with_bus(config: ControlPlaneConfig, db: Db, event_bus: event_bus:
             "/api/projects/{id}/planning-snapshot",
             get(get_planning_snapshot),
         )
-        .route(
-            "/api/projects/{id}/assignment-state",
-            get(get_assignment_state),
-        )
         .route("/api/projects/{id}/activity", get(get_project_activity))
         .route("/api/projects/{id}/snapshot", get(get_project_snapshot))
         .route("/api/projects/{id}/events", get(get_project_events))
@@ -212,24 +272,12 @@ pub fn router_with_bus(config: ControlPlaneConfig, db: Db, event_bus: event_bus:
             axum::routing::put(update_lifecycle_status),
         )
         .route(
-            "/api/projects/{id}/source-issues/{source_id}/assignment",
-            post(start_assignment),
+            "/api/projects/{id}/execution-config",
+            axum::routing::put(set_execution_config),
         )
         .route(
-            "/api/projects/{id}/assignments/{assignment_id}/refresh-proposal-state",
-            post(verify::refresh_proposal_state),
-        )
-        .route(
-            "/api/projects/{id}/assignments/{assignment_id}/repair",
-            post(repair::repair_assignment),
-        )
-        .route(
-            "/api/projects/{id}/assignments/{assignment_id}/abandon",
-            post(abandon::abandon_assignment),
-        )
-        .route(
-            "/api/projects/{id}/assignments/{assignment_id}/recover",
-            post(recover::recover_assignment),
+            "/api/projects/{id}/plan-runs",
+            post(start_plan_run).get(list_plan_runs),
         )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
@@ -549,100 +597,6 @@ async fn get_planning_snapshot(
     }
 }
 
-#[utoipa::path(
-    get,
-    path = "/api/projects/{id}/assignment-state",
-    params(("id" = String, Path, description = "Project ID")),
-    responses(
-        (status = OK, body = ProjectAssignmentStateResponse),
-        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json"),
-        (status = INTERNAL_SERVER_ERROR, body = ProblemDetail, content_type = "application/problem+json")
-    )
-)]
-async fn get_assignment_state(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Response {
-    let mut active_assignment = match persistence::get_active_assignment(&state.db, &id).await {
-        Ok(assignment) => assignment,
-        Err(error) => return persistence_error_to_response(error),
-    };
-    let lost_process_detail = active_assignment
-        .as_ref()
-        .filter(|assignment| assignment.status == "running")
-        .and_then(|assignment| match assignment.latest_attempt.as_ref() {
-            Some(attempt) => match (attempt.process_id, attempt.process_identity.as_deref()) {
-                (Some(process_id), Some(expected_identity)) => {
-                    match codex_process_identity(process_id) {
-                        None => Some("owned Codex process is no longer running"),
-                        Some(identity) if expected_identity != identity => {
-                            Some("owned Codex process identity no longer matches")
-                        }
-                        Some(_) => None,
-                    }
-                }
-                _ => Some("owned Codex process identity is missing"),
-            },
-            None => Some("owned Codex process identity is missing"),
-        });
-    if let Some(detail) = lost_process_detail
-        && let Some(assignment) = active_assignment.as_ref()
-    {
-        let blocked_assignment = match persistence::set_assignment_status(
-            &state.db,
-            &assignment.id,
-            "blocked",
-            Some(detail),
-        )
-        .await
-        {
-            Ok(assignment) => assignment,
-            Err(error) => return persistence_error_to_response(error),
-        };
-        let _ = crate::activity_publisher::record_project_activity(
-            &state.db,
-            &state.event_bus,
-            &id,
-            Some(&blocked_assignment.id),
-            "assignment_blocked",
-            Some(detail),
-        )
-        .await;
-        if let Ok(project) = persistence::get_project(&state.db, &id).await
-            && let Some(source) = project.enabled_issue_source.clone()
-            && source.kind == "local_markdown"
-        {
-            let _ = write_local_markdown_lifecycle(
-                &project,
-                &source,
-                &blocked_assignment.source_id,
-                "blocked",
-            );
-            let _ = refresh_local_markdown_snapshot(&state.db, &project, &source).await;
-        }
-        active_assignment = Some(blocked_assignment);
-    }
-    let waiting_ready_issue_count = persistence::get_planning_snapshot(&state.db, &id)
-        .await
-        .map(|snapshot| {
-            snapshot
-                .eligible
-                .iter()
-                .filter(|issue| {
-                    active_assignment
-                        .as_ref()
-                        .is_none_or(|assignment| assignment.source_id != issue.source_id)
-                })
-                .count()
-        })
-        .unwrap_or_default();
-    Json(ProjectAssignmentStateResponse {
-        active_assignment,
-        waiting_ready_issue_count,
-    })
-    .into_response()
-}
-
 #[derive(Debug, Deserialize)]
 pub(crate) struct ActivityQuery {
     pub limit: Option<i64>,
@@ -721,29 +675,6 @@ async fn get_project_snapshot(
         Err(error) => return persistence_error_to_response(error),
     };
 
-    let active_assignment = match persistence::get_active_assignment(&state.db, &id).await {
-        Ok(assignment) => assignment,
-        Err(error) => return persistence_error_to_response(error),
-    };
-    let waiting_ready_issue_count = planning_snapshot
-        .as_ref()
-        .map(|snapshot| {
-            snapshot
-                .eligible
-                .iter()
-                .filter(|issue| {
-                    active_assignment
-                        .as_ref()
-                        .is_none_or(|assignment| assignment.source_id != issue.source_id)
-                })
-                .count()
-        })
-        .unwrap_or_default();
-    let assignment_state = ProjectAssignmentStateResponse {
-        active_assignment,
-        waiting_ready_issue_count,
-    };
-
     let activity_entries = match persistence::list_project_activity(&state.db, &id, 50).await {
         Ok(entries) => entries,
         Err(error) => return persistence_error_to_response(error),
@@ -762,14 +693,29 @@ async fn get_project_snapshot(
 
     let issue_source_candidates = discover_issue_source_candidates(&project);
 
+    let execution_config = match persistence::get_project_execution_config(&state.db, &id).await {
+        Ok(config) => config,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    let active_plan_run = match persistence::get_active_plan_run(&state.db, &id).await {
+        Ok(plan_run) => plan_run,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    let recent_plan_runs = match persistence::list_recent_plan_runs(&state.db, &id, 20).await {
+        Ok(runs) => runs,
+        Err(error) => return persistence_error_to_response(error),
+    };
+
     let sequence = state.event_bus.latest_sequence(&ProjectId(id.clone()));
     Json(ProjectSnapshotResponse {
         snapshot: ProjectSnapshot {
             project,
             planning_snapshot,
-            assignment_state,
             activity,
             issue_source_candidates,
+            execution_config,
+            active_plan_run,
+            recent_plan_runs,
         },
         sequence,
     })
@@ -1019,352 +965,6 @@ async fn update_lifecycle_status(
     Json(snapshot).into_response()
 }
 
-#[utoipa::path(
-    post,
-    path = "/api/projects/{id}/source-issues/{source_id}/assignment",
-    params(
-        ("id" = String, Path, description = "Project ID"),
-        ("source_id" = String, Path, description = "Source Issue ID")
-    ),
-    responses(
-        (status = CREATED, body = IssueAssignmentResponse),
-        (status = UNPROCESSABLE_ENTITY, body = ProblemDetail, content_type = "application/problem+json"),
-        (status = NOT_FOUND, body = ProblemDetail, content_type = "application/problem+json")
-    )
-)]
-async fn start_assignment(
-    State(state): State<Arc<AppState>>,
-    Path((id, source_id)): Path<(String, String)>,
-) -> Response {
-    let project = match persistence::get_project(&state.db, &id).await {
-        Ok(project) => project,
-        Err(error) => return persistence_error_to_response(error),
-    };
-
-    if !project.trusted {
-        return sync_problem_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "urn:agentic-afk:project-untrusted",
-            "Unprocessable Entity",
-            "Project must be trusted before an Issue Assignment can start".to_string(),
-        );
-    }
-
-    let Some(source) = project.enabled_issue_source.clone() else {
-        return sync_problem_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "urn:agentic-afk:issue-source-not-enabled",
-            "Unprocessable Entity",
-            "Project has no enabled Issue Source".to_string(),
-        );
-    };
-    if !matches!(source.kind.as_str(), "local_markdown" | "github") {
-        return sync_problem_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "urn:agentic-afk:assignment-source-not-supported",
-            "Unprocessable Entity",
-            format!(
-                "Issue Assignment execution is not supported for {} Issue Sources",
-                source.kind
-            ),
-        );
-    }
-
-    let planning = match persistence::get_planning_snapshot(&state.db, &id).await {
-        Ok(snapshot) => snapshot,
-        Err(error) => return persistence_error_to_response(error),
-    };
-    let Some(issue) = planning
-        .eligible
-        .into_iter()
-        .find(|issue| issue.source_id == source_id)
-    else {
-        return sync_problem_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "urn:agentic-afk:source-issue-not-eligible",
-            "Unprocessable Entity",
-            format!("Source Issue is not an eligible Ready Issue: {source_id}"),
-        );
-    };
-
-    if !PathBuf::from(&project.path).join(".git").exists() {
-        return assignment_problem(
-            "urn:agentic-afk:assignment-preflight-failed",
-            "Issue Assignment execution requires a Git-backed Project".to_string(),
-        );
-    }
-    for (binary_path, name) in [
-        (&state.config.worktrunk_binary_path, "Worktrunk"),
-        (&state.config.codex_binary_path, "Codex"),
-    ] {
-        if let Err(detail) = preflight_binary(binary_path, name) {
-            return assignment_problem("urn:agentic-afk:assignment-preflight-failed", detail);
-        }
-    }
-    if source.kind == "github"
-        && let Err(detail) =
-            preflight_github_assignment(&state.config.gh_binary_path, &project, &source)
-    {
-        return assignment_problem("urn:agentic-afk:assignment-preflight-failed", detail);
-    }
-
-    let branch = assignment_branch(&source, &issue.source_id);
-    let mut assignment = match persistence::create_issue_assignment(
-        &state.db, &id, &source, &issue, &branch,
-    )
-    .await
-    {
-        Ok(assignment) => assignment,
-        Err(error) => return persistence_error_to_response(error),
-    };
-    let worktree_path = match create_assignment_worktree(
-        &state.config.worktrunk_binary_path,
-        std::path::Path::new(&project.path),
-        &branch,
-    ) {
-        Ok(path) => path,
-        Err(detail) => {
-            let _ = persistence::release_issue_assignment(&state.db, &assignment.id).await;
-            return assignment_problem("urn:agentic-afk:assignment-setup-failed", detail);
-        }
-    };
-    assignment = match persistence::set_assignment_worktree(
-        &state.db,
-        &assignment.id,
-        &worktree_path.display().to_string(),
-    )
-    .await
-    {
-        Ok(assignment) => assignment,
-        Err(error) => return persistence_error_to_response(error),
-    };
-
-    if let Err(detail) = write_assignment_lifecycle(
-        &state.config.gh_binary_path,
-        &project,
-        &source,
-        &source_id,
-        "claimed",
-    ) {
-        let _ = persistence::release_issue_assignment(&state.db, &assignment.id).await;
-        return assignment_problem("urn:agentic-afk:assignment-claim-failed", detail);
-    }
-    let _ = write_assignment_lifecycle(
-        &state.config.gh_binary_path,
-        &project,
-        &source,
-        &source_id,
-        "running",
-    );
-    assignment = match persistence::set_assignment_status(&state.db, &assignment.id, "running", None).await {
-        Ok(a) => a,
-        Err(error) => return persistence_error_to_response(error),
-    };
-    crate::project_event_publisher::publish_assignment_created(
-        &state.event_bus,
-        &id,
-        assignment.clone(),
-    );
-    let _ = crate::activity_publisher::record_project_activity(
-        &state.db,
-        &state.event_bus,
-        &id,
-        Some(&assignment.id),
-        "assignment_started",
-        Some(&assignment.branch),
-    )
-    .await;
-
-    let prompt = format!(
-        "Implement this Issue Assignment in the Assignment Worktree.\n\n{}",
-        issue.raw_text
-    );
-    let execution = run_initial_codex(&state.config.codex_binary_path, &worktree_path, &prompt);
-    assignment = match execution {
-        Ok(execution) => {
-            let _ = persistence::record_initial_attempt(
-                &state.db,
-                &assignment.id,
-                Some(execution.process_id),
-                execution.process_identity.as_deref(),
-                Some(&execution.terminal_outcome),
-            )
-            .await;
-            let (status, detail, proposal_url) = match execution.terminal_outcome.outcome.as_str() {
-                "ReadyForProposal" if source.kind == "github" => {
-                    match create_github_change_proposal(
-                        &state.config.gh_binary_path,
-                        &source,
-                        &issue,
-                        &assignment.branch,
-                        &worktree_path,
-                    ) {
-                        Ok(url) => ("proposal_pending", None, Some(url)),
-                        Err(detail) => ("blocked", Some(detail), None),
-                    }
-                }
-                "ReadyForProposal" => (
-                    "blocked",
-                    Some("local markdown Issue Source has no Change Proposal target".to_string()),
-                    None,
-                ),
-                "Failed" => (
-                    "failed",
-                    Some(execution.terminal_outcome.summary.clone()),
-                    None,
-                ),
-                _ => (
-                    "blocked",
-                    Some(execution.terminal_outcome.summary.clone()),
-                    None,
-                ),
-            };
-            let _ = write_assignment_lifecycle(
-                &state.config.gh_binary_path,
-                &project,
-                &source,
-                &source_id,
-                if status == "proposal_pending" {
-                    "running"
-                } else {
-                    "blocked"
-                },
-            );
-            if source.kind == "github"
-                && status == "blocked"
-                && let Some(detail) = detail.as_deref()
-            {
-                let _ = comment_github_issue(
-                    &state.config.gh_binary_path,
-                    &source.locator,
-                    &source_id,
-                    &format!("Issue Assignment blocked: {detail}"),
-                );
-            }
-            assignment = match persistence::set_assignment_status(
-                &state.db,
-                &assignment.id,
-                status,
-                detail.as_deref(),
-            )
-            .await
-            {
-                Ok(assignment) => assignment,
-                Err(error) => return persistence_error_to_response(error),
-            };
-            if let Some(url) = proposal_url {
-                match persistence::set_assignment_change_proposal(
-                    &state.db,
-                    &assignment.id,
-                    "pending",
-                    &url,
-                )
-                .await
-                {
-                    Ok(assignment) => assignment,
-                    Err(error) => return persistence_error_to_response(error),
-                }
-            } else {
-                assignment
-            }
-        }
-        Err(detail) => {
-            let failed = agentic_afk_contracts::AssignmentTerminalOutcome {
-                outcome: "Failed".to_string(),
-                summary: detail.clone(),
-            };
-            let _ = persistence::record_initial_attempt(
-                &state.db,
-                &assignment.id,
-                None,
-                None,
-                Some(&failed),
-            )
-            .await;
-            let _ = write_assignment_lifecycle(
-                &state.config.gh_binary_path,
-                &project,
-                &source,
-                &source_id,
-                "blocked",
-            );
-            if source.kind == "github" {
-                let _ = comment_github_issue(
-                    &state.config.gh_binary_path,
-                    &source.locator,
-                    &source_id,
-                    &format!("Issue Assignment blocked: {detail}"),
-                );
-            }
-            match persistence::set_assignment_status(
-                &state.db,
-                &assignment.id,
-                "failed",
-                Some(&detail),
-            )
-            .await
-            {
-                Ok(assignment) => assignment,
-                Err(error) => return persistence_error_to_response(error),
-            }
-        }
-    };
-    let _ = refresh_local_markdown_snapshot(&state.db, &project, &source).await;
-
-    // Publish lifecycle deltas for the live Dashboard: the attempt the
-    // initial Codex execution produced, the Change Proposal if one was
-    // opened, and the final status transition. Order matches the on-disk
-    // sequence (record_initial_attempt -> set_assignment_change_proposal ->
-    // set_assignment_status).
-    if let Some(attempt) = assignment.latest_attempt.clone() {
-        crate::project_event_publisher::publish_assignment_attempt_added(
-            &state.event_bus,
-            &id,
-            &assignment.id,
-            attempt,
-        );
-    }
-    if let Some(proposal) = assignment.change_proposal.clone() {
-        crate::project_event_publisher::publish_change_proposal_refreshed(
-            &state.event_bus,
-            &id,
-            &assignment.id,
-            proposal,
-        );
-    }
-    crate::project_event_publisher::publish_assignment_status_changed(
-        &state.event_bus,
-        &id,
-        assignment.clone(),
-    );
-
-    let terminal_kind = match assignment.status.as_str() {
-        "blocked" => Some("assignment_blocked"),
-        "failed" => Some("assignment_failed"),
-        "proposal_pending" => Some("change_proposal_opened"),
-        _ => None,
-    };
-    if let Some(kind) = terminal_kind {
-        let detail = match kind {
-            "change_proposal_opened" => assignment
-                .change_proposal
-                .as_ref()
-                .map(|proposal| proposal.url.clone()),
-            _ => assignment.status_detail.clone(),
-        };
-        let _ = crate::activity_publisher::record_project_activity(
-            &state.db,
-            &state.event_bus,
-            &id,
-            Some(&assignment.id),
-            kind,
-            detail.as_deref(),
-        )
-        .await;
-    }
-
-    (StatusCode::CREATED, Json(assignment)).into_response()
-}
 
 pub(crate) fn assignment_problem(problem_type: &str, detail: String) -> Response {
     sync_problem_response(
@@ -2088,21 +1688,6 @@ pub(crate) fn persistence_error_to_response(err: PersistenceError) -> Response {
             "urn:agentic-afk:assignment-not-found",
             "Not Found",
         ),
-        PersistenceError::NoChangeProposal(_) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "urn:agentic-afk:no-change-proposal",
-            "Unprocessable Entity",
-        ),
-        PersistenceError::RepairBudgetExhausted(_) => (
-            StatusCode::CONFLICT,
-            "urn:agentic-afk:repair-budget-exhausted",
-            "Conflict",
-        ),
-        PersistenceError::AssignmentNotAbandonable(_) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "urn:agentic-afk:assignment-not-abandonable",
-            "Unprocessable Entity",
-        ),
         PersistenceError::Database(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "urn:agentic-afk:internal-error",
@@ -2142,6 +1727,243 @@ pub(crate) fn sync_problem_response(
         }),
     )
         .into_response()
+}
+
+// --- Plan Run handlers (ADR-0034) ---
+
+async fn set_execution_config(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<SetProjectExecutionConfigRequest>,
+) -> Response {
+    if request.max_parallel_tasks <= 0 || request.review_retry_limit <= 0 {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:invalid-execution-config",
+            "Unprocessable Entity",
+            "max_parallel_tasks and review_retry_limit must be positive".to_string(),
+        );
+    }
+    if request.integration_branch.trim().is_empty() {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:invalid-execution-config",
+            "Unprocessable Entity",
+            "integration_branch must not be empty".to_string(),
+        );
+    }
+    match persistence::set_project_execution_config(&state.db, &id, &request).await {
+        Ok(config) => {
+            crate::project_event_publisher::publish_project_execution_config_changed(
+                &state.event_bus,
+                &id,
+                config.clone(),
+            );
+            Json(config).into_response()
+        }
+        Err(error) => persistence_error_to_response(error),
+    }
+}
+
+async fn list_plan_runs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    if let Err(error) = persistence::get_project(&state.db, &id).await {
+        return persistence_error_to_response(error);
+    }
+    match persistence::list_recent_plan_runs(&state.db, &id, 50).await {
+        Ok(runs) => Json(runs).into_response(),
+        Err(error) => persistence_error_to_response(error),
+    }
+}
+
+async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let project = match persistence::get_project(&state.db, &id).await {
+        Ok(project) => project,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    if !project.trusted {
+        return sync_problem_response(
+            StatusCode::FORBIDDEN,
+            "urn:agentic-afk:project-untrusted",
+            "Forbidden",
+            "Project must be trusted before starting a Plan Run".to_string(),
+        );
+    }
+    let execution_config = match persistence::get_project_execution_config(&state.db, &id).await {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            return sync_problem_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "urn:agentic-afk:execution-config-missing",
+                "Unprocessable Entity",
+                "Project Execution Config must be set before starting a Plan Run".to_string(),
+            );
+        }
+        Err(error) => return persistence_error_to_response(error),
+    };
+    match persistence::get_active_plan_run(&state.db, &id).await {
+        Ok(Some(_)) => {
+            return sync_problem_response(
+                StatusCode::CONFLICT,
+                "urn:agentic-afk:active-plan-run",
+                "Conflict",
+                "Project already has an active Plan Run".to_string(),
+            );
+        }
+        Ok(None) => {}
+        Err(error) => return persistence_error_to_response(error),
+    }
+
+    let project_path = std::path::Path::new(&project.path);
+    let baseline = match state
+        .plan_run_deps
+        .refresher
+        .refresh(project_path, &execution_config.integration_branch)
+    {
+        Ok(baseline) => baseline,
+        Err(error) => {
+            return sync_problem_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "urn:agentic-afk:integration-branch-refresh-failed",
+                "Internal Server Error",
+                error.to_string(),
+            );
+        }
+    };
+
+    let plan_run = match persistence::create_plan_run(
+        &state.db,
+        &id,
+        &execution_config.integration_branch,
+        &baseline.commit_sha,
+    )
+    .await
+    {
+        Ok(run) => run,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    crate::project_event_publisher::publish_plan_run_started(
+        &state.event_bus,
+        &id,
+        plan_run.clone(),
+    );
+
+    let prompt = render_planning_prompt(&project, &execution_config, &baseline);
+    let planner_stdout = match state.plan_run_deps.planner.run(&prompt) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            let _ = persistence::record_plan_run_phase_output(
+                &state.db,
+                &plan_run.id,
+                "planning",
+                "failed",
+                &serde_json::json!({ "error": error.to_string() }),
+            )
+            .await;
+            let finished = persistence::finish_plan_run(&state.db, &plan_run.id, "failed").await;
+            if let Ok(run) = finished {
+                crate::project_event_publisher::publish_plan_run_completed(
+                    &state.event_bus,
+                    &id,
+                    run,
+                );
+            }
+            return sync_problem_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "urn:agentic-afk:planning-phase-failed",
+                "Internal Server Error",
+                error.to_string(),
+            );
+        }
+    };
+
+    let parsed = match agentic_afk_orchestrator::parse_planning_output(&planner_stdout) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let _ = persistence::record_plan_run_phase_output(
+                &state.db,
+                &plan_run.id,
+                "planning",
+                "failed",
+                &serde_json::json!({ "error": error }),
+            )
+            .await;
+            let finished = persistence::finish_plan_run(&state.db, &plan_run.id, "failed").await;
+            if let Ok(run) = finished {
+                crate::project_event_publisher::publish_plan_run_completed(
+                    &state.event_bus,
+                    &id,
+                    run,
+                );
+            }
+            return sync_problem_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "urn:agentic-afk:planning-output-unparseable",
+                "Internal Server Error",
+                error,
+            );
+        }
+    };
+
+    let outcome = if parsed.is_empty {
+        "succeeded_empty"
+    } else {
+        "succeeded"
+    };
+    let phase_output = match persistence::record_plan_run_phase_output(
+        &state.db,
+        &plan_run.id,
+        "planning",
+        outcome,
+        &parsed.body,
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    crate::project_event_publisher::publish_plan_run_phase_completed(
+        &state.event_bus,
+        &id,
+        &plan_run.id,
+        phase_output,
+    );
+
+    let finished_state = if parsed.is_empty {
+        "succeeded_empty"
+    } else {
+        // Non-empty selection not exercised in this slice (#41); still finalize
+        // so the Plan Run is not left running.
+        "succeeded"
+    };
+    let finished = match persistence::finish_plan_run(&state.db, &plan_run.id, finished_state).await
+    {
+        Ok(run) => run,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    crate::project_event_publisher::publish_plan_run_completed(
+        &state.event_bus,
+        &id,
+        finished.clone(),
+    );
+    (StatusCode::CREATED, Json(finished)).into_response()
+}
+
+fn render_planning_prompt(
+    project: &ProjectResponse,
+    config: &ProjectExecutionConfigResponse,
+    baseline: &RefreshedBaseline,
+) -> String {
+    let template = include_str!("../../../crates/orchestrator/prompts/plan-run/plan.md");
+    template
+        .replace("{{PROJECT_INSTRUCTIONS}}", "")
+        .replace("{{PROJECT_NAME}}", &project.path)
+        .replace("{{INTEGRATION_BRANCH}}", &config.integration_branch)
+        .replace("{{PLAN_RUN_BASELINE}}", &baseline.commit_sha)
+        .replace(
+            "{{MAX_PARALLEL_TASKS}}",
+            &config.max_parallel_tasks.to_string(),
+        )
+        .replace("{{ELIGIBLE_SOURCE_ISSUES}}", "")
 }
 
 async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {

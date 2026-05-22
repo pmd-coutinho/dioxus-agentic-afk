@@ -1,11 +1,9 @@
-//! Persistence helpers for abandoning Issue Assignments and recording Activity.
+//! Persistence helpers for Project Activity (the chronological record of
+//! Control Plane lifecycle events surfaced in the Dashboard).
 
 use crate::{Db, PersistenceError};
-use agentic_afk_contracts::IssueAssignmentResponse;
 use uuid::Uuid;
 
-/// One Project Activity entry. Activity is the chronological record of Project
-/// lifecycle events, including Issue Assignment abandonment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectActivityEntry {
     pub id: String,
@@ -14,22 +12,6 @@ pub struct ProjectActivityEntry {
     pub kind: String,
     pub detail: Option<String>,
     pub recorded_at: String,
-}
-
-/// Look up an Issue Assignment by id, scoped to a Project. Returns `NotFound`
-/// if the assignment does not belong to the Project.
-pub async fn get_project_assignment(
-    db: &Db,
-    project_id: &str,
-    assignment_id: &str,
-) -> Result<IssueAssignmentResponse, PersistenceError> {
-    let assignment = crate::get_issue_assignment_public(db, assignment_id).await?;
-    if assignment.project_id.0 != project_id {
-        return Err(PersistenceError::AssignmentNotFound(
-            assignment_id.to_string(),
-        ));
-    }
-    Ok(assignment)
 }
 
 /// Maximum byte length stored for `detail`. Activity is a control-plane event
@@ -52,9 +34,6 @@ fn truncate_detail(detail: Option<&str>) -> Option<String> {
     })
 }
 
-/// Record one Activity entry for a Project. Used by abandonment and other
-/// lifecycle transitions. Detail is truncated to keep agent output out of
-/// Activity.
 pub async fn record_project_activity(
     db: &Db,
     project_id: &str,
@@ -89,7 +68,6 @@ pub async fn record_project_activity(
     })
 }
 
-/// List Activity entries for a Project, newest first.
 pub async fn list_project_activity(
     db: &Db,
     project_id: &str,
@@ -131,30 +109,6 @@ pub async fn list_project_activity(
             },
         )
         .collect())
-}
-
-/// Transition an Issue Assignment to `abandoned`. Requires that the current
-/// status is `blocked` so non-blocked work is not silently discarded.
-pub async fn abandon_blocked_assignment(
-    db: &Db,
-    assignment_id: &str,
-) -> Result<IssueAssignmentResponse, PersistenceError> {
-    let current = crate::get_issue_assignment_public(db, assignment_id).await?;
-    if current.status != "blocked" {
-        return Err(PersistenceError::AssignmentNotAbandonable(
-            current.status.clone(),
-        ));
-    }
-    let result = sqlx::query(
-        "UPDATE issue_assignments SET status = 'abandoned', status_detail = NULL WHERE id = ? AND status = 'blocked'",
-    )
-    .bind(assignment_id)
-    .execute(db)
-    .await?;
-    if result.rows_affected() == 0 {
-        return Err(PersistenceError::AssignmentNotAbandonable(current.status));
-    }
-    crate::get_issue_assignment_public(db, assignment_id).await
 }
 
 fn current_unix_timestamp() -> String {

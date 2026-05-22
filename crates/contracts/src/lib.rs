@@ -126,57 +126,50 @@ pub struct IssueAssignmentResponse {
     pub worktree_path: String,
     pub status: String,
     pub status_detail: Option<String>,
-    pub change_proposal: Option<ChangeProposalResponse>,
     pub latest_attempt: Option<AssignmentAttemptResponse>,
-    #[serde(default)]
-    pub repair_budget: Option<RepairBudgetResponse>,
 }
 
-/// Bounded GitHub Change Proposal Repair Loop budget for an Issue Assignment.
-///
-/// `attempt_count` is incremented only by `repair` Assignment Attempts; recovery
-/// attempts never advance this budget. `window_started_at` stamps when the
-/// elapsed window began (unix seconds, recorded on the first repair attempt).
+// --- Plan Run contracts (ADR-0034) ---
+
+/// Per-Project execution configuration consumed by Plan Runs.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
-pub struct RepairBudgetResponse {
-    pub attempt_count: i64,
-    pub max_attempts: i64,
-    pub window_seconds: i64,
-    pub window_started_at: Option<i64>,
+pub struct ProjectExecutionConfigResponse {
+    pub integration_branch: String,
+    pub max_parallel_tasks: i64,
+    pub review_retry_limit: i64,
 }
 
-/// Failed required GitHub check fact carried into a repair Assignment Attempt.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
-pub struct FailedCheckFact {
-    pub name: String,
-    #[serde(default)]
-    pub url: Option<String>,
-    #[serde(default)]
-    pub summary: Option<String>,
-}
-
-/// Request body for starting a repair Assignment Attempt on a failed
-/// Change Proposal.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
-pub struct RepairAssignmentRequest {
-    #[serde(default)]
-    pub failed_checks: Vec<FailedCheckFact>,
-    #[serde(default)]
-    pub verified_worktree_facts: Option<String>,
-}
-
-/// Hosted code proposal created from an Issue Assignment.
+/// Request body for setting `Project Execution Config`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
-pub struct ChangeProposalResponse {
-    pub status: String,
-    pub url: String,
+pub struct SetProjectExecutionConfigRequest {
+    pub integration_branch: String,
+    pub max_parallel_tasks: i64,
+    pub review_retry_limit: i64,
 }
 
-/// Project detail Issue Assignment state for the first single-slot execution slice.
+/// One Plan Run: a manually started Planning Phase plus the parallel issue
+/// work it selects through Review and Merge. This slice only exercises the
+/// empty-selection planning outcome.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
-pub struct ProjectAssignmentStateResponse {
-    pub active_assignment: Option<IssueAssignmentResponse>,
-    pub waiting_ready_issue_count: usize,
+pub struct PlanRunResponse {
+    pub id: String,
+    pub project_id: ProjectId,
+    pub integration_branch: String,
+    pub baseline_commit: String,
+    pub state: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub phase_outputs: Vec<PhaseOutputResponse>,
+}
+
+/// One durable phase result (planning/implementation/review/merge) recorded
+/// for a Plan Run or Assignment Attempt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct PhaseOutputResponse {
+    pub phase: String,
+    pub outcome: String,
+    pub body_json: serde_json::Value,
+    pub recorded_at: String,
 }
 
 /// One agent execution pass within an Issue Assignment.
@@ -217,13 +210,23 @@ pub struct ProjectActivityEntryResponse {
 pub struct ProjectSnapshot {
     pub project: ProjectResponse,
     pub planning_snapshot: Option<PlanningSnapshotResponse>,
-    pub assignment_state: ProjectAssignmentStateResponse,
     pub activity: Vec<ProjectActivityEntryResponse>,
     /// Advisory Issue Source candidates discovered from Project evidence.
     /// Bundled into the snapshot so the Dashboard does not need a
     /// separate fetch for the Issue Source panel.
     #[serde(default)]
     pub issue_source_candidates: Vec<IssueSourceCandidate>,
+    /// Per-Project execution configuration that gates Plan Run execution.
+    /// `None` until a developer sets it for the first time.
+    #[serde(default)]
+    pub execution_config: Option<ProjectExecutionConfigResponse>,
+    /// The Project's active (in-progress) Plan Run, if any. At most one is
+    /// active per Project (ADR-0034).
+    #[serde(default)]
+    pub active_plan_run: Option<PlanRunResponse>,
+    /// Recent finished Plan Runs, newest first.
+    #[serde(default)]
+    pub recent_plan_runs: Vec<PlanRunResponse>,
 }
 
 /// HTTP response body for `GET /api/projects/{id}/snapshot`. Carries the
@@ -255,16 +258,18 @@ pub enum ProjectEvent {
         assignment_id: String,
         attempt: AssignmentAttemptResponse,
     },
-    /// The Change Proposal for an active assignment was re-read from the host.
-    ChangeProposalRefreshed {
-        assignment_id: String,
-        change_proposal: ChangeProposalResponse,
+    /// A Plan Run was started for the Project; carries the initial Plan Run
+    /// shape so the Dashboard can render it without an additional fetch.
+    PlanRunStarted(PlanRunResponse),
+    /// A Plan Run phase recorded a durable Phase Output.
+    PlanRunPhaseCompleted {
+        plan_run_id: String,
+        phase_output: PhaseOutputResponse,
     },
-    /// The Change Proposal for an active assignment passed required checks.
-    ChangeProposalVerified {
-        assignment_id: String,
-        change_proposal: ChangeProposalResponse,
-    },
+    /// A Plan Run reached a terminal state.
+    PlanRunCompleted(PlanRunResponse),
+    /// The Project Execution Config changed.
+    ProjectExecutionConfigChanged(ProjectExecutionConfigResponse),
     /// The Project's Planning Snapshot was regenerated (e.g. after a sync
     /// or after enabling a new Issue Source). `snapshot` is `None` when the
     /// snapshot was cleared because no Issue Source is currently enabled.

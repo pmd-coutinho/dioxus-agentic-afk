@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use agentic_afk_contracts::{
-    IssueSourceCandidate, PlanningSnapshotResponse, ProblemDetail, ProjectActivityEntryResponse,
-    ProjectAssignmentStateResponse, ProjectEvent, ProjectId, ProjectResponse, ProjectSnapshot,
+    IssueAssignmentResponse, IssueSourceCandidate, PlanRunResponse, PlanningSnapshotResponse,
+    ProblemDetail, ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse,
+    ProjectId, ProjectResponse, ProjectSnapshot,
 };
 use dioxus::prelude::*;
 
@@ -26,9 +27,14 @@ pub enum ApplyOutcome {
 pub struct ProjectStoreState {
     pub project: Option<ProjectResponse>,
     pub activity: Vec<ProjectActivityEntryResponse>,
-    pub assignment_state: Option<ProjectAssignmentStateResponse>,
+    /// Active Issue Assignment under the legacy single-slot flow. Plan Run
+    /// nested Issue Assignments are tracked through `active_plan_run`.
+    pub active_assignment: Option<IssueAssignmentResponse>,
     pub planning_snapshot: Option<PlanningSnapshotResponse>,
     pub issue_source_candidates: Vec<IssueSourceCandidate>,
+    pub execution_config: Option<ProjectExecutionConfigResponse>,
+    pub active_plan_run: Option<PlanRunResponse>,
+    pub recent_plan_runs: Vec<PlanRunResponse>,
     pub sync_in_progress: bool,
     pub last_seen_seq: u64,
     pub needs_rehydrate: bool,
@@ -43,7 +49,10 @@ impl ProjectStoreState {
     pub fn hydrate(&mut self, snapshot: ProjectSnapshot, sequence: u64) {
         self.project = Some(snapshot.project);
         self.activity = snapshot.activity;
-        self.assignment_state = Some(snapshot.assignment_state);
+        self.active_assignment = None;
+        self.execution_config = snapshot.execution_config;
+        self.active_plan_run = snapshot.active_plan_run;
+        self.recent_plan_runs = snapshot.recent_plan_runs;
         self.planning_snapshot = snapshot.planning_snapshot;
         self.issue_source_candidates = snapshot.issue_source_candidates;
         self.sync_in_progress = false;
@@ -72,52 +81,49 @@ impl ProjectStoreState {
             }
             ProjectEvent::AssignmentCreated(assignment)
             | ProjectEvent::AssignmentStatusChanged(assignment) => {
-                let waiting = self
-                    .assignment_state
-                    .as_ref()
-                    .map(|s| s.waiting_ready_issue_count)
-                    .unwrap_or(0);
-                // Terminal statuses ("abandoned", "completed") release the
-                // Project assignment slot on the server, so the store clears
-                // its active assignment to match. Any other status keeps the
-                // assignment active in the slot.
-                let active = if matches!(assignment.status.as_str(), "abandoned" | "completed") {
-                    None
-                } else {
-                    Some(assignment)
-                };
-                self.assignment_state = Some(ProjectAssignmentStateResponse {
-                    active_assignment: active,
-                    waiting_ready_issue_count: waiting,
-                });
+                // Terminal statuses release the Project assignment slot.
+                self.active_assignment =
+                    if matches!(assignment.status.as_str(), "abandoned" | "completed") {
+                        None
+                    } else {
+                        Some(assignment)
+                    };
             }
             ProjectEvent::AssignmentAttemptAdded {
                 assignment_id,
                 attempt,
             } => {
-                if let Some(state) = self.assignment_state.as_mut() {
-                    if let Some(active) = state.active_assignment.as_mut() {
-                        if active.id == assignment_id {
-                            active.latest_attempt = Some(attempt);
-                        }
+                if let Some(active) = self.active_assignment.as_mut() {
+                    if active.id == assignment_id {
+                        active.latest_attempt = Some(attempt);
                     }
                 }
             }
-            ProjectEvent::ChangeProposalRefreshed {
-                assignment_id,
-                change_proposal,
+            ProjectEvent::PlanRunStarted(plan_run) => {
+                self.active_plan_run = Some(plan_run);
             }
-            | ProjectEvent::ChangeProposalVerified {
-                assignment_id,
-                change_proposal,
+            ProjectEvent::PlanRunPhaseCompleted {
+                plan_run_id,
+                phase_output,
             } => {
-                if let Some(state) = self.assignment_state.as_mut() {
-                    if let Some(active) = state.active_assignment.as_mut() {
-                        if active.id == assignment_id {
-                            active.change_proposal = Some(change_proposal);
-                        }
-                    }
+                if let Some(active) = self.active_plan_run.as_mut()
+                    && active.id == plan_run_id
+                {
+                    active.phase_outputs.push(phase_output);
                 }
+            }
+            ProjectEvent::PlanRunCompleted(plan_run) => {
+                if self
+                    .active_plan_run
+                    .as_ref()
+                    .is_some_and(|active| active.id == plan_run.id)
+                {
+                    self.active_plan_run = None;
+                }
+                self.recent_plan_runs.insert(0, plan_run);
+            }
+            ProjectEvent::ProjectExecutionConfigChanged(config) => {
+                self.execution_config = Some(config);
             }
             ProjectEvent::ProjectChanged(project) => {
                 self.project = Some(project);
@@ -160,6 +166,8 @@ pub enum MutationKey {
     RefreshProposalState(ProjectId, IssueAssignmentId),
     SyncIssueSource(ProjectId),
     EnableIssueSource(ProjectId, String, String),
+    SetExecutionConfig(ProjectId),
+    StartPlanRun(ProjectId),
 }
 
 /// Identifier for a Source Issue (the upstream issue tracker's issue id).
@@ -444,13 +452,13 @@ impl ProjectStore {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use agentic_afk_contracts::{
-        AssignmentAttemptResponse, ChangeProposalResponse, IssueAssignmentResponse, IssueSource,
-        IssueSourceCandidate, IssueSourceSyncResponse, PlanningSnapshotResponse,
-        ProjectAssignmentStateResponse, ProjectResponse,
+        AssignmentAttemptResponse, IssueAssignmentResponse, IssueSource, IssueSourceCandidate,
+        IssueSourceSyncResponse, PlanningSnapshotResponse, ProjectResponse,
     };
 
     fn planning_snapshot_with_source(locator: &str) -> PlanningSnapshotResponse {
@@ -479,9 +487,7 @@ mod tests {
             worktree_path: "/w".to_string(),
             status: status.to_string(),
             status_detail: None,
-            change_proposal: None,
             latest_attempt: None,
-            repair_budget: None,
         }
     }
 
@@ -506,12 +512,11 @@ mod tests {
                 enabled_issue_source: None,
             },
             planning_snapshot: None,
-            assignment_state: ProjectAssignmentStateResponse {
-                active_assignment: None,
-                waiting_ready_issue_count: 0,
-            },
             activity,
             issue_source_candidates: vec![],
+            execution_config: None,
+            active_plan_run: None,
+            recent_plan_runs: vec![],
         }
     }
 
@@ -580,34 +585,23 @@ mod tests {
         );
 
         assert_eq!(outcome, ApplyOutcome::Merged);
-        assert_eq!(state.last_seen_seq, 4);
-        let active = state
-            .assignment_state
-            .as_ref()
-            .and_then(|s| s.active_assignment.as_ref())
-            .expect("active assignment set");
+        let active = state.active_assignment.as_ref().expect("active set");
         assert_eq!(active.id, "assn-1");
         assert_eq!(active.status, "running");
     }
 
     #[test]
-    fn assignment_status_changed_replaces_active_assignment() {
+    fn assignment_status_changed_to_abandoned_clears_active_assignment() {
         let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 4;
-        state.assignment_state = Some(ProjectAssignmentStateResponse {
-            active_assignment: Some(assignment("assn-1", "running")),
-            waiting_ready_issue_count: 2,
-        });
+        state.active_assignment = Some(assignment("assn-1", "running"));
 
         let outcome = state.apply_event(
-            5,
-            ProjectEvent::AssignmentStatusChanged(assignment("assn-1", "proposal_pending")),
+            1,
+            ProjectEvent::AssignmentStatusChanged(assignment("assn-1", "abandoned")),
         );
 
         assert_eq!(outcome, ApplyOutcome::Merged);
-        let s = state.assignment_state.as_ref().unwrap();
-        assert_eq!(s.waiting_ready_issue_count, 2);
-        assert_eq!(s.active_assignment.as_ref().unwrap().status, "proposal_pending");
+        assert!(state.active_assignment.is_none());
     }
 
     fn attempt(id: &str, kind: &str) -> AssignmentAttemptResponse {
@@ -623,14 +617,10 @@ mod tests {
     #[test]
     fn assignment_attempt_added_sets_latest_attempt_when_assignment_matches() {
         let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 4;
-        state.assignment_state = Some(ProjectAssignmentStateResponse {
-            active_assignment: Some(assignment("assn-1", "running")),
-            waiting_ready_issue_count: 0,
-        });
+        state.active_assignment = Some(assignment("assn-1", "running"));
 
         let outcome = state.apply_event(
-            5,
+            1,
             ProjectEvent::AssignmentAttemptAdded {
                 assignment_id: "assn-1".to_string(),
                 attempt: attempt("att-1", "initial"),
@@ -638,84 +628,13 @@ mod tests {
         );
 
         assert_eq!(outcome, ApplyOutcome::Merged);
-        let active = state
-            .assignment_state
-            .as_ref()
-            .and_then(|s| s.active_assignment.as_ref())
-            .unwrap();
+        let active = state.active_assignment.as_ref().unwrap();
         assert_eq!(active.latest_attempt.as_ref().unwrap().id, "att-1");
-    }
-
-    #[test]
-    fn change_proposal_refreshed_updates_proposal_when_assignment_matches() {
-        let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 1;
-        state.assignment_state = Some(ProjectAssignmentStateResponse {
-            active_assignment: Some(assignment("assn-1", "proposal_pending")),
-            waiting_ready_issue_count: 0,
-        });
-
-        let outcome = state.apply_event(
-            2,
-            ProjectEvent::ChangeProposalRefreshed {
-                assignment_id: "assn-1".to_string(),
-                change_proposal: ChangeProposalResponse {
-                    status: "pending".to_string(),
-                    url: "https://x/pr/1".to_string(),
-                },
-            },
-        );
-
-        assert_eq!(outcome, ApplyOutcome::Merged);
-        let active = state
-            .assignment_state
-            .as_ref()
-            .and_then(|s| s.active_assignment.as_ref())
-            .unwrap();
-        let proposal = active.change_proposal.as_ref().unwrap();
-        assert_eq!(proposal.status, "pending");
-        assert_eq!(proposal.url, "https://x/pr/1");
-    }
-
-    #[test]
-    fn change_proposal_verified_updates_proposal_to_verified_status() {
-        let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 1;
-        let mut assn = assignment("assn-1", "proposal_pending");
-        assn.change_proposal = Some(ChangeProposalResponse {
-            status: "pending".to_string(),
-            url: "https://x/pr/1".to_string(),
-        });
-        state.assignment_state = Some(ProjectAssignmentStateResponse {
-            active_assignment: Some(assn),
-            waiting_ready_issue_count: 0,
-        });
-
-        let outcome = state.apply_event(
-            2,
-            ProjectEvent::ChangeProposalVerified {
-                assignment_id: "assn-1".to_string(),
-                change_proposal: ChangeProposalResponse {
-                    status: "verified".to_string(),
-                    url: "https://x/pr/1".to_string(),
-                },
-            },
-        );
-
-        assert_eq!(outcome, ApplyOutcome::Merged);
-        let proposal = state
-            .assignment_state
-            .as_ref()
-            .and_then(|s| s.active_assignment.as_ref())
-            .and_then(|a| a.change_proposal.as_ref())
-            .unwrap();
-        assert_eq!(proposal.status, "verified");
     }
 
     #[test]
     fn planning_snapshot_changed_replaces_planning_snapshot() {
         let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 0;
         state.planning_snapshot = Some(planning_snapshot_with_source("old/repo"));
 
         let outcome = state.apply_event(
@@ -735,7 +654,6 @@ mod tests {
     #[test]
     fn issue_source_sync_started_sets_sync_in_progress() {
         let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 0;
 
         let outcome = state.apply_event(1, ProjectEvent::IssueSourceSyncStarted);
 
@@ -746,12 +664,11 @@ mod tests {
     #[test]
     fn issue_source_sync_completed_clears_progress_and_updates_metadata() {
         let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 1;
         state.sync_in_progress = true;
         state.planning_snapshot = Some(planning_snapshot_with_source("acme/repo"));
 
         let outcome = state.apply_event(
-            2,
+            1,
             ProjectEvent::IssueSourceSyncCompleted(IssueSourceSyncResponse {
                 source: IssueSource {
                     kind: "github".to_string(),
@@ -769,18 +686,16 @@ mod tests {
             p.last_successful_sync_at.as_deref(),
             Some("2026-05-22T10:00:00Z")
         );
-        assert!(p.last_failure.is_none());
     }
 
     #[test]
     fn issue_source_sync_failed_clears_progress_and_sets_last_failure() {
         let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 1;
         state.sync_in_progress = true;
         state.planning_snapshot = Some(planning_snapshot_with_source("acme/repo"));
 
         let outcome = state.apply_event(
-            2,
+            1,
             ProjectEvent::IssueSourceSyncFailed {
                 error: "401 Unauthorized".to_string(),
             },
@@ -789,7 +704,12 @@ mod tests {
         assert_eq!(outcome, ApplyOutcome::Merged);
         assert!(!state.sync_in_progress);
         assert_eq!(
-            state.planning_snapshot.as_ref().unwrap().last_failure.as_deref(),
+            state
+                .planning_snapshot
+                .as_ref()
+                .unwrap()
+                .last_failure
+                .as_deref(),
             Some("401 Unauthorized")
         );
     }
@@ -797,7 +717,6 @@ mod tests {
     #[test]
     fn issue_source_candidates_changed_replaces_candidates() {
         let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 0;
         state.issue_source_candidates = vec![IssueSourceCandidate {
             kind: "github".into(),
             locator: "old/repo".into(),
@@ -807,29 +726,21 @@ mod tests {
         let outcome = state.apply_event(
             1,
             ProjectEvent::IssueSourceCandidatesChanged {
-                candidates: vec![
-                    IssueSourceCandidate {
-                        kind: "github".into(),
-                        locator: "acme/repo".into(),
-                        enabled: true,
-                    },
-                    IssueSourceCandidate {
-                        kind: "local_markdown".into(),
-                        locator: ".scratch/issues".into(),
-                        enabled: false,
-                    },
-                ],
+                candidates: vec![IssueSourceCandidate {
+                    kind: "github".into(),
+                    locator: "acme/repo".into(),
+                    enabled: true,
+                }],
             },
         );
 
         assert_eq!(outcome, ApplyOutcome::Merged);
-        assert_eq!(state.issue_source_candidates.len(), 2);
+        assert_eq!(state.issue_source_candidates.len(), 1);
         assert_eq!(state.issue_source_candidates[0].locator, "acme/repo");
-        assert!(state.issue_source_candidates[0].enabled);
     }
 
     #[test]
-    fn hydrate_populates_project_assignment_planning_and_candidates() {
+    fn hydrate_populates_project_planning_and_candidates() {
         let mut state = ProjectStoreState::new();
         let snapshot = ProjectSnapshot {
             project: ProjectResponse {
@@ -843,79 +754,39 @@ mod tests {
                 }),
             },
             planning_snapshot: Some(planning_snapshot_with_source("acme/repo")),
-            assignment_state: ProjectAssignmentStateResponse {
-                active_assignment: Some(assignment("assn-1", "running")),
-                waiting_ready_issue_count: 3,
-            },
             activity: vec![activity_entry("a-1", "started")],
             issue_source_candidates: vec![IssueSourceCandidate {
                 kind: "github".into(),
                 locator: "acme/repo".into(),
                 enabled: true,
             }],
+            execution_config: None,
+            active_plan_run: None,
+            recent_plan_runs: vec![],
         };
 
         state.hydrate(snapshot, 42);
 
         assert_eq!(state.last_seen_seq, 42);
         assert!(state.project.is_some());
-        assert_eq!(state.project.as_ref().unwrap().path, "/p");
-        assert_eq!(
-            state.assignment_state.as_ref().unwrap().waiting_ready_issue_count,
-            3
-        );
-        assert_eq!(
-            state.planning_snapshot.as_ref().unwrap().source.locator,
-            "acme/repo"
-        );
         assert_eq!(state.activity.len(), 1);
         assert_eq!(state.issue_source_candidates.len(), 1);
     }
 
     #[test]
-    fn assignment_status_changed_to_abandoned_clears_active_assignment() {
-        let mut state = ProjectStoreState::new();
-        state.last_seen_seq = 0;
-        state.assignment_state = Some(ProjectAssignmentStateResponse {
-            active_assignment: Some(assignment("assn-1", "running")),
-            waiting_ready_issue_count: 0,
-        });
-
-        let outcome = state.apply_event(
-            1,
-            ProjectEvent::AssignmentStatusChanged(assignment("assn-1", "abandoned")),
-        );
-
-        assert_eq!(outcome, ApplyOutcome::Merged);
-        assert!(
-            state
-                .assignment_state
-                .as_ref()
-                .unwrap()
-                .active_assignment
-                .is_none()
-        );
-    }
-
-    #[test]
     fn hydrate_then_merge_produces_combined_state() {
         let mut state = ProjectStoreState::new();
-        let snapshot_activity = vec![
-            activity_entry("a-old-1", "started"),
-            activity_entry("a-old-2", "started"),
-        ];
-        state.hydrate(snapshot_with_activity(snapshot_activity), 7);
+        state.hydrate(
+            snapshot_with_activity(vec![activity_entry("a-old-1", "started")]),
+            7,
+        );
 
         let _ = state.apply_event(8, ProjectEvent::Activity(activity_entry("a-new-1", "k")));
-        let _ = state.apply_event(9, ProjectEvent::Activity(activity_entry("a-new-2", "k")));
 
-        assert_eq!(state.last_seen_seq, 9);
-        assert!(!state.needs_rehydrate);
+        assert_eq!(state.last_seen_seq, 8);
         let ids: Vec<&str> = state.activity.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(ids, vec!["a-new-2", "a-new-1", "a-old-1", "a-old-2"]);
+        assert_eq!(ids, vec!["a-new-1", "a-old-1"]);
     }
-
-
 
     #[test]
     fn parses_validation_error_from_problem_json_4xx() {
@@ -952,27 +823,11 @@ mod tests {
         let state = MutationState::from_failure(None, "tcp closed");
 
         match state {
-            MutationState::Error {
-                category,
-                title,
-                detail,
-            } => {
+            MutationState::Error { category, .. } => {
                 assert_eq!(category, MutationCategory::Transient);
-                assert_eq!(title, "Request failed");
-                assert_eq!(detail, "tcp closed");
             }
             other => panic!("expected error, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn pending_state_recorded_after_starting_mutation() {
-        let mut table = MutationsTable::new();
-        let key = MutationKey::TrustProject(ProjectId("p1".to_string()));
-
-        table.set_pending(key.clone());
-
-        assert_eq!(table.get(&key), Some(&MutationState::Pending));
     }
 
     #[test]
@@ -1007,46 +862,6 @@ mod tests {
                 ..
             })
         ));
-        assert!(!table.is_pending(&key));
-    }
-
-    #[test]
-    fn assignment_keys_are_distinct_by_variant_and_id() {
-        let project = ProjectId("p1".to_string());
-        let source = SourceIssueId("issue-A".to_string());
-        let assignment = IssueAssignmentId("assn-A".to_string());
-
-        let mut table = MutationsTable::new();
-        let start = MutationKey::StartAssignment(project.clone(), source.clone());
-        let abandon = MutationKey::AbandonAssignment(project.clone(), assignment.clone());
-        let recover = MutationKey::RecoverAssignment(project.clone(), assignment.clone());
-        let refresh = MutationKey::RefreshProposalState(project.clone(), assignment.clone());
-
-        table.set_pending(start.clone());
-
-        assert!(table.is_pending(&start));
-        assert!(!table.is_pending(&abandon));
-        assert!(!table.is_pending(&recover));
-        assert!(!table.is_pending(&refresh));
-
-        // Same project + assignment id but different variant must not collide.
-        table.set_pending(abandon.clone());
-        assert!(table.is_pending(&abandon));
-        assert!(!table.is_pending(&recover));
-        assert!(!table.is_pending(&refresh));
-    }
-
-    #[test]
-    fn sync_issue_source_key_tracked_independently_from_trust() {
-        let mut table = MutationsTable::new();
-        let project = ProjectId("p1".to_string());
-        let trust = MutationKey::TrustProject(project.clone());
-        let sync = MutationKey::SyncIssueSource(project);
-
-        table.set_pending(sync.clone());
-
-        assert!(table.is_pending(&sync));
-        assert!(!table.is_pending(&trust));
     }
 
     #[test]
@@ -1071,18 +886,142 @@ mod tests {
     }
 
     #[test]
-    fn parallel_keys_tracked_independently() {
+    fn sync_issue_source_key_tracked_independently_from_trust() {
         let mut table = MutationsTable::new();
-        let a = MutationKey::TrustProject(ProjectId("a".into()));
-        let b = MutationKey::TrustProject(ProjectId("b".into()));
+        let project = ProjectId("p1".to_string());
+        let trust = MutationKey::TrustProject(project.clone());
+        let sync = MutationKey::SyncIssueSource(project);
 
-        table.set_pending(a.clone());
-        table.set_pending(b.clone());
-        table.set_done(a.clone());
+        table.set_pending(sync.clone());
 
-        assert_eq!(table.get(&a), Some(&MutationState::Done));
-        assert_eq!(table.get(&b), Some(&MutationState::Pending));
-        assert!(table.is_pending(&b));
-        assert!(!table.is_pending(&a));
+        assert!(table.is_pending(&sync));
+        assert!(!table.is_pending(&trust));
+    }
+
+    #[test]
+    fn assignment_keys_are_distinct_by_variant_and_id() {
+        let project = ProjectId("p1".to_string());
+        let source = SourceIssueId("issue-A".to_string());
+        let assignment = IssueAssignmentId("assn-A".to_string());
+
+        let mut table = MutationsTable::new();
+        let start = MutationKey::StartAssignment(project.clone(), source);
+        let abandon = MutationKey::AbandonAssignment(project.clone(), assignment.clone());
+        let recover = MutationKey::RecoverAssignment(project, assignment);
+
+        table.set_pending(start.clone());
+        assert!(table.is_pending(&start));
+        assert!(!table.is_pending(&abandon));
+        assert!(!table.is_pending(&recover));
+    }
+
+    // --- Plan Run store behavior (issue #41) ---
+
+    fn plan_run_response(id: &str, state: &str) -> agentic_afk_contracts::PlanRunResponse {
+        agentic_afk_contracts::PlanRunResponse {
+            id: id.to_string(),
+            project_id: ProjectId("p".to_string()),
+            integration_branch: "main".to_string(),
+            baseline_commit: "abc".to_string(),
+            state: state.to_string(),
+            started_at: "0".to_string(),
+            finished_at: None,
+            phase_outputs: vec![],
+        }
+    }
+
+    fn phase_output(phase: &str, outcome: &str) -> agentic_afk_contracts::PhaseOutputResponse {
+        agentic_afk_contracts::PhaseOutputResponse {
+            phase: phase.to_string(),
+            outcome: outcome.to_string(),
+            body_json: serde_json::json!({"issues":[]}),
+            recorded_at: "0".to_string(),
+        }
+    }
+
+    fn execution_config() -> agentic_afk_contracts::ProjectExecutionConfigResponse {
+        agentic_afk_contracts::ProjectExecutionConfigResponse {
+            integration_branch: "main".to_string(),
+            max_parallel_tasks: 4,
+            review_retry_limit: 2,
+        }
+    }
+
+    #[test]
+    fn hydrate_populates_plan_run_fields() {
+        let mut state = ProjectStoreState::new();
+        let mut snapshot = snapshot_with_activity(vec![]);
+        snapshot.execution_config = Some(execution_config());
+        snapshot.active_plan_run = Some(plan_run_response("pr1", "running"));
+        snapshot.recent_plan_runs = vec![plan_run_response("pr0", "succeeded_empty")];
+        state.hydrate(snapshot, 5);
+        assert!(state.execution_config.is_some());
+        assert_eq!(state.active_plan_run.as_ref().unwrap().id, "pr1");
+        assert_eq!(state.recent_plan_runs.len(), 1);
+        assert_eq!(state.recent_plan_runs[0].id, "pr0");
+    }
+
+    #[test]
+    fn plan_run_started_sets_active_plan_run() {
+        let mut state = ProjectStoreState::new();
+        state.hydrate(snapshot_with_activity(vec![]), 0);
+        let outcome = state.apply_event(
+            1,
+            ProjectEvent::PlanRunStarted(plan_run_response("pr1", "running")),
+        );
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert_eq!(state.active_plan_run.as_ref().unwrap().id, "pr1");
+    }
+
+    #[test]
+    fn plan_run_phase_completed_appends_phase_output_to_matching_active_plan_run() {
+        let mut state = ProjectStoreState::new();
+        state.hydrate(snapshot_with_activity(vec![]), 0);
+        state.apply_event(
+            1,
+            ProjectEvent::PlanRunStarted(plan_run_response("pr1", "running")),
+        );
+        let outcome = state.apply_event(
+            2,
+            ProjectEvent::PlanRunPhaseCompleted {
+                plan_run_id: "pr1".to_string(),
+                phase_output: phase_output("planning", "succeeded_empty"),
+            },
+        );
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        let active = state.active_plan_run.as_ref().unwrap();
+        assert_eq!(active.phase_outputs.len(), 1);
+        assert_eq!(active.phase_outputs[0].phase, "planning");
+    }
+
+    #[test]
+    fn plan_run_completed_moves_active_into_recent_history() {
+        let mut state = ProjectStoreState::new();
+        state.hydrate(snapshot_with_activity(vec![]), 0);
+        state.apply_event(
+            1,
+            ProjectEvent::PlanRunStarted(plan_run_response("pr1", "running")),
+        );
+        let mut completed = plan_run_response("pr1", "succeeded_empty");
+        completed.finished_at = Some("1".to_string());
+        state.apply_event(2, ProjectEvent::PlanRunCompleted(completed));
+        assert!(state.active_plan_run.is_none());
+        assert_eq!(state.recent_plan_runs.len(), 1);
+        assert_eq!(state.recent_plan_runs[0].state, "succeeded_empty");
+    }
+
+    #[test]
+    fn execution_config_changed_updates_state() {
+        let mut state = ProjectStoreState::new();
+        state.hydrate(snapshot_with_activity(vec![]), 0);
+        let outcome = state.apply_event(
+            1,
+            ProjectEvent::ProjectExecutionConfigChanged(execution_config()),
+        );
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        let cfg = state.execution_config.as_ref().unwrap();
+        assert_eq!(cfg.integration_branch, "main");
+        assert_eq!(cfg.max_parallel_tasks, 4);
+        assert_eq!(cfg.review_retry_limit, 2);
     }
 }

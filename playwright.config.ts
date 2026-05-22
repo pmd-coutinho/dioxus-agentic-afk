@@ -16,6 +16,7 @@ export default defineConfig({
       AGENTIC_AFK_BIND_ADDRESS: '127.0.0.1:3637',
       AGENTIC_AFK_DATABASE_URL: 'sqlite://target/agentic-afk-playwright.db',
       AGENTIC_AFK_TEST_ENDPOINTS: '1',
+      AGENTIC_AFK_TEST_PLAN_RUN_STUBS: '1',
     },
   },
   use: {

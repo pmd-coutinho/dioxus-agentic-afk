@@ -25,24 +25,8 @@ async function createTrustedProject(
   return project.id as string;
 }
 
-function assignment(id: string, status: string, projectId: string) {
-  return {
-    id,
-    project_id: projectId,
-    source_id: 'issue-A',
-    source_title: 'Sample Issue',
-    branch: 'agent/issue-a',
-    worktree_path: '/tmp/wt',
-    status,
-    status_detail: null,
-    change_proposal: null,
-    latest_attempt: null,
-    repair_budget: null,
-  };
-}
-
 test.describe('Overview', () => {
-  test('loaded state renders Project, Assignment, and Git Summary cards', async ({
+  test('loaded state renders Project, Plan Run, and Git Summary cards', async ({
     page,
     request,
   }) => {
@@ -55,36 +39,22 @@ test.describe('Overview', () => {
         git_summary: { branch: 'master', head: 'deadbeefcafe', dirty: false },
         enabled_issue_source: null,
       },
-      assignment_state: {
-        active_assignment: assignment('assn-1', 'proposal_pending', projectId),
-        waiting_ready_issue_count: 0,
-      },
     }));
 
     await page.goto(`/projects/${projectId}`);
 
-    // All three Cards render as h2 headings via CardHead.
     await expect(
       page.getByRole('heading', { level: 2, name: 'Project' }),
     ).toBeVisible();
     await expect(
-      page.getByRole('heading', { level: 2, name: 'Issue Assignment' }),
+      page.getByRole('heading', { level: 2, name: 'Plan Run' }),
     ).toBeVisible();
     await expect(
       page.getByRole('heading', { level: 2, name: 'Git Summary' }),
     ).toBeVisible();
 
-    // Trust StatusPill — Verified/Trusted when trusted.
     await expect(page.getByText('Trusted', { exact: true })).toBeVisible();
 
-    // Assignment Lifecycle StatusPill — derive_assignment_lifecycle_pill maps
-    // proposal_pending to "Awaiting checks".
-    await expect(
-      page.getByText('Awaiting checks', { exact: true }),
-    ).toBeVisible();
-
-    // Git Summary KeyValueList rows. Card scoped to disambiguate the
-    // master branch text from the GitSummary StatusPill label.
     const gitCard = page
       .getByRole('heading', { level: 2, name: 'Git Summary' })
       .locator('xpath=ancestor::article');

@@ -9,9 +9,9 @@
 //! `event_bus.publish` calls across handlers.
 
 use agentic_afk_contracts::{
-    AssignmentAttemptResponse, ChangeProposalResponse, IssueAssignmentResponse,
-    IssueSourceCandidate, IssueSourceSyncResponse, PlanningSnapshotResponse, ProjectEvent,
-    ProjectId, ProjectResponse,
+    AssignmentAttemptResponse, IssueAssignmentResponse, IssueSourceCandidate,
+    IssueSourceSyncResponse, PhaseOutputResponse, PlanRunResponse, PlanningSnapshotResponse,
+    ProjectEvent, ProjectExecutionConfigResponse, ProjectId, ProjectResponse,
 };
 
 pub fn publish_project_changed(bus: &EventBus, project_id: &str, project: ProjectResponse) -> u64 {
@@ -56,33 +56,43 @@ pub fn publish_assignment_attempt_added(
     )
 }
 
-pub fn publish_change_proposal_refreshed(
+pub fn publish_plan_run_started(bus: &EventBus, project_id: &str, plan_run: PlanRunResponse) -> u64 {
+    bus.publish(
+        &ProjectId(project_id.to_string()),
+        ProjectEvent::PlanRunStarted(plan_run),
+    )
+}
+
+pub fn publish_plan_run_phase_completed(
     bus: &EventBus,
     project_id: &str,
-    assignment_id: &str,
-    change_proposal: ChangeProposalResponse,
+    plan_run_id: &str,
+    phase_output: PhaseOutputResponse,
 ) -> u64 {
     bus.publish(
         &ProjectId(project_id.to_string()),
-        ProjectEvent::ChangeProposalRefreshed {
-            assignment_id: assignment_id.to_string(),
-            change_proposal,
+        ProjectEvent::PlanRunPhaseCompleted {
+            plan_run_id: plan_run_id.to_string(),
+            phase_output,
         },
     )
 }
 
-pub fn publish_change_proposal_verified(
+pub fn publish_plan_run_completed(bus: &EventBus, project_id: &str, plan_run: PlanRunResponse) -> u64 {
+    bus.publish(
+        &ProjectId(project_id.to_string()),
+        ProjectEvent::PlanRunCompleted(plan_run),
+    )
+}
+
+pub fn publish_project_execution_config_changed(
     bus: &EventBus,
     project_id: &str,
-    assignment_id: &str,
-    change_proposal: ChangeProposalResponse,
+    config: ProjectExecutionConfigResponse,
 ) -> u64 {
     bus.publish(
         &ProjectId(project_id.to_string()),
-        ProjectEvent::ChangeProposalVerified {
-            assignment_id: assignment_id.to_string(),
-            change_proposal,
-        },
+        ProjectEvent::ProjectExecutionConfigChanged(config),
     )
 }
 

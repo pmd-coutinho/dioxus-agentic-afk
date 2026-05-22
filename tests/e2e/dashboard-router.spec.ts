@@ -40,11 +40,6 @@ test('Dashboard deep-links to each Project sub-route without flashing the Overvi
   await expect(page.getByRole('heading', { name: 'Planning snapshot' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Activity' })).toBeHidden();
 
-  // Assignment sub-route.
-  await page.goto(`/projects/${projectId}/assignment`);
-  await expect(page.getByRole('heading', { name: 'Issue Assignment' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Planning snapshot' })).toBeHidden();
-
   // Source sub-route.
   await page.goto(`/projects/${projectId}/source`);
   await expect(

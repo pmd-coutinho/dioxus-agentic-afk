@@ -3,20 +3,30 @@
 //! Provides SQLite-backed storage for Projects.
 
 use agentic_afk_contracts::{
-    AssignmentAttemptResponse, AssignmentTerminalOutcome, ChangeProposalResponse,
-    CreateProjectRequest, EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource,
-    IssueSourceSyncResponse, IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProjectId,
-    ProjectResponse, RepairBudgetResponse, SourceIssueSnapshot,
+    AssignmentAttemptResponse, AssignmentTerminalOutcome, CreateProjectRequest,
+    EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource, IssueSourceSyncResponse,
+    IssueSourceSyncStatusResponse, PlanningSnapshotResponse, ProjectId, ProjectResponse,
+    SourceIssueSnapshot,
 };
 
-pub mod repair;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
 use std::path::Path;
 use std::str::FromStr;
 use uuid::Uuid;
 
-pub mod verify;
+mod activity;
+mod plan_run;
+
+pub use activity::{
+    PROJECT_ACTIVITY_DETAIL_MAX_BYTES, ProjectActivityEntry, list_project_activity,
+    record_project_activity,
+};
+pub use plan_run::{
+    create_plan_run, finish_plan_run, get_active_plan_run, get_plan_run,
+    get_project_execution_config, list_recent_plan_runs, record_plan_run_phase_output,
+    set_project_execution_config,
+};
 
 /// Public re-export of the internal assignment lookup, used by sibling modules and external callers.
 pub async fn get_issue_assignment_public(
@@ -26,14 +36,19 @@ pub async fn get_issue_assignment_public(
     get_issue_assignment(db, assignment_id).await
 }
 
-mod abandon;
-mod recover;
-
-pub use abandon::{
-    PROJECT_ACTIVITY_DETAIL_MAX_BYTES, ProjectActivityEntry, abandon_blocked_assignment,
-    get_project_assignment, list_project_activity, record_project_activity,
-};
-pub use recover::{list_assignment_attempts, record_recovery_attempt};
+pub async fn get_project_assignment(
+    db: &Db,
+    project_id: &str,
+    assignment_id: &str,
+) -> Result<IssueAssignmentResponse, PersistenceError> {
+    let assignment = get_issue_assignment_public(db, assignment_id).await?;
+    if assignment.project_id.0 != project_id {
+        return Err(PersistenceError::AssignmentNotFound(
+            assignment_id.to_string(),
+        ));
+    }
+    Ok(assignment)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
@@ -51,12 +66,6 @@ pub enum PersistenceError {
     ActiveAssignment(String),
     #[error("Issue Assignment not found: {0}")]
     AssignmentNotFound(String),
-    #[error("Issue Assignment has no Change Proposal to repair: {0}")]
-    NoChangeProposal(String),
-    #[error("Repair budget exhausted for Issue Assignment: {0}")]
-    RepairBudgetExhausted(String),
-    #[error("Issue Assignment is not in an abandonable state: {0}")]
-    AssignmentNotAbandonable(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -563,28 +572,6 @@ pub async fn set_assignment_status(
     update_assignment(db, assignment_id, status, status_detail, None).await
 }
 
-pub async fn set_assignment_change_proposal(
-    db: &Db,
-    assignment_id: &str,
-    status: &str,
-    url: &str,
-) -> Result<IssueAssignmentResponse, PersistenceError> {
-    let result = sqlx::query(
-        "UPDATE issue_assignments SET change_proposal_status = ?, change_proposal_url = ? WHERE id = ?",
-    )
-    .bind(status)
-    .bind(url)
-    .bind(assignment_id)
-    .execute(db)
-    .await?;
-    if result.rows_affected() == 0 {
-        return Err(PersistenceError::AssignmentNotFound(
-            assignment_id.to_string(),
-        ));
-    }
-    get_issue_assignment(db, assignment_id).await
-}
-
 pub async fn record_initial_attempt(
     db: &Db,
     assignment_id: &str,
@@ -715,18 +702,6 @@ pub(crate) async fn get_issue_assignment(
     .fetch_one(db)
     .await?
     .0;
-    let (change_proposal_status, change_proposal_url) = sqlx::query_as::<
-        _,
-        (Option<String>, Option<String>),
-    >(
-        "SELECT change_proposal_status, change_proposal_url FROM issue_assignments WHERE id = ?",
-    )
-    .bind(assignment_id)
-    .fetch_one(db)
-    .await?;
-    let change_proposal = change_proposal_status
-        .zip(change_proposal_url)
-        .map(|(status, url)| ChangeProposalResponse { status, url });
     let latest_attempt =
         sqlx::query_as::<_, (String, String, Option<i64>, Option<String>, Option<String>)>(
             r#"
@@ -754,23 +729,6 @@ pub(crate) async fn get_issue_assignment(
                 }
             },
         );
-    let repair_budget = sqlx::query_as::<_, (i64, Option<i64>, i64, i64)>(
-        r#"
-        SELECT repair_attempt_count, repair_window_started_at, repair_max_attempts, repair_window_seconds
-        FROM issue_assignments
-        WHERE id = ?
-        "#,
-    )
-    .bind(assignment_id)
-    .fetch_one(db)
-    .await
-    .ok()
-    .map(|(attempt_count, window_started_at, max_attempts, window_seconds)| RepairBudgetResponse {
-        attempt_count,
-        max_attempts,
-        window_seconds,
-        window_started_at,
-    });
     Ok(IssueAssignmentResponse {
         id,
         project_id: ProjectId(project_id),
@@ -780,9 +738,7 @@ pub(crate) async fn get_issue_assignment(
         worktree_path,
         status,
         status_detail,
-        change_proposal,
         latest_attempt,
-        repair_budget,
     })
 }
 

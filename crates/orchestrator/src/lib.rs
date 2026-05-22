@@ -1,22 +1,18 @@
 //! Process adapters owned by the Orchestrator boundary.
 
-pub mod verify;
-pub mod recover;
-
-mod abandon;
-
-pub use abandon::remove_assignment_worktree;
-pub use recover::{
-    PriorProcessOutcome, RecoveryPromptFacts, build_recovery_prompt, run_recovery_codex,
-    stop_prior_codex_if_owned,
-};
-
 use agentic_afk_contracts::AssignmentTerminalOutcome;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub mod repair;
+pub mod plan_run;
+
+pub use plan_run::{
+    FakePlanningPhaseRunner, IntegrationBranchRefresher, ParsedPlanningOutput, PlanRunPhaseError,
+    PlanningPhaseRunner, RefreshedBaseline, StaticIntegrationBranchRefresher,
+    UnimplementedIntegrationBranchRefresher, UnimplementedPlanningPhaseRunner,
+    parse_planning_output,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodexExecution {

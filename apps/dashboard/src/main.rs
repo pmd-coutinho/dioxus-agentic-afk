@@ -12,10 +12,10 @@ use ui::{
 };
 
 use agentic_afk_contracts::{
-    AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueSourceCandidate,
-    IssueSourceSyncResponse, PlanningSnapshotResponse,
-    ProjectActivityEntryResponse, ProjectAssignmentStateResponse, ProjectId, ProjectResponse,
-    ProjectEvent, ProjectSnapshotResponse, SourceIssueSnapshot,
+    AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueAssignmentResponse,
+    IssueSourceCandidate, IssueSourceSyncResponse, PlanRunResponse, PlanningSnapshotResponse,
+    ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse, ProjectId,
+    ProjectResponse, ProjectSnapshotResponse, SetProjectExecutionConfigRequest, SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
 use std::cell::RefCell;
@@ -53,8 +53,6 @@ enum Route {
                 ProjectOverview { id: String },
                 #[route("/planning")]
                 ProjectPlanning { id: String },
-                #[route("/assignment")]
-                ProjectAssignment { id: String },
                 #[route("/source")]
                 ProjectIssueSource { id: String },
                 #[route("/activity")]
@@ -363,7 +361,6 @@ fn ProjectSubNav(id: String) -> Element {
         nav { class: "flex flex-wrap gap-2",
             Link { to: Route::ProjectOverview { id: id.clone() }, class: link_class, "Overview" }
             Link { to: Route::ProjectPlanning { id: id.clone() }, class: link_class, "Planning" }
-            Link { to: Route::ProjectAssignment { id: id.clone() }, class: link_class, "Assignment" }
             Link { to: Route::ProjectIssueSource { id: id.clone() }, class: link_class, "Issue Source" }
             Link { to: Route::ProjectActivity { id: id.clone() }, class: link_class, "Activity" }
         }
@@ -410,130 +407,16 @@ fn TrustProjectButton(project_id: String) -> Element {
     }
 }
 
-/// Three lifecycle mutations on an Issue Assignment that share the same UI
-/// shape (POST, disable-while-pending, inline validation error, pessimistic
-/// refetch). Modelled as a closed enum so each variant carries the routing,
-/// labels, and mutation key in one place.
-#[derive(Clone, Copy, PartialEq)]
-enum AssignmentLifecycle {
-    RefreshProposal,
-    Recover,
-    Abandon,
-}
-
-impl AssignmentLifecycle {
-    fn key(self, project_id: &str, assignment_id: &str) -> project_store::MutationKey {
-        use project_store::{IssueAssignmentId, MutationKey};
-        let pid = agentic_afk_contracts::ProjectId(project_id.to_string());
-        let aid = IssueAssignmentId(assignment_id.to_string());
-        match self {
-            Self::RefreshProposal => MutationKey::RefreshProposalState(pid, aid),
-            Self::Recover => MutationKey::RecoverAssignment(pid, aid),
-            Self::Abandon => MutationKey::AbandonAssignment(pid, aid),
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::RefreshProposal => "Refresh Proposal State",
-            Self::Recover => "Recover Assignment",
-            Self::Abandon => "Abandon Assignment",
-        }
-    }
-
-    fn testid(self) -> &'static str {
-        match self {
-            Self::RefreshProposal => "refresh-proposal-state-button",
-            Self::Recover => "recover-assignment-button",
-            Self::Abandon => "abandon-assignment-button",
-        }
-    }
-
-    /// Stable value for the `data-lifecycle-error` attribute on the inline
-    /// error region, so Playwright can target each mutation distinctly.
-    fn error_marker(self) -> &'static str {
-        match self {
-            Self::RefreshProposal => "refresh-proposal",
-            Self::Recover => "recover-assignment",
-            Self::Abandon => "abandon-assignment",
-        }
-    }
-
-    fn variant(self) -> ButtonVariant {
-        match self {
-            Self::RefreshProposal => ButtonVariant::Primary,
-            Self::Recover => ButtonVariant::Default,
-            Self::Abandon => ButtonVariant::Destructive,
-        }
-    }
-
-    async fn invoke(
-        self,
-        project_id: String,
-        assignment_id: String,
-    ) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure>
-    {
-        match self {
-            Self::RefreshProposal => refresh_proposal_state_api(project_id, assignment_id).await,
-            Self::Recover => recover_assignment_api(project_id, assignment_id).await,
-            Self::Abandon => abandon_assignment_api(project_id, assignment_id).await,
-        }
-    }
-}
-
-#[component]
-fn RefreshProposalStateButton(project_id: String, assignment_id: String) -> Element {
-    rsx! { AssignmentLifecycleButton { kind: AssignmentLifecycle::RefreshProposal, project_id, assignment_id } }
-}
-
-#[component]
-fn RecoverAssignmentButton(project_id: String, assignment_id: String) -> Element {
-    rsx! { AssignmentLifecycleButton { kind: AssignmentLifecycle::Recover, project_id, assignment_id } }
-}
-
-#[component]
-fn AbandonAssignmentButton(project_id: String, assignment_id: String) -> Element {
-    rsx! { AssignmentLifecycleButton { kind: AssignmentLifecycle::Abandon, project_id, assignment_id } }
-}
-
-#[component]
-fn AssignmentLifecycleButton(
-    kind: AssignmentLifecycle,
-    project_id: String,
-    assignment_id: String,
-) -> Element {
-    let store = use_context::<ProjectStore>();
-    let key = kind.key(&project_id, &assignment_id);
-    rsx! {
-        ActionButton {
-            mutation_key: key.clone(),
-            variant: kind.variant(),
-            testid: kind.testid().to_string(),
-            error_marker: kind.error_marker().to_string(),
-            on_press: {
-                let key = key.clone();
-                let project_id = project_id.clone();
-                let assignment_id = assignment_id.clone();
-                move |_| {
-                    let key = key.clone();
-                    let project_id = project_id.clone();
-                    let assignment_id = assignment_id.clone();
-                    wasm_bindgen_futures::spawn_local(async move {
-                        let _ = store.mutate(key, kind.invoke(project_id, assignment_id)).await;
-                    });
-                }
-            },
-            "{kind.label()}"
-        }
-    }
-}
 
 #[component]
 fn ProjectOverview(id: String) -> Element {
     let state_sig = use_context::<ProjectStore>().state_signal();
     let s = state_sig.read();
     let project = s.project.clone();
-    let assignment_state = s.assignment_state.clone();
+    let active_assignment = s.active_assignment.clone();
+    let execution_config = s.execution_config.clone();
+    let active_plan_run = s.active_plan_run.clone();
+    let recent_plan_runs = s.recent_plan_runs.clone();
     drop(s);
 
     rsx! {
@@ -541,7 +424,18 @@ fn ProjectOverview(id: String) -> Element {
             Some(project) => rsx! {
                 div { class: "grid gap-6 lg:grid-cols-2",
                     ProjectMetaCard { project: project.clone() }
-                    AssignmentSummaryCard { assignment_state: assignment_state.clone() }
+                    AssignmentSummaryCard { active_assignment: active_assignment.clone() }
+                }
+                ExecutionConfigCard {
+                    project_id: project.id.0.clone(),
+                    config: execution_config.clone(),
+                }
+                PlanRunCard {
+                    project_id: project.id.0.clone(),
+                    trusted: project.trusted,
+                    has_config: execution_config.is_some(),
+                    active: active_plan_run.clone(),
+                    recent: recent_plan_runs.clone(),
                 }
                 GitSummaryCard { git_summary: project.git_summary.clone() }
             },
@@ -558,6 +452,205 @@ fn ProjectOverview(id: String) -> Element {
                     }
                 }
             },
+        }
+    }
+}
+
+#[component]
+fn ExecutionConfigCard(
+    project_id: String,
+    config: Option<ProjectExecutionConfigResponse>,
+) -> Element {
+    let store = use_context::<ProjectStore>();
+    let key = MutationKey::SetExecutionConfig(ProjectId(project_id.clone()));
+    let mut integration_branch = use_signal(|| {
+        config
+            .as_ref()
+            .map(|c| c.integration_branch.clone())
+            .unwrap_or_else(|| "main".to_string())
+    });
+    let mut max_parallel_tasks = use_signal(|| {
+        config
+            .as_ref()
+            .map(|c| c.max_parallel_tasks.to_string())
+            .unwrap_or_else(|| "1".to_string())
+    });
+    let mut review_retry_limit = use_signal(|| {
+        config
+            .as_ref()
+            .map(|c| c.review_retry_limit.to_string())
+            .unwrap_or_else(|| "3".to_string())
+    });
+
+    let submit = use_callback({
+        let store = store.clone();
+        let key = key.clone();
+        let project_id = project_id.clone();
+        move |()| {
+            let max = max_parallel_tasks.read().parse::<i64>().unwrap_or(0);
+            let retry = review_retry_limit.read().parse::<i64>().unwrap_or(0);
+            let request = SetProjectExecutionConfigRequest {
+                integration_branch: integration_branch.read().clone(),
+                max_parallel_tasks: max,
+                review_retry_limit: retry,
+            };
+            let store = store.clone();
+            let key = key.clone();
+            let project_id = project_id.clone();
+            spawn(async move {
+                let _ = store
+                    .mutate(key, set_execution_config_api(project_id, request))
+                    .await;
+            });
+        }
+    });
+
+    rsx! {
+        Card {
+            CardHead { title: "Execution Config".to_string(), id_text: None }
+            CardBody {
+                form {
+                    "data-testid": "execution-config-form",
+                    class: "flex flex-col gap-3",
+                    onsubmit: move |event| {
+                        event.prevent_default();
+                        submit.call(());
+                    },
+                    label { class: "flex flex-col gap-1 text-[12px] text-ink-2",
+                        "Integration Branch"
+                        input {
+                            "data-testid": "execution-config-integration-branch",
+                            class: "bg-bg-2 px-2 py-1 font-mono text-[12px] text-ink",
+                            r#type: "text",
+                            value: integration_branch.read().clone(),
+                            oninput: move |e| integration_branch.set(e.value()),
+                        }
+                    }
+                    label { class: "flex flex-col gap-1 text-[12px] text-ink-2",
+                        "Max Parallel Tasks"
+                        input {
+                            "data-testid": "execution-config-max-parallel-tasks",
+                            class: "bg-bg-2 px-2 py-1 font-mono text-[12px] text-ink",
+                            r#type: "number",
+                            min: "1",
+                            value: max_parallel_tasks.read().clone(),
+                            oninput: move |e| max_parallel_tasks.set(e.value()),
+                        }
+                    }
+                    label { class: "flex flex-col gap-1 text-[12px] text-ink-2",
+                        "Review Retry Limit"
+                        input {
+                            "data-testid": "execution-config-review-retry-limit",
+                            class: "bg-bg-2 px-2 py-1 font-mono text-[12px] text-ink",
+                            r#type: "number",
+                            min: "1",
+                            value: review_retry_limit.read().clone(),
+                            oninput: move |e| review_retry_limit.set(e.value()),
+                        }
+                    }
+                    ActionButton {
+                        mutation_key: key,
+                        variant: ButtonVariant::Primary,
+                        testid: Some("execution-config-save".to_string()),
+                        on_press: move |_| submit.call(()),
+                        "Save Execution Config"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PlanRunCard(
+    project_id: String,
+    trusted: bool,
+    has_config: bool,
+    active: Option<PlanRunResponse>,
+    recent: Vec<PlanRunResponse>,
+) -> Element {
+    let store = use_context::<ProjectStore>();
+    let start_key = MutationKey::StartPlanRun(ProjectId(project_id.clone()));
+    let can_start = trusted && has_config && active.is_none();
+    let start = {
+        let store = store.clone();
+        let start_key = start_key.clone();
+        let project_id = project_id.clone();
+        move |_| {
+            let store = store.clone();
+            let start_key = start_key.clone();
+            let project_id = project_id.clone();
+            spawn(async move {
+                let _ = store
+                    .mutate(start_key, start_plan_run_api(project_id))
+                    .await;
+            });
+        }
+    };
+    rsx! {
+        Card {
+            CardHead { title: "Plan Run".to_string(), id_text: None }
+            CardBody {
+                div { class: "flex flex-col gap-3", "data-testid": "plan-run-card",
+                    match active {
+                        Some(active) => {
+                            let id_short = active.id.chars().take(8).collect::<String>();
+                            rsx! {
+                                div { class: "flex flex-col gap-1", "data-testid": "plan-run-active",
+                                    StatusPill { tone: PillTone::Running, label: "Running".to_string() }
+                                    p { class: "font-mono text-[12px] text-ink", "{id_short}" }
+                                    p { class: "text-[12px] text-ink-2",
+                                        "{active.integration_branch} @ {active.baseline_commit}"
+                                    }
+                                }
+                            }
+                        }
+                        None => rsx! {
+                            EmptyState {
+                                title: "No active Plan Run".to_string(),
+                                body: "Start one to plan the next batch.".to_string(),
+                                accent: EmptyStateAccent::Cyan,
+                            }
+                        },
+                    }
+                    ActionButton {
+                        mutation_key: start_key,
+                        variant: ButtonVariant::Primary,
+                        disabled: !can_start,
+                        on_press: move |_| start(()),
+                        testid: Some("start-plan-run".to_string()),
+                        "Start Plan Run"
+                    }
+                }
+                if !recent.is_empty() {
+                    div { class: "mt-4 flex flex-col gap-2", "data-testid": "plan-run-history",
+                        p { class: "text-[12px] text-ink-2", "Recent Plan Runs" }
+                        for plan_run in recent.iter().take(5) {
+                            PlanRunHistoryRow { plan_run: plan_run.clone() }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PlanRunHistoryRow(plan_run: PlanRunResponse) -> Element {
+    let id_short = plan_run.id.chars().take(8).collect::<String>();
+    let (tone, label) = match plan_run.state.as_str() {
+        "succeeded_empty" => (PillTone::Verified, "Succeeded (empty)"),
+        "succeeded" => (PillTone::Verified, "Succeeded"),
+        "failed" => (PillTone::Failed, "Failed"),
+        _ => (PillTone::Pending, "Unknown"),
+    };
+    rsx! {
+        div { class: "flex items-center gap-2", "data-testid": "plan-run-history-row",
+            StatusPill { tone, label: label.to_string() }
+            p { class: "font-mono text-[12px] text-ink", "{id_short}" }
+            p { class: "text-[11px] text-ink-2",
+                "{plan_run.integration_branch} @ {plan_run.baseline_commit}"
+            }
         }
     }
 }
@@ -599,12 +692,8 @@ fn ProjectMetaCard(project: ProjectResponse) -> Element {
 }
 
 #[component]
-fn AssignmentSummaryCard(
-    assignment_state: Option<ProjectAssignmentStateResponse>,
-) -> Element {
-    let active = assignment_state
-        .as_ref()
-        .and_then(|s| s.active_assignment.clone());
+fn AssignmentSummaryCard(active_assignment: Option<IssueAssignmentResponse>) -> Element {
+    let active = active_assignment;
     rsx! {
         Card {
             CardHead {
@@ -682,10 +771,9 @@ fn ProjectPlanning(id: String) -> Element {
     rsx! { PlanningPanel { id } }
 }
 
-#[component]
-fn ProjectAssignment(id: String) -> Element {
-    rsx! { AssignmentPanel { id } }
-}
+// TODO: Plan Run UI (issue #41 Phase B) — restore an assignment surface once
+// Plan Runs drive Issue Assignments. The legacy `/projects/:id/assignment`
+// route and its `AssignmentPanel` / `AssignmentState` components were removed.
 
 #[component]
 fn ProjectIssueSource(id: String) -> Element {
@@ -721,27 +809,6 @@ fn IssueSourcePanels(id: String) -> Element {
         IssueSourceCandidates {
             project_id: id.clone(),
             candidates,
-        }
-    }
-}
-
-#[component]
-fn AssignmentPanel(id: String) -> Element {
-    let state = use_context::<ProjectStore>().state_signal();
-    let assignment_state = state.read().assignment_state.clone();
-    rsx! {
-        match assignment_state {
-            Some(s) => rsx! { AssignmentState { project_id: id.clone(), state: s } },
-            None => rsx! {
-                Card {
-                    CardHead { title: "Issue Assignment".to_string(), id_text: None }
-                    CardBody {
-                        SkeletonHeading {}
-                        SkeletonLine { width_percent: 70 }
-                        SkeletonLine { width_percent: 45 }
-                    }
-                }
-            },
         }
     }
 }
@@ -1300,104 +1367,6 @@ fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool
 }
 
 #[component]
-fn AssignmentState(project_id: String, state: ProjectAssignmentStateResponse) -> Element {
-    rsx! {
-        Card {
-            CardHead {
-                title: "Issue Assignment".to_string(),
-                id_text: state
-                    .active_assignment
-                    .as_ref()
-                    .map(|a| a.id.chars().take(8).collect::<String>()),
-            }
-            CardBody {
-                match state.active_assignment {
-                    Some(assignment) => {
-                        let (lifecycle_tone, lifecycle_label) =
-                            derive_assignment_lifecycle_pill(&assignment.status);
-                        let can_refresh_proposal = matches!(
-                            assignment.status.as_str(),
-                            "proposal_pending" | "proposal_verified"
-                        );
-                        let can_abandon = assignment.status == "blocked";
-                        let can_recover = assignment.status == "blocked";
-                        let assignment_id = assignment.id.clone();
-                        rsx! {
-                            div { class: "flex flex-col gap-4",
-                                div { class: "flex flex-wrap items-center gap-3",
-                                    StatusPill { tone: lifecycle_tone, label: lifecycle_label }
-                                    if let Some(budget) = assignment.repair_budget.clone() {
-                                        StatusPill {
-                                            tone: PillTone::Pending,
-                                            label: format!(
-                                                "Repair {}/{}",
-                                                budget.attempt_count, budget.max_attempts,
-                                            ),
-                                        }
-                                    }
-                                }
-                                p { class: "font-display text-[14px] text-ink", "{assignment.source_title}" }
-                                KeyValueList {
-                                    KeyValueRow { label: "Source ID".to_string(), value: assignment.source_id.clone() }
-                                    KeyValueRow { label: "Branch".to_string(), value: assignment.branch.clone() }
-                                }
-                                if let Some(detail) = assignment.status_detail.clone() {
-                                    p { class: "font-mono text-[12px] text-ink-2", "{detail}" }
-                                }
-                                if let Some(proposal) = assignment.change_proposal.clone() {
-                                    a {
-                                        class: "w-fit font-display text-[11px] uppercase tracking-[0.18em] text-cyan hover:text-ink",
-                                        href: "{proposal.url}",
-                                        target: "_blank",
-                                        rel: "noreferrer",
-                                        "Change Proposal {proposal.status}"
-                                    }
-                                }
-                                div { class: "flex flex-wrap gap-3",
-                                    if can_refresh_proposal {
-                                        AssignmentLifecycleButton {
-                                            kind: AssignmentLifecycle::RefreshProposal,
-                                            project_id: project_id.clone(),
-                                            assignment_id: assignment_id.clone(),
-                                        }
-                                    }
-                                    if can_recover {
-                                        AssignmentLifecycleButton {
-                                            kind: AssignmentLifecycle::Recover,
-                                            project_id: project_id.clone(),
-                                            assignment_id: assignment_id.clone(),
-                                        }
-                                    }
-                                    if can_abandon {
-                                        AssignmentLifecycleButton {
-                                            kind: AssignmentLifecycle::Abandon,
-                                            project_id: project_id.clone(),
-                                            assignment_id: assignment_id.clone(),
-                                        }
-                                    }
-                                }
-                                if state.waiting_ready_issue_count > 0 {
-                                    p { class: "border-t border-stroke pt-3 font-mono text-[12px] text-ink-2",
-                                        "{state.waiting_ready_issue_count} eligible Ready Issue waiting for the Project assignment slot."
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    None => rsx! {
-                        EmptyState {
-                            title: "No active Assignment".to_string(),
-                            body: "Start an Assignment from Planning to boot an agent against this Project.".to_string(),
-                            accent: EmptyStateAccent::Cyan,
-                        }
-                    },
-                }
-            }
-        }
-    }
-}
-
-#[component]
 fn GitSummaryRow(summary: GitSummary) -> Element {
     let branch = summary.branch.unwrap_or_else(|| "detached".to_string());
     let head = summary
@@ -1517,35 +1486,6 @@ async fn start_assignment_api(
     .await
 }
 
-async fn abandon_assignment_api(
-    project_id: String,
-    assignment_id: String,
-) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
-    post_assignment_mutation(format!(
-        "/api/projects/{project_id}/assignments/{assignment_id}/abandon"
-    ))
-    .await
-}
-
-async fn recover_assignment_api(
-    project_id: String,
-    assignment_id: String,
-) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
-    post_assignment_mutation(format!(
-        "/api/projects/{project_id}/assignments/{assignment_id}/recover"
-    ))
-    .await
-}
-
-async fn refresh_proposal_state_api(
-    project_id: String,
-    assignment_id: String,
-) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
-    post_assignment_mutation(format!(
-        "/api/projects/{project_id}/assignments/{assignment_id}/refresh-proposal-state"
-    ))
-    .await
-}
 
 /// Issue a POST against an Issue Assignment lifecycle endpoint and map the
 /// outcome into a `MutationFailure` so the `ProjectStore` can categorize it.
@@ -1553,6 +1493,47 @@ async fn post_assignment_mutation(
     path: String,
 ) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
     let response = gloo_net::http::Request::post(&path)
+        .send()
+        .await
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
+}
+
+async fn set_execution_config_api(
+    project_id: String,
+    request: SetProjectExecutionConfigRequest,
+) -> Result<ProjectExecutionConfigResponse, project_store::MutationFailure> {
+    let response = gloo_net::http::Request::put(&format!(
+        "/api/projects/{project_id}/execution-config"
+    ))
+    .json(&request)
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?
+    .send()
+    .await
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
+}
+
+async fn start_plan_run_api(
+    project_id: String,
+) -> Result<PlanRunResponse, project_store::MutationFailure> {
+    let response = gloo_net::http::Request::post(&format!("/api/projects/{project_id}/plan-runs"))
         .send()
         .await
         .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
