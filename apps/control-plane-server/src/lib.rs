@@ -16,14 +16,17 @@ use agentic_afk_orchestrator::{
     codex_process_identity, create_assignment_worktree, preflight_binary, run_initial_codex,
 };
 pub use agentic_afk_orchestrator::{
-    AssignmentWorktreeProvisioner, FakeImplementationPhaseRunner, FakeLifecycleWriter,
-    FakePlanningPhaseRunner, FakeReviewPhaseRunner, FakeWorktreeProvisioner,
-    ImplementationPhaseRunner, IntegrationBranchRefresher, IssueLifecycleWriter, PlanRunPhaseError,
+    AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, FakeAssignmentWorktreeCleaner,
+    FakeImplementationPhaseRunner, FakeIntegrationBranchPusher, FakeLifecycleWriter,
+    FakeMergePhaseRunner, FakePlanningPhaseRunner, FakeReviewPhaseRunner,
+    FakeWorktreeProvisioner, ImplementationPhaseRunner, IntegrationBranchPusher,
+    IntegrationBranchRefresher, IssueLifecycleWriter, MergePhaseRunner, PlanRunPhaseError,
     PlannerSelection, PlanningPhaseRunner, RefreshedBaseline, ReviewPhaseRunner,
-    StaticIntegrationBranchRefresher, UnimplementedImplementationPhaseRunner,
+    StaticIntegrationBranchRefresher, UnimplementedAssignmentWorktreeCleaner,
+    UnimplementedImplementationPhaseRunner, UnimplementedIntegrationBranchPusher,
     UnimplementedIntegrationBranchRefresher, UnimplementedLifecycleWriter,
-    UnimplementedPlanningPhaseRunner, UnimplementedReviewPhaseRunner,
-    UnimplementedWorktreeProvisioner,
+    UnimplementedMergePhaseRunner, UnimplementedPlanningPhaseRunner,
+    UnimplementedReviewPhaseRunner, UnimplementedWorktreeProvisioner,
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 use axum::extract::{Path, State};
@@ -111,6 +114,16 @@ pub struct PlanRunDeps {
     pub lifecycle: Arc<dyn IssueLifecycleWriter>,
     pub implementation: Arc<dyn ImplementationPhaseRunner>,
     pub review: Arc<dyn ReviewPhaseRunner>,
+    /// Merge Phase runner (issue #45). Integrates one reviewed Issue
+    /// Assignment into the configured Integration Branch.
+    pub merger: Arc<dyn MergePhaseRunner>,
+    /// Push the Integration Branch after a verified successful merge.
+    /// Held as a separate seam from the merge runner so the push
+    /// boundary can be asserted independently in tests.
+    pub pusher: Arc<dyn IntegrationBranchPusher>,
+    /// Clean up the Assignment Worktree and deterministic branch after a
+    /// successful merge so the worktree does not linger past completion.
+    pub cleaner: Arc<dyn AssignmentWorktreeCleaner>,
 }
 
 impl PlanRunDeps {
@@ -122,6 +135,9 @@ impl PlanRunDeps {
             lifecycle: Arc::new(UnimplementedLifecycleWriter),
             implementation: Arc::new(UnimplementedImplementationPhaseRunner),
             review: Arc::new(UnimplementedReviewPhaseRunner),
+            merger: Arc::new(UnimplementedMergePhaseRunner),
+            pusher: Arc::new(UnimplementedIntegrationBranchPusher),
+            cleaner: Arc::new(UnimplementedAssignmentWorktreeCleaner),
         }
     }
 }
@@ -231,6 +247,11 @@ fn default_test_deps() -> PlanRunDeps {
         review: Arc::new(FakeReviewPhaseRunner::with_stdout(
             r#"<review>{"outcome":"approved","findings":[],"summary":"stub approved","verification":[],"gaps":[]}</review>"#,
         )),
+        merger: Arc::new(FakeMergePhaseRunner::with_stdout(
+            r#"<merge>{"outcome":"merged","summary":"stub merged","merged_source_ids":[],"verification":[],"gaps":[]}</merge>"#,
+        )),
+        pusher: Arc::new(FakeIntegrationBranchPusher::new()),
+        cleaner: Arc::new(FakeAssignmentWorktreeCleaner::new()),
     }
 }
 
@@ -312,8 +333,8 @@ pub fn router_with_plan_run_full_deps(
 }
 
 /// Build a router with every Plan Run dependency seam injected
-/// (planning, claim, implementation, review). Used by tests that drive
-/// the full Plan Run flow.
+/// (planning, claim, implementation, review). The merge / push / cleanup
+/// seams default to test fakes so existing tests continue to compile.
 pub fn router_with_plan_run_all_deps(
     config: ControlPlaneConfig,
     db: Db,
@@ -335,6 +356,42 @@ pub fn router_with_plan_run_all_deps(
             lifecycle,
             implementation,
             review,
+            ..default_test_deps()
+        },
+    )
+}
+
+/// Build a router with the full Plan Run dependency surface, including
+/// the Merge Phase seams (issue #45). Used by tests that drive the
+/// implementation → review → merge flow end-to-end.
+#[allow(clippy::too_many_arguments)]
+pub fn router_with_plan_run_merge_deps(
+    config: ControlPlaneConfig,
+    db: Db,
+    refresher: Arc<dyn IntegrationBranchRefresher>,
+    planner: Arc<dyn PlanningPhaseRunner>,
+    worktree: Arc<dyn AssignmentWorktreeProvisioner>,
+    lifecycle: Arc<dyn IssueLifecycleWriter>,
+    implementation: Arc<dyn ImplementationPhaseRunner>,
+    review: Arc<dyn ReviewPhaseRunner>,
+    merger: Arc<dyn MergePhaseRunner>,
+    pusher: Arc<dyn IntegrationBranchPusher>,
+    cleaner: Arc<dyn AssignmentWorktreeCleaner>,
+) -> Router {
+    router_with_full_deps(
+        config,
+        db,
+        event_bus::EventBus::new(),
+        PlanRunDeps {
+            refresher,
+            planner,
+            worktree,
+            lifecycle,
+            implementation,
+            review,
+            merger,
+            pusher,
+            cleaner,
         },
     )
 }
@@ -2603,8 +2660,28 @@ async fn run_implementation_and_review(
             crate::project_event_publisher::publish_assignment_status_changed(
                 &state.event_bus,
                 project_id,
-                reviewed,
+                reviewed.clone(),
             );
+
+            // Issue #45: drive the first accepting Merge Phase for the
+            // reviewed assignment. Success pushes the Integration Branch
+            // only after the merger reports a verified result, completes
+            // the merged Source Issue, cleans the worktree/branch, and
+            // finishes the Plan Run as `succeeded`. A blocked merge
+            // surfaces the block reason and finishes the Plan Run as
+            // `failed` without pushing.
+            run_merge_phase(
+                state,
+                project,
+                project_id,
+                plan_run,
+                baseline,
+                &exec_config,
+                &reviewed,
+                &review_parsed.body,
+                &project_instructions,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -2650,6 +2727,242 @@ async fn run_implementation_and_review(
             .await);
         }
     }
+}
+
+/// Issue #45: drive the first accepting Merge Phase for one reviewed
+/// successful assignment. On `merged` the Integration Branch is pushed
+/// (post-verification), the merged Source Issue is completed, the
+/// Assignment Worktree is cleaned up, and the Plan Run finishes as
+/// `succeeded`. On `blocked` the merger's block reason is persisted, the
+/// assignment is moved into the coarse blocked lifecycle, and the Plan
+/// Run finishes as `failed`. No Integration Branch push happens on the
+/// blocked path.
+#[allow(clippy::too_many_arguments)]
+async fn run_merge_phase(
+    state: &AppState,
+    project: &ProjectResponse,
+    project_id: &str,
+    plan_run: &PlanRunResponse,
+    baseline: &RefreshedBaseline,
+    exec_config: &ProjectExecutionConfigResponse,
+    assignment: &IssueAssignmentResponse,
+    review_body: &serde_json::Value,
+    project_instructions: &str,
+) -> Result<(), Response> {
+    let merging = persistence::set_assignment_status(&state.db, &assignment.id, "merging", None)
+        .await
+        .map_err(persistence_error_to_response)?;
+    crate::project_event_publisher::publish_assignment_status_changed(
+        &state.event_bus,
+        project_id,
+        merging,
+    );
+
+    let prompt = render_merge_prompt(
+        project_instructions,
+        project,
+        plan_run,
+        baseline,
+        exec_config,
+        assignment,
+        review_body,
+    );
+    let merge_stdout = match state.plan_run_deps.merger.run(&prompt) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            return Err(fail_assignment(
+                state,
+                project_id,
+                plan_run,
+                assignment,
+                "merge",
+                &error.to_string(),
+                "urn:agentic-afk:merge-phase-failed",
+            )
+            .await);
+        }
+    };
+    let merge_parsed = match agentic_afk_orchestrator::parse_merge_output(&merge_stdout) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Err(fail_assignment(
+                state,
+                project_id,
+                plan_run,
+                assignment,
+                "merge",
+                &error,
+                "urn:agentic-afk:merge-output-unparseable",
+            )
+            .await);
+        }
+    };
+
+    let merge_output = persistence::record_assignment_phase_output(
+        &state.db,
+        &plan_run.id,
+        &assignment.id,
+        "merge",
+        &merge_parsed.outcome,
+        &merge_parsed.body,
+    )
+    .await
+    .map_err(persistence_error_to_response)?;
+    crate::project_event_publisher::publish_plan_run_phase_completed(
+        &state.event_bus,
+        project_id,
+        &plan_run.id,
+        merge_output,
+    );
+
+    if merge_parsed.outcome == "blocked" {
+        let reason = merge_parsed
+            .body
+            .get("block_reason")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                merge_parsed
+                    .body
+                    .get("summary")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        "Merge Phase blocked without an explicit reason".to_string()
+                    })
+            });
+        let blocked = persistence::block_assignment(&state.db, &assignment.id, &reason)
+            .await
+            .map_err(persistence_error_to_response)?;
+        crate::project_event_publisher::publish_assignment_status_changed(
+            &state.event_bus,
+            project_id,
+            blocked,
+        );
+        if let Some(source) = project.enabled_issue_source.as_ref() {
+            if let Err(error) = write_assignment_lifecycle(
+                &state.config.gh_binary_path,
+                project,
+                source,
+                &assignment.source_id,
+                "blocked",
+            ) {
+                eprintln!(
+                    "warning: failed to write blocked Lifecycle Status back to Issue Source during Merge Phase: {error}"
+                );
+            }
+        }
+        if let Ok(run) = persistence::finish_plan_run(&state.db, &plan_run.id, "failed").await {
+            crate::project_event_publisher::publish_plan_run_completed(
+                &state.event_bus,
+                project_id,
+                run,
+            );
+        }
+        return Ok(());
+    }
+
+    // Merge succeeded. Push the Integration Branch AFTER the merger has
+    // reported a verified integrated result. This is the canonical push
+    // boundary the acceptance criteria pin in place: any change to this
+    // ordering must keep `merger.run -> outcome == "merged" -> pusher.push`.
+    let project_path = std::path::Path::new(&project.path);
+    if let Err(error) = state
+        .plan_run_deps
+        .pusher
+        .push(project_path, &exec_config.integration_branch)
+    {
+        return Err(fail_assignment(
+            state,
+            project_id,
+            plan_run,
+            assignment,
+            "merge",
+            &error.to_string(),
+            "urn:agentic-afk:integration-branch-push-failed",
+        )
+        .await);
+    }
+
+    // Lifecycle: assignment -> merged, Source Issue -> completed.
+    let merged = persistence::set_assignment_status(&state.db, &assignment.id, "merged", None)
+        .await
+        .map_err(persistence_error_to_response)?;
+    crate::project_event_publisher::publish_assignment_status_changed(
+        &state.event_bus,
+        project_id,
+        merged,
+    );
+    if let Some(source) = project.enabled_issue_source.as_ref() {
+        if let Err(error) = write_assignment_lifecycle(
+            &state.config.gh_binary_path,
+            project,
+            source,
+            &assignment.source_id,
+            "completed",
+        ) {
+            eprintln!(
+                "warning: failed to write completed Lifecycle Status back to Issue Source during Merge Phase: {error}"
+            );
+        }
+    }
+
+    // Cleanup the Assignment Worktree and its deterministic branch.
+    // Worktree cleanup failures are recorded as activity but do not roll
+    // back the merge — durable merge output and Plan Run history are the
+    // authoritative completion record.
+    if !assignment.worktree_path.is_empty() {
+        let worktree_path = std::path::Path::new(&assignment.worktree_path);
+        if let Err(error) = state.plan_run_deps.cleaner.cleanup(
+            project_path,
+            worktree_path,
+            &assignment.branch,
+        ) {
+            eprintln!(
+                "warning: failed to clean up Assignment Worktree after successful merge: {error}"
+            );
+        }
+    }
+
+    if let Ok(run) = persistence::finish_plan_run(&state.db, &plan_run.id, "succeeded").await {
+        crate::project_event_publisher::publish_plan_run_completed(
+            &state.event_bus,
+            project_id,
+            run,
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_merge_prompt(
+    project_instructions: &str,
+    project: &ProjectResponse,
+    plan_run: &PlanRunResponse,
+    baseline: &RefreshedBaseline,
+    config: &ProjectExecutionConfigResponse,
+    assignment: &IssueAssignmentResponse,
+    review_body: &serde_json::Value,
+) -> String {
+    let template = include_str!("../../../crates/orchestrator/prompts/plan-run/merge.md");
+    let selection = assignment
+        .selection_summary
+        .clone()
+        .unwrap_or_else(|| "(no selection summary)".to_string());
+    template
+        .replace("{{PROJECT_INSTRUCTIONS}}", project_instructions)
+        .replace("{{PROJECT_NAME}}", &project.path)
+        .replace("{{PLAN_RUN_ID}}", &plan_run.id)
+        .replace("{{PLAN_RUN_BASELINE}}", &baseline.commit_sha)
+        .replace("{{INTEGRATION_BRANCH}}", &config.integration_branch)
+        .replace("{{SOURCE_ISSUE_ID}}", &assignment.source_id)
+        .replace("{{SOURCE_ISSUE_TITLE}}", &assignment.source_title)
+        .replace("{{ISSUE_BRANCH}}", &assignment.branch)
+        .replace("{{SELECTION_SUMMARY}}", &selection)
+        .replace(
+            "{{REVIEW_PHASE_OUTPUT}}",
+            &serde_json::to_string_pretty(review_body).unwrap_or_default(),
+        )
 }
 
 fn extract_review_findings(body: &serde_json::Value) -> String {

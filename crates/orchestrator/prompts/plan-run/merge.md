@@ -2,7 +2,7 @@
 
 You are the Merge Phase for one Dioxus Agentic AFK Plan Run.
 
-Integrate reviewed successful Issue Assignments into the configured Project Integration Branch. Resolve integration conflicts and integration verification failures you can during this merge attempt. If you cannot complete the merge safely in this attempt, block the Plan Run.
+Integrate the reviewed successful Issue Assignment into the configured Project Integration Branch. Resolve integration conflicts and integration verification failures you can during this merge attempt. If you cannot complete the merge safely in this attempt, block the Plan Run.
 
 # PROJECT INSTRUCTIONS
 
@@ -21,35 +21,47 @@ Plan Run: {{PLAN_RUN_ID}}
 Plan Run Baseline: {{PLAN_RUN_BASELINE}}
 Integration Branch: {{INTEGRATION_BRANCH}}
 
-# REVIEWED ISSUE ASSIGNMENTS
+# REVIEWED ISSUE ASSIGNMENT
 
-Only merge the reviewed successful assignments listed below. Blocked or rejected assignments are outside this Merge Phase.
+Only merge the reviewed successful assignment listed below. Blocked or rejected assignments are outside this Merge Phase.
 
-<reviewed-assignments>
+<reviewed-assignment>
 
-{{REVIEWED_ASSIGNMENTS}}
+Source Issue: {{SOURCE_ISSUE_ID}}
+Issue Title: {{SOURCE_ISSUE_TITLE}}
+Issue Branch: {{ISSUE_BRANCH}}
+Selection Summary: {{SELECTION_SUMMARY}}
 
-</reviewed-assignments>
+</reviewed-assignment>
+
+# REVIEW OUTPUT
+
+<review-output>
+
+{{REVIEW_PHASE_OUTPUT}}
+
+</review-output>
 
 # TASK
 
-Merge the reviewed issue branches into the Integration Branch.
+Merge the reviewed issue branch into the Integration Branch.
 
-1. Merge only the reviewed successful issue branches supplied for this Plan Run.
-2. Resolve merge conflicts by reading the branches and preserving the intended reviewed behavior.
+1. Merge only the reviewed successful issue branch supplied for this Plan Run.
+2. Resolve merge conflicts by reading the branch and preserving the intended reviewed behavior.
 3. Run verification needed for the integrated result using Project Instructions and repo evidence.
 4. Fix integration problems you can during this single Merge Phase.
-5. Push the verified Integration Branch.
-6. Report exactly which Source Issues were merged so the Control Plane can complete them.
+5. When the integrated result verifies cleanly, report `merged` so the Control Plane can push the Integration Branch.
+6. Report exactly which Source Issue was merged so the Control Plane can complete it.
 
-Do not merge blocked or rejected issue work. Do not start another Planning Phase.
+Do not merge blocked or rejected issue work. Do not start another Planning Phase. Do not push the Integration Branch yourself — the Control Plane owns the Integration Branch push boundary and only pushes after merge verification succeeds.
 
 # OUTPUT
 
 Return a merge Phase Output with:
 
-- whether the Integration Branch was pushed or the Plan Run is blocked
-- merged issue branches and Source Issue ids
-- verification commands and results for the integrated result
-- integration fixes made during merge
-- a block reason and required human change when blocked
+- `outcome`: `merged` when the Integration Branch is verified ready to push, or `blocked` when the merge cannot finish safely in this attempt
+- `merged_source_ids`: the Source Issue ids whose branches were integrated (empty when blocked)
+- `verification`: commands and results for the integrated result
+- `gaps`: verification gaps
+- `summary`: a concise summary for durable Plan Run history
+- `block_reason` (when blocked): a human-readable reason describing the required human change

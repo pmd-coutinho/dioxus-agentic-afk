@@ -228,13 +228,18 @@ async fn approving_review_takes_assignment_to_reviewed() {
     let run: PlanRunResponse = read_json(resp).await;
     assert_eq!(run.assignments.len(), 1);
     let assignment = &run.assignments[0];
-    assert_eq!(assignment.status, "reviewed");
+    // With #45 the approving review now drives an accepting Merge Phase
+    // through the default merge fake, so the assignment reaches `merged`.
+    assert_eq!(assignment.status, "merged");
 
-    // Implementation + review phase outputs persisted on the assignment in order.
-    assert_eq!(assignment.phase_outputs.len(), 2);
+    // Implementation + review + merge phase outputs persisted on the assignment in order.
+    assert_eq!(assignment.phase_outputs.len(), 3);
     assert_eq!(assignment.phase_outputs[0].phase, "implementation");
     assert_eq!(assignment.phase_outputs[0].outcome, "ready_for_review");
-    assert_eq!(assignment.phase_outputs[0].assignment_id.as_deref(), Some(assignment.id.as_str()));
+    assert_eq!(
+        assignment.phase_outputs[0].assignment_id.as_deref(),
+        Some(assignment.id.as_str())
+    );
     assert_eq!(assignment.phase_outputs[1].phase, "review");
     assert_eq!(assignment.phase_outputs[1].outcome, "approved");
     assert_eq!(
@@ -243,10 +248,12 @@ async fn approving_review_takes_assignment_to_reviewed() {
             .unwrap(),
         "lgtm"
     );
+    assert_eq!(assignment.phase_outputs[2].phase, "merge");
+    assert_eq!(assignment.phase_outputs[2].outcome, "merged");
 
-    // Plan Run's phase_outputs list includes planning + impl + review.
+    // Plan Run's phase_outputs list includes planning + impl + review + merge.
     let phases: Vec<&str> = run.phase_outputs.iter().map(|p| p.phase.as_str()).collect();
-    assert_eq!(phases, vec!["planning", "implementation", "review"]);
+    assert_eq!(phases, vec!["planning", "implementation", "review", "merge"]);
 }
 
 #[tokio::test]

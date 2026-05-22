@@ -239,17 +239,18 @@ async fn rejected_review_loops_back_into_another_implementation_pass_then_approv
         prompts[1]
     );
 
-    // Final assignment is `reviewed` with rejection count = 1. The Plan
-    // Run stays `running` after an approved review because the Merge
-    // Phase is not implemented in this slice; we read the active run.
-    let run = persistence::get_active_plan_run(&fixture.db, &pid)
+    // With #45 the approved review now drives the accepting Merge Phase
+    // via the default merge fake, so the Plan Run completes as
+    // `succeeded` and the assignment reaches `merged` with the prior
+    // review-loop evidence preserved.
+    let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 5)
         .await
-        .unwrap()
-        .expect("active plan run after approving review");
-    let assignment = &run.assignments[0];
-    assert_eq!(assignment.status, "reviewed");
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, "succeeded");
+    let assignment = &runs[0].assignments[0];
+    assert_eq!(assignment.status, "merged");
     assert_eq!(assignment.review_rejection_count, 1);
-    // Durable phase evidence preserved for both review passes and both implementation passes.
     let phases: Vec<(&str, &str)> = assignment
         .phase_outputs
         .iter()
@@ -262,6 +263,7 @@ async fn rejected_review_loops_back_into_another_implementation_pass_then_approv
             ("review", "rejected"),
             ("implementation", "ready_for_review"),
             ("review", "approved"),
+            ("merge", "merged"),
         ]
     );
     drop(fixture.project_dir);
@@ -398,16 +400,16 @@ async fn re_enable_blocked_assignment_clears_blocked_lifecycle_and_resets_counte
 
 #[tokio::test]
 async fn re_enable_rejects_non_blocked_assignment() {
-    // Fixture that ends with a reviewed (not blocked) assignment.
+    // Fixture that ends with a merged (not blocked) assignment after the
+    // accepting Merge Phase runs through the default fakes.
     let fixture = build_fixture(vec![IMPL_OK], vec![REVIEW_APPROVED], 1).await;
     let pid = fixture.project.id.0.clone();
     let _ = start(&fixture.router, &pid).await;
 
-    let run = persistence::get_active_plan_run(&fixture.db, &pid)
+    let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 5)
         .await
-        .unwrap()
-        .expect("active plan run after approving review");
-    let assignment_id = run.assignments[0].id.clone();
+        .unwrap();
+    let assignment_id = runs[0].assignments[0].id.clone();
 
     let resp = fixture
         .router

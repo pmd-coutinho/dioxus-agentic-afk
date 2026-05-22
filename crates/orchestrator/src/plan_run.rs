@@ -26,6 +26,12 @@ pub enum PlanRunPhaseError {
     WorktreeProvision(String),
     #[error("issue source lifecycle write-back failed: {0}")]
     LifecycleWrite(String),
+    #[error("merge phase execution failed: {0}")]
+    Merge(String),
+    #[error("integration branch push failed: {0}")]
+    IntegrationPush(String),
+    #[error("assignment worktree cleanup failed: {0}")]
+    Cleanup(String),
 }
 
 /// Refresh the configured Integration Branch and report the baseline commit.
@@ -517,4 +523,264 @@ impl IssueLifecycleWriter for UnimplementedLifecycleWriter {
             "real Issue Source lifecycle writer not implemented yet".to_string(),
         ))
     }
+}
+
+// --- Merge Phase (issue #45) ---
+
+/// Execute a Merge Phase prompt and return raw agent stdout for the Plan
+/// Run coordinator to parse. The merger integrates one reviewed Issue
+/// Assignment's branch into the configured Integration Branch.
+pub trait MergePhaseRunner: Send + Sync {
+    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError>;
+}
+
+/// Push the verified Integration Branch upstream. Production drives
+/// `git push`; tests inject a fake so the Integration Branch push
+/// boundary can be asserted without touching real git remotes.
+pub trait IntegrationBranchPusher: Send + Sync {
+    fn push(
+        &self,
+        project_path: &Path,
+        integration_branch: &str,
+    ) -> Result<(), PlanRunPhaseError>;
+}
+
+/// Clean up the Assignment Worktree and deterministic branch for one
+/// merged Issue Assignment. Best-effort; failures are surfaced to the
+/// caller for activity logging but do not roll back the merge.
+pub trait AssignmentWorktreeCleaner: Send + Sync {
+    fn cleanup(
+        &self,
+        project_path: &Path,
+        worktree_path: &Path,
+        branch: &str,
+    ) -> Result<(), PlanRunPhaseError>;
+}
+
+/// Test merger that returns canned stdout. Like the implementation/review
+/// fakes, a queue is supported for tests that drive multiple successive
+/// merge attempts.
+pub struct FakeMergePhaseRunner {
+    stdouts: Mutex<Vec<String>>,
+    prompts: Mutex<Vec<String>>,
+}
+
+impl FakeMergePhaseRunner {
+    pub fn with_stdout(stdout: impl Into<String>) -> Self {
+        Self::with_stdouts(vec![stdout.into()])
+    }
+
+    pub fn with_stdouts<S: Into<String>>(stdouts: impl IntoIterator<Item = S>) -> Self {
+        let stdouts: Vec<String> = stdouts.into_iter().map(Into::into).collect();
+        assert!(
+            !stdouts.is_empty(),
+            "FakeMergePhaseRunner needs at least one stdout"
+        );
+        Self {
+            stdouts: Mutex::new(stdouts),
+            prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn last_prompt(&self) -> Option<String> {
+        self.prompts.lock().unwrap().last().cloned()
+    }
+
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.prompts.lock().unwrap().len()
+    }
+}
+
+impl MergePhaseRunner for FakeMergePhaseRunner {
+    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        let mut queue = self.stdouts.lock().unwrap();
+        let stdout = if queue.len() == 1 {
+            queue[0].clone()
+        } else {
+            queue.remove(0)
+        };
+        Ok(stdout)
+    }
+}
+
+pub struct UnimplementedMergePhaseRunner;
+
+impl MergePhaseRunner for UnimplementedMergePhaseRunner {
+    fn run(&self, _prompt: &str) -> Result<String, PlanRunPhaseError> {
+        Err(PlanRunPhaseError::Merge(
+            "real Codex merge runner not implemented yet".to_string(),
+        ))
+    }
+}
+
+/// Test pusher that records each push call. Used to assert that the
+/// Integration Branch is only pushed after a verified merge outcome.
+pub struct FakeIntegrationBranchPusher {
+    calls: Mutex<Vec<(PathBuf, String)>>,
+    error: Option<String>,
+}
+
+impl FakeIntegrationBranchPusher {
+    pub fn new() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            error: None,
+        }
+    }
+
+    pub fn failing(error: impl Into<String>) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn calls(&self) -> Vec<(PathBuf, String)> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+}
+
+impl Default for FakeIntegrationBranchPusher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IntegrationBranchPusher for FakeIntegrationBranchPusher {
+    fn push(
+        &self,
+        project_path: &Path,
+        integration_branch: &str,
+    ) -> Result<(), PlanRunPhaseError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((project_path.to_path_buf(), integration_branch.to_string()));
+        if let Some(error) = &self.error {
+            Err(PlanRunPhaseError::IntegrationPush(error.clone()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub struct UnimplementedIntegrationBranchPusher;
+
+impl IntegrationBranchPusher for UnimplementedIntegrationBranchPusher {
+    fn push(
+        &self,
+        _project_path: &Path,
+        _integration_branch: &str,
+    ) -> Result<(), PlanRunPhaseError> {
+        Err(PlanRunPhaseError::IntegrationPush(
+            "real Integration Branch pusher not implemented yet".to_string(),
+        ))
+    }
+}
+
+/// Test cleaner that records cleanup calls and can be set to fail.
+pub struct FakeAssignmentWorktreeCleaner {
+    calls: Mutex<Vec<(PathBuf, PathBuf, String)>>,
+    error: Option<String>,
+}
+
+impl FakeAssignmentWorktreeCleaner {
+    pub fn new() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            error: None,
+        }
+    }
+
+    pub fn failing(error: impl Into<String>) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn calls(&self) -> Vec<(PathBuf, PathBuf, String)> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+}
+
+impl Default for FakeAssignmentWorktreeCleaner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AssignmentWorktreeCleaner for FakeAssignmentWorktreeCleaner {
+    fn cleanup(
+        &self,
+        project_path: &Path,
+        worktree_path: &Path,
+        branch: &str,
+    ) -> Result<(), PlanRunPhaseError> {
+        self.calls.lock().unwrap().push((
+            project_path.to_path_buf(),
+            worktree_path.to_path_buf(),
+            branch.to_string(),
+        ));
+        if let Some(error) = &self.error {
+            Err(PlanRunPhaseError::Cleanup(error.clone()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub struct UnimplementedAssignmentWorktreeCleaner;
+
+impl AssignmentWorktreeCleaner for UnimplementedAssignmentWorktreeCleaner {
+    fn cleanup(
+        &self,
+        _project_path: &Path,
+        _worktree_path: &Path,
+        _branch: &str,
+    ) -> Result<(), PlanRunPhaseError> {
+        Err(PlanRunPhaseError::Cleanup(
+            "real Assignment Worktree cleaner not implemented yet".to_string(),
+        ))
+    }
+}
+
+/// Parse the JSON body wrapped in `<merge>...</merge>` returned by the
+/// Merge Phase agent. The merger reports either `merged` (integration
+/// succeeded and the Integration Branch may be pushed) or `blocked`
+/// (integration could not finish safely in this attempt).
+pub fn parse_merge_output(stdout: &str) -> Result<ParsedMergeOutput, String> {
+    let body = extract_tagged_json(stdout, "merge")?;
+    let outcome = body
+        .get("outcome")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "merge output missing `outcome` string".to_string())?;
+    if !matches!(outcome, "merged" | "blocked") {
+        return Err(format!(
+            "merge output `outcome` must be merged|blocked, got {outcome}"
+        ));
+    }
+    Ok(ParsedMergeOutput {
+        outcome: outcome.to_string(),
+        body,
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct ParsedMergeOutput {
+    pub outcome: String,
+    pub body: serde_json::Value,
 }

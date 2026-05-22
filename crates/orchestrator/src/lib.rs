@@ -8,16 +8,20 @@ use std::process::{Command, Stdio};
 pub mod plan_run;
 
 pub use plan_run::{
-    AssignmentWorktreeProvisioner, FakeImplementationPhaseRunner, FakeLifecycleWriter,
-    FakePlanningPhaseRunner, FakeReviewPhaseRunner, FakeWorktreeProvisioner,
-    ImplementationPhaseRunner, IntegrationBranchRefresher, IssueLifecycleWriter,
-    ParsedImplementationOutput, ParsedPlanningOutput, ParsedReviewOutput, PlanRunPhaseError,
-    PlannerSelection, PlanningPhaseRunner, RefreshedBaseline, ReviewPhaseRunner,
-    StaticIntegrationBranchRefresher, UnimplementedImplementationPhaseRunner,
-    UnimplementedIntegrationBranchRefresher, UnimplementedLifecycleWriter,
+    AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, FakeAssignmentWorktreeCleaner,
+    FakeImplementationPhaseRunner, FakeIntegrationBranchPusher, FakeLifecycleWriter,
+    FakeMergePhaseRunner, FakePlanningPhaseRunner, FakeReviewPhaseRunner,
+    FakeWorktreeProvisioner, ImplementationPhaseRunner, IntegrationBranchPusher,
+    IntegrationBranchRefresher, IssueLifecycleWriter, MergePhaseRunner,
+    ParsedImplementationOutput, ParsedMergeOutput, ParsedPlanningOutput, ParsedReviewOutput,
+    PlanRunPhaseError, PlannerSelection, PlanningPhaseRunner, RefreshedBaseline,
+    ReviewPhaseRunner, StaticIntegrationBranchRefresher,
+    UnimplementedAssignmentWorktreeCleaner, UnimplementedImplementationPhaseRunner,
+    UnimplementedIntegrationBranchPusher, UnimplementedIntegrationBranchRefresher,
+    UnimplementedLifecycleWriter, UnimplementedMergePhaseRunner,
     UnimplementedPlanningPhaseRunner, UnimplementedReviewPhaseRunner,
     UnimplementedWorktreeProvisioner, extract_planner_selections, parse_implementation_output,
-    parse_planning_output, parse_review_output,
+    parse_merge_output, parse_planning_output, parse_review_output,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

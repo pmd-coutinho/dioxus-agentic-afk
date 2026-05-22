@@ -225,14 +225,14 @@ async fn planning_phase_claims_one_eligible_issue() {
     let resp = post_plan_run(&fixture.router, &pid).await;
     assert_eq!(resp.status(), StatusCode::CREATED);
     let run: PlanRunResponse = read_json(resp).await;
-    assert_eq!(run.state, "running", "Plan Run remains active after claim");
+    // With #45 the default deps also drive the accepting Merge Phase, so
+    // the Plan Run finishes as `succeeded` and the assignment is `merged`.
+    assert_eq!(run.state, "succeeded", "Plan Run completes after merge");
     assert_eq!(run.assignments.len(), 1);
     let assignment = &run.assignments[0];
     assert_eq!(assignment.source_id, "42");
     assert_eq!(assignment.branch, "agent/issue-42");
-    // With #43 the assignment runs implementation + review immediately
-    // after claim using the default stub fakes; both reach `reviewed`.
-    assert_eq!(assignment.status, "reviewed");
+    assert_eq!(assignment.status, "merged");
     assert_eq!(assignment.plan_run_id.as_deref(), Some(run.id.as_str()));
     assert_eq!(
         assignment.selection_summary.as_deref(),
@@ -422,14 +422,17 @@ async fn snapshot_exposes_claimed_assignment_inside_active_plan_run() {
     )
     .await;
 
-    let active = snapshot
-        .snapshot
-        .active_plan_run
-        .as_ref()
-        .expect("active Plan Run after claim");
-    assert_eq!(active.assignments.len(), 1);
-    assert_eq!(active.assignments[0].source_id, "42");
-    assert_eq!(active.assignments[0].status, "reviewed");
+    // With #45 the merge phase finishes the Plan Run; the active slot
+    // clears and the run lives in recent history with the merged
+    // assignment attached.
+    assert!(snapshot.snapshot.active_plan_run.is_none());
+    let recent = &snapshot.snapshot.recent_plan_runs;
+    assert_eq!(recent.len(), 1);
+    let recent_run = &recent[0];
+    assert_eq!(recent_run.state, "succeeded");
+    assert_eq!(recent_run.assignments.len(), 1);
+    assert_eq!(recent_run.assignments[0].source_id, "42");
+    assert_eq!(recent_run.assignments[0].status, "merged");
 
     // Planning snapshot remains visible alongside the active Plan Run.
     let planning = snapshot

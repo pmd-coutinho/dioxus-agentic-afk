@@ -650,8 +650,9 @@ fn PlanRunCard(
 #[component]
 fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
     let tone = match assignment.status.as_str() {
+        "merged" => PillTone::Verified,
         "reviewed" => PillTone::Verified,
-        "implemented" | "claimed" | "implementing" => PillTone::Running,
+        "implemented" | "claimed" | "implementing" | "merging" => PillTone::Running,
         "rejected" | "blocked" => PillTone::Failed,
         _ => PillTone::Pending,
     };
@@ -753,7 +754,7 @@ fn AssignmentPhaseOutputRow(
     phase_output: agentic_afk_contracts::PhaseOutputResponse,
 ) -> Element {
     let tone = match phase_output.outcome.as_str() {
-        "ready_for_review" | "approved" => PillTone::Verified,
+        "ready_for_review" | "approved" | "merged" => PillTone::Verified,
         "rejected" | "failed" | "blocked" => PillTone::Failed,
         _ => PillTone::Pending,
     };
