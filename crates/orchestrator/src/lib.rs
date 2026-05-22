@@ -14,6 +14,7 @@ pub use plan_run::{
     FakeWorktreeProvisioner, ImplementationPhaseRunner, IntegrationBranchPusher,
     IntegrationBranchRefresher, IssueLifecycleWriter, MergePhaseRunner,
     ParsedImplementationOutput, ParsedMergeOutput, ParsedPlanningOutput, ParsedReviewOutput,
+    PerSourceImplementationPhaseRunner, PerSourceMergePhaseRunner, PerSourceReviewPhaseRunner,
     PlanRunPhaseError, PlannerSelection, PlanningPhaseRunner, RefreshedBaseline,
     ReviewPhaseRunner, StaticIntegrationBranchRefresher,
     UnimplementedAssignmentWorktreeCleaner, UnimplementedImplementationPhaseRunner,

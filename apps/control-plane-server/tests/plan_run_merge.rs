@@ -338,12 +338,15 @@ async fn blocked_merge_does_not_push_and_fails_plan_run_with_block_reason() {
         "Integration Branch must not be pushed for a blocked merge"
     );
 
-    // Worktree must NOT be cleaned up for a blocked merge — the
-    // developer may need to inspect the integration attempt.
+    // Issue #46: finished Plan Runs clean both merged AND blocked
+    // Assignment Worktrees so dormant blocked work does not consume
+    // Max Parallel Tasks via stale worktrees. The blocked merge here
+    // is the only assignment in the run, so cleanup runs once for
+    // its worktree at Plan Run finish.
     assert_eq!(
         fixture.cleaner.call_count(),
-        0,
-        "Assignment Worktree must not be cleaned up for a blocked merge"
+        1,
+        "Assignment Worktree must be cleaned up at Plan Run finish for blocked merges (issue #46)"
     );
 
     drop(fixture.project_dir);
@@ -506,14 +509,21 @@ async fn merge_phase_failure_blocks_assignment_and_fails_plan_run() {
         .unwrap();
 
     let resp = start(&router, &pid).await;
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = read_text(resp).await;
-    assert!(
-        body.contains("urn:agentic-afk:merge-phase-failed"),
-        "unexpected body: {body}"
-    );
+    // Issue #46: a single-assignment merge runner failure no longer
+    // returns 500. Instead the assignment is blocked, no push happens,
+    // the worktree is cleaned up at Plan Run finish, and the Plan Run
+    // settles as `failed` (no merged work). The HTTP response carries
+    // the final Plan Run shape.
+    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+
     assert_eq!(pusher.call_count(), 0, "no push on merge runner failure");
-    assert_eq!(cleaner.call_count(), 0, "no cleanup on merge runner failure");
+    // Worktree IS cleaned at Plan Run finish (issue #46) for blocked
+    // assignments.
+    assert_eq!(
+        cleaner.call_count(),
+        1,
+        "blocked worktree is cleaned at Plan Run finish"
+    );
 
     // Plan Run is failed, assignment is blocked.
     let runs = persistence::list_recent_plan_runs(&db, &pid, 10).await.unwrap();

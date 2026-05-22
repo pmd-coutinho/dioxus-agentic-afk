@@ -784,3 +784,250 @@ pub struct ParsedMergeOutput {
     pub outcome: String,
     pub body: serde_json::Value,
 }
+
+// --- Per-Source-Issue fake runners (issue #46) ---
+//
+// Parallel Plan Runs interleave implementation / review / merge calls across
+// multiple Issue Assignments. The queue-based fakes above are sufficient for
+// single-assignment tests, but parallel tests need to return distinct
+// stdouts per Source Issue without depending on call ordering. These
+// matchers inspect the prompt for the `Source Issue: <id>` marker the prompt
+// templates already render and pick the matching stdout deterministically.
+
+fn source_id_from_prompt(prompt: &str) -> Option<String> {
+    for line in prompt.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Source Issue:") {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+fn pick_stdout_for_source<'a>(
+    map: &'a std::collections::HashMap<String, Vec<String>>,
+    fallback: Option<&'a str>,
+    prompt: &str,
+    counters: &Mutex<std::collections::HashMap<String, usize>>,
+) -> Result<String, PlanRunPhaseError> {
+    let source_id = source_id_from_prompt(prompt).unwrap_or_default();
+    if let Some(queue) = map.get(&source_id) {
+        if queue.is_empty() {
+            return Err(PlanRunPhaseError::Planning(format!(
+                "no fake stdout configured for source_id `{source_id}`"
+            )));
+        }
+        let mut counters = counters.lock().unwrap();
+        let idx = counters.entry(source_id.clone()).or_insert(0);
+        let stdout = if *idx >= queue.len() {
+            queue.last().cloned().unwrap()
+        } else {
+            let value = queue[*idx].clone();
+            *idx += 1;
+            value
+        };
+        return Ok(stdout);
+    }
+    if let Some(stdout) = fallback {
+        return Ok(stdout.to_string());
+    }
+    Err(PlanRunPhaseError::Planning(format!(
+        "no fake stdout configured for source_id `{source_id}`"
+    )))
+}
+
+/// Implementation runner that picks stdout by `Source Issue:` line found in
+/// the rendered prompt. Used by parallel Plan Run tests (issue #46).
+pub struct PerSourceImplementationPhaseRunner {
+    map: std::collections::HashMap<String, Vec<String>>,
+    fallback: Option<String>,
+    counters: Mutex<std::collections::HashMap<String, usize>>,
+    prompts: Mutex<Vec<String>>,
+}
+
+impl PerSourceImplementationPhaseRunner {
+    pub fn new() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            fallback: None,
+            counters: Mutex::new(std::collections::HashMap::new()),
+            prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_source(mut self, source_id: impl Into<String>, stdout: impl Into<String>) -> Self {
+        self.map
+            .entry(source_id.into())
+            .or_default()
+            .push(stdout.into());
+        self
+    }
+
+    pub fn with_source_stdouts<S: Into<String>>(
+        mut self,
+        source_id: impl Into<String>,
+        stdouts: impl IntoIterator<Item = S>,
+    ) -> Self {
+        let entry = self.map.entry(source_id.into()).or_default();
+        for stdout in stdouts {
+            entry.push(stdout.into());
+        }
+        self
+    }
+
+    pub fn with_fallback(mut self, stdout: impl Into<String>) -> Self {
+        self.fallback = Some(stdout.into());
+        self
+    }
+
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.prompts.lock().unwrap().len()
+    }
+
+    pub fn last_prompt(&self) -> Option<String> {
+        self.prompts.lock().unwrap().last().cloned()
+    }
+}
+
+impl Default for PerSourceImplementationPhaseRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ImplementationPhaseRunner for PerSourceImplementationPhaseRunner {
+    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        pick_stdout_for_source(&self.map, self.fallback.as_deref(), prompt, &self.counters)
+    }
+}
+
+/// Review runner that picks stdout by `Source Issue:` line in the prompt.
+pub struct PerSourceReviewPhaseRunner {
+    map: std::collections::HashMap<String, Vec<String>>,
+    fallback: Option<String>,
+    counters: Mutex<std::collections::HashMap<String, usize>>,
+    prompts: Mutex<Vec<String>>,
+}
+
+impl PerSourceReviewPhaseRunner {
+    pub fn new() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            fallback: None,
+            counters: Mutex::new(std::collections::HashMap::new()),
+            prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_source(mut self, source_id: impl Into<String>, stdout: impl Into<String>) -> Self {
+        self.map
+            .entry(source_id.into())
+            .or_default()
+            .push(stdout.into());
+        self
+    }
+
+    pub fn with_source_stdouts<S: Into<String>>(
+        mut self,
+        source_id: impl Into<String>,
+        stdouts: impl IntoIterator<Item = S>,
+    ) -> Self {
+        let entry = self.map.entry(source_id.into()).or_default();
+        for stdout in stdouts {
+            entry.push(stdout.into());
+        }
+        self
+    }
+
+    pub fn with_fallback(mut self, stdout: impl Into<String>) -> Self {
+        self.fallback = Some(stdout.into());
+        self
+    }
+
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.prompts.lock().unwrap().len()
+    }
+
+    pub fn last_prompt(&self) -> Option<String> {
+        self.prompts.lock().unwrap().last().cloned()
+    }
+}
+
+impl Default for PerSourceReviewPhaseRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReviewPhaseRunner for PerSourceReviewPhaseRunner {
+    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        pick_stdout_for_source(&self.map, self.fallback.as_deref(), prompt, &self.counters)
+    }
+}
+
+/// Merge runner that picks stdout by `Source Issue:` line in the prompt.
+pub struct PerSourceMergePhaseRunner {
+    map: std::collections::HashMap<String, Vec<String>>,
+    fallback: Option<String>,
+    counters: Mutex<std::collections::HashMap<String, usize>>,
+    prompts: Mutex<Vec<String>>,
+}
+
+impl PerSourceMergePhaseRunner {
+    pub fn new() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            fallback: None,
+            counters: Mutex::new(std::collections::HashMap::new()),
+            prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_source(mut self, source_id: impl Into<String>, stdout: impl Into<String>) -> Self {
+        self.map
+            .entry(source_id.into())
+            .or_default()
+            .push(stdout.into());
+        self
+    }
+
+    pub fn with_fallback(mut self, stdout: impl Into<String>) -> Self {
+        self.fallback = Some(stdout.into());
+        self
+    }
+
+    pub fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.prompts.lock().unwrap().len()
+    }
+
+    pub fn last_prompt(&self) -> Option<String> {
+        self.prompts.lock().unwrap().last().cloned()
+    }
+}
+
+impl Default for PerSourceMergePhaseRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MergePhaseRunner for PerSourceMergePhaseRunner {
+    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        pick_stdout_for_source(&self.map, self.fallback.as_deref(), prompt, &self.counters)
+    }
+}
