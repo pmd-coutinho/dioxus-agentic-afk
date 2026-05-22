@@ -396,6 +396,158 @@ fn TrustProjectButton(project_id: String) -> Element {
     }
 }
 
+/// Three lifecycle mutations on an Issue Assignment that share the same UI
+/// shape (POST, disable-while-pending, inline validation error, pessimistic
+/// refetch). Modelled as a closed enum so each variant carries the routing,
+/// labels, and mutation key in one place.
+#[derive(Clone, Copy, PartialEq)]
+enum AssignmentLifecycle {
+    RefreshProposal,
+    Recover,
+    Abandon,
+}
+
+impl AssignmentLifecycle {
+    fn key(self, project_id: &str, assignment_id: &str) -> project_store::MutationKey {
+        use project_store::{IssueAssignmentId, MutationKey};
+        let pid = agentic_afk_contracts::ProjectId(project_id.to_string());
+        let aid = IssueAssignmentId(assignment_id.to_string());
+        match self {
+            Self::RefreshProposal => MutationKey::RefreshProposalState(pid, aid),
+            Self::Recover => MutationKey::RecoverAssignment(pid, aid),
+            Self::Abandon => MutationKey::AbandonAssignment(pid, aid),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::RefreshProposal => "Refresh Proposal State",
+            Self::Recover => "Recover Assignment",
+            Self::Abandon => "Abandon Assignment",
+        }
+    }
+
+    fn pending_label(self) -> &'static str {
+        match self {
+            Self::RefreshProposal => "Refreshing…",
+            Self::Recover => "Recovering…",
+            Self::Abandon => "Abandoning…",
+        }
+    }
+
+    fn testid(self) -> &'static str {
+        match self {
+            Self::RefreshProposal => "refresh-proposal-state-button",
+            Self::Recover => "recover-assignment-button",
+            Self::Abandon => "abandon-assignment-button",
+        }
+    }
+
+    /// Stable value for the `data-lifecycle-error` attribute on the inline
+    /// error region, so Playwright can target each mutation distinctly.
+    fn error_marker(self) -> &'static str {
+        match self {
+            Self::RefreshProposal => "refresh-proposal",
+            Self::Recover => "recover-assignment",
+            Self::Abandon => "abandon-assignment",
+        }
+    }
+
+    fn button_class(self) -> &'static str {
+        match self {
+            Self::RefreshProposal => {
+                "mt-2 w-fit rounded border border-emerald-700 px-2.5 py-1.5 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45 disabled:cursor-not-allowed disabled:opacity-50"
+            }
+            Self::Recover => {
+                "mt-2 w-fit rounded border border-amber-700 px-2.5 py-1.5 text-left text-xs font-medium text-amber-100 hover:border-amber-500 hover:bg-amber-950/45 disabled:cursor-not-allowed disabled:opacity-50"
+            }
+            Self::Abandon => {
+                "mt-2 w-fit rounded border border-rose-700 px-2.5 py-1.5 text-left text-xs font-medium text-rose-100 hover:border-rose-500 hover:bg-rose-950/45 disabled:cursor-not-allowed disabled:opacity-50"
+            }
+        }
+    }
+
+    async fn invoke(
+        self,
+        project_id: String,
+        assignment_id: String,
+    ) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure>
+    {
+        match self {
+            Self::RefreshProposal => refresh_proposal_state_api(project_id, assignment_id).await,
+            Self::Recover => recover_assignment_api(project_id, assignment_id).await,
+            Self::Abandon => abandon_assignment_api(project_id, assignment_id).await,
+        }
+    }
+}
+
+#[component]
+fn RefreshProposalStateButton(project_id: String, assignment_id: String) -> Element {
+    rsx! { AssignmentLifecycleButton { kind: AssignmentLifecycle::RefreshProposal, project_id, assignment_id } }
+}
+
+#[component]
+fn RecoverAssignmentButton(project_id: String, assignment_id: String) -> Element {
+    rsx! { AssignmentLifecycleButton { kind: AssignmentLifecycle::Recover, project_id, assignment_id } }
+}
+
+#[component]
+fn AbandonAssignmentButton(project_id: String, assignment_id: String) -> Element {
+    rsx! { AssignmentLifecycleButton { kind: AssignmentLifecycle::Abandon, project_id, assignment_id } }
+}
+
+#[component]
+fn AssignmentLifecycleButton(
+    kind: AssignmentLifecycle,
+    project_id: String,
+    assignment_id: String,
+) -> Element {
+    use project_store::{MutationCategory, MutationState};
+
+    let store = use_context::<ProjectStore>();
+    let key = kind.key(&project_id, &assignment_id);
+    let pending = store.is_pending(&key);
+    let inline_error = match store.state(&key) {
+        Some(MutationState::Error {
+            category: MutationCategory::Validation,
+            title,
+            detail,
+        }) => Some((title, detail)),
+        _ => None,
+    };
+    rsx! {
+        div { class: "flex flex-col gap-1",
+            button {
+                class: kind.button_class(),
+                disabled: pending,
+                "data-testid": kind.testid(),
+                "data-mutation-pending": if pending { "true" } else { "false" },
+                onclick: {
+                    let key = key.clone();
+                    let project_id = project_id.clone();
+                    let assignment_id = assignment_id.clone();
+                    move |_| {
+                        let key = key.clone();
+                        let project_id = project_id.clone();
+                        let assignment_id = assignment_id.clone();
+                        async move {
+                            let _ = store.mutate(key, kind.invoke(project_id, assignment_id)).await;
+                        }
+                    }
+                },
+                if pending { "{kind.pending_label()}" } else { "{kind.label()}" }
+            }
+            if let Some((title, detail)) = inline_error {
+                p {
+                    class: "text-xs text-red-300",
+                    "data-lifecycle-error": kind.error_marker(),
+                    "{title}: {detail}"
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn ProjectOverview(id: String) -> Element {
     rsx! {
@@ -848,6 +1000,8 @@ fn PlanningGroup(
 
 #[component]
 fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool) -> Element {
+    use project_store::{MutationCategory, MutationKey, MutationState, SourceIssueId};
+
     let dependencies = if issue.issue_dependencies.is_empty() {
         "No dependencies".to_string()
     } else {
@@ -857,6 +1011,20 @@ fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool
         .parent_issue
         .clone()
         .unwrap_or_else(|| "No parent".to_string());
+    let store = use_context::<ProjectStore>();
+    let key = MutationKey::StartAssignment(
+        agentic_afk_contracts::ProjectId(project_id.clone()),
+        SourceIssueId(issue.source_id.clone()),
+    );
+    let pending = store.is_pending(&key);
+    let inline_error = match store.state(&key) {
+        Some(MutationState::Error {
+            category: MutationCategory::Validation,
+            title,
+            detail,
+        }) => Some((title, detail)),
+        _ => None,
+    };
     let start_project_id = project_id.clone();
     let start_source_id = issue.source_id.clone();
 
@@ -871,16 +1039,31 @@ fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, can_start: bool
             p { class: "text-xs text-zinc-400", "{dependencies}" }
             if can_start {
                 button {
-                    class: "mt-2 rounded border border-emerald-700 px-2.5 py-1.5 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
-                    onclick: move |_| {
-                        let project_id = start_project_id.clone();
-                        let source_id = start_source_id.clone();
-                        async move {
-                            let _ = start_assignment(project_id, source_id).await;
-                            reload_dashboard();
+                    class: "mt-2 rounded border border-emerald-700 px-2.5 py-1.5 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45 disabled:cursor-not-allowed disabled:opacity-50",
+                    disabled: pending,
+                    "data-testid": "start-assignment-button",
+                    "data-mutation-pending": if pending { "true" } else { "false" },
+                    onclick: {
+                        let key = key.clone();
+                        move |_| {
+                            let project_id = start_project_id.clone();
+                            let source_id = start_source_id.clone();
+                            let key = key.clone();
+                            async move {
+                                let _ = store
+                                    .mutate(key, start_assignment_api(project_id, source_id))
+                                    .await;
+                            }
                         }
                     },
-                    "Start Assignment"
+                    if pending { "Starting…" } else { "Start Assignment" }
+                }
+                if let Some((title, detail)) = inline_error {
+                    p {
+                        class: "text-xs text-red-300",
+                        "data-start-assignment-error": "true",
+                        "{title}: {detail}"
+                    }
                 }
             }
         }
@@ -906,12 +1089,7 @@ fn AssignmentState(project_id: String, state: ProjectAssignmentStateResponse) ->
                     );
                     let can_abandon = assignment.status == "blocked";
                     let can_recover = assignment.status == "blocked";
-                    let refresh_project_id = assignment.project_id.0.clone();
-                    let refresh_assignment_id = assignment.id.clone();
-                    let abandon_project_id = project_id.clone();
-                    let abandon_assignment_id = assignment.id.clone();
-                    let recover_project_id = project_id.clone();
-                    let recover_assignment_id = assignment.id.clone();
+                    let assignment_id = assignment.id.clone();
                     rsx! {
                         div { class: "mt-4 grid gap-2 text-sm",
                             p { class: "font-medium text-zinc-100", "{assignment.source_title}" }
@@ -931,45 +1109,21 @@ fn AssignmentState(project_id: String, state: ProjectAssignmentStateResponse) ->
                                 }
                             }
                             if can_refresh_proposal {
-                                button {
-                                    class: "mt-2 w-fit rounded border border-emerald-700 px-2.5 py-1.5 text-left text-xs font-medium text-emerald-100 hover:border-emerald-500 hover:bg-emerald-950/45",
-                                    onclick: move |_| {
-                                        let project_id = refresh_project_id.clone();
-                                        let assignment_id = refresh_assignment_id.clone();
-                                        async move {
-                                            let _ = refresh_proposal_state(project_id, assignment_id).await;
-                                            reload_dashboard();
-                                        }
-                                    },
-                                    "Refresh Proposal State"
+                                RefreshProposalStateButton {
+                                    project_id: project_id.clone(),
+                                    assignment_id: assignment_id.clone(),
                                 }
                             }
                             if can_recover {
-                                button {
-                                    class: "mt-2 w-fit rounded border border-amber-700 px-2.5 py-1.5 text-left text-xs font-medium text-amber-100 hover:border-amber-500 hover:bg-amber-950/45",
-                                    onclick: move |_| {
-                                        let project_id = recover_project_id.clone();
-                                        let assignment_id = recover_assignment_id.clone();
-                                        async move {
-                                            let _ = recover_assignment(project_id, assignment_id).await;
-                                            reload_dashboard();
-                                        }
-                                    },
-                                    "Recover Assignment"
+                                RecoverAssignmentButton {
+                                    project_id: project_id.clone(),
+                                    assignment_id: assignment_id.clone(),
                                 }
                             }
                             if can_abandon {
-                                button {
-                                    class: "mt-2 w-fit rounded border border-rose-700 px-2.5 py-1.5 text-left text-xs font-medium text-rose-100 hover:border-rose-500 hover:bg-rose-950/45",
-                                    onclick: move |_| {
-                                        let project_id = abandon_project_id.clone();
-                                        let assignment_id = abandon_assignment_id.clone();
-                                        async move {
-                                            let _ = abandon_assignment(project_id, assignment_id).await;
-                                            reload_dashboard();
-                                        }
-                                    },
-                                    "Abandon Assignment"
+                                AbandonAssignmentButton {
+                                    project_id: project_id.clone(),
+                                    assignment_id: assignment_id.clone(),
                                 }
                             }
                             if let Some(budget) = assignment.repair_budget.clone() {
@@ -991,21 +1145,6 @@ fn AssignmentState(project_id: String, state: ProjectAssignmentStateResponse) ->
             }
         }
     }
-}
-
-async fn refresh_proposal_state(
-    project_id: String,
-    assignment_id: String,
-) -> Result<agentic_afk_contracts::IssueAssignmentResponse, String> {
-    gloo_net::http::Request::post(&format!(
-        "/api/projects/{project_id}/assignments/{assignment_id}/refresh-proposal-state"
-    ))
-    .send()
-    .await
-    .map_err(|error| error.to_string())?
-    .json()
-    .await
-    .map_err(|error| error.to_string())
 }
 
 #[component]
@@ -1146,49 +1285,64 @@ async fn trust_project_api(
         .map_err(|error| project_store::MutationFailure::network(error.to_string()))
 }
 
-async fn start_assignment(
+async fn start_assignment_api(
     project_id: String,
     source_id: String,
-) -> Result<agentic_afk_contracts::IssueAssignmentResponse, String> {
-    gloo_net::http::Request::post(&format!(
+) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
+    post_assignment_mutation(format!(
         "/api/projects/{project_id}/source-issues/{source_id}/assignment"
     ))
-    .send()
     .await
-    .map_err(|error| error.to_string())?
-    .json()
-    .await
-    .map_err(|error| error.to_string())
 }
 
-async fn abandon_assignment(
+async fn abandon_assignment_api(
     project_id: String,
     assignment_id: String,
-) -> Result<agentic_afk_contracts::IssueAssignmentResponse, String> {
-    gloo_net::http::Request::post(&format!(
+) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
+    post_assignment_mutation(format!(
         "/api/projects/{project_id}/assignments/{assignment_id}/abandon"
     ))
-    .send()
     .await
-    .map_err(|error| error.to_string())?
-    .json()
-    .await
-    .map_err(|error| error.to_string())
 }
 
-async fn recover_assignment(
+async fn recover_assignment_api(
     project_id: String,
     assignment_id: String,
-) -> Result<agentic_afk_contracts::IssueAssignmentResponse, String> {
-    gloo_net::http::Request::post(&format!(
+) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
+    post_assignment_mutation(format!(
         "/api/projects/{project_id}/assignments/{assignment_id}/recover"
     ))
-    .send()
     .await
-    .map_err(|error| error.to_string())?
-    .json()
+}
+
+async fn refresh_proposal_state_api(
+    project_id: String,
+    assignment_id: String,
+) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
+    post_assignment_mutation(format!(
+        "/api/projects/{project_id}/assignments/{assignment_id}/refresh-proposal-state"
+    ))
     .await
-    .map_err(|error| error.to_string())
+}
+
+/// Issue a POST against an Issue Assignment lifecycle endpoint and map the
+/// outcome into a `MutationFailure` so the `ProjectStore` can categorize it.
+async fn post_assignment_mutation(
+    path: String,
+) -> Result<agentic_afk_contracts::IssueAssignmentResponse, project_store::MutationFailure> {
+    let response = gloo_net::http::Request::post(&path)
+        .send()
+        .await
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
 }
 
 async fn fetch_issue_source_sync_status(
