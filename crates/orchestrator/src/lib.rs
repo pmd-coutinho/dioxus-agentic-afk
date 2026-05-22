@@ -5,8 +5,14 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub mod coordinator;
 pub mod plan_run;
 pub mod production;
+
+pub use coordinator::{
+    CoordinatorError, EventPublisher, PlanRunDeps, render_planning_prompt, run_plan_run,
+    update_markdown_lifecycle_status, write_assignment_lifecycle,
+};
 
 pub use production::{
     CodexImplementationPhaseRunner, CodexMergePhaseRunner, CodexPlanningPhaseRunner,
