@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentic_afk_contracts::{
-    AppInfoResponse, AssignmentAttemptResponse, AssignmentTerminalOutcome, CreateProjectRequest,
-    EffectiveConfig, EnableIssueSourceRequest, HealthResponse, IssueAssignmentResponse,
-    IssueSource, IssueSourceCandidate, IssueSourceSyncResponse, IssueSourceSyncStatusResponse,
-    PlanningSnapshotResponse, ProblemDetail, ProjectActivityEntryResponse,
-    ProjectEvent, ProjectId, ProjectResponse, ProjectSnapshot,
+    AppInfoResponse, AssignmentAttemptResponse, AssignmentTerminalOutcome, AutoReplanState,
+    CreateProjectRequest, EffectiveConfig, EnableIssueSourceRequest, HealthResponse,
+    IssueAssignmentResponse, IssueSource, IssueSourceCandidate, IssueSourceSyncResponse,
+    IssueSourceSyncStatusResponse, PauseReason, PlanningSnapshotResponse, ProblemDetail,
+    ProjectActivityEntryResponse, ProjectEvent, ProjectId, ProjectResponse, ProjectSnapshot,
     ProjectSnapshotResponse, SetProjectExecutionConfigRequest, SourceIssueSnapshot,
 };
 use agentic_afk_git_summary::summarize_project_path;
@@ -434,6 +434,15 @@ fn router_with_full_deps(
             get(get_planning_snapshot),
         )
         .route("/api/projects/{id}/activity", get(get_project_activity))
+        .route("/api/projects/{id}/auto-replan/arm", post(arm_auto_replan))
+        .route(
+            "/api/projects/{id}/auto-replan/disarm",
+            post(disarm_auto_replan),
+        )
+        .route(
+            "/api/projects/{id}/auto-replan/resume",
+            post(resume_auto_replan),
+        )
         .route("/api/projects/{id}/snapshot", get(get_project_snapshot))
         .route("/api/projects/{id}/events", get(get_project_events))
         .merge(test_endpoints_router())
@@ -845,6 +854,137 @@ async fn get_project_activity(
     Json(responses).into_response()
 }
 
+async fn arm_auto_replan(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let project = match persistence::get_project(&state.db, &id).await {
+        Ok(project) => project,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    if !project.trusted {
+        return sync_problem_response(
+            StatusCode::FORBIDDEN,
+            "urn:agentic-afk:project-untrusted",
+            "Forbidden",
+            "Project must be trusted before arming Auto-Replan".to_string(),
+        );
+    }
+    match project.auto_replan_state {
+        AutoReplanState::Off => {
+            auto_replan_transition(&state, &id, AutoReplanState::Armed, None, "AutoReplanArmed")
+                .await
+        }
+        AutoReplanState::Armed | AutoReplanState::Paused => auto_replan_conflict(
+            "Auto-Replan is not off",
+            "Auto-Replan can only be armed from Off".to_string(),
+        ),
+    }
+}
+
+async fn disarm_auto_replan(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(error) = persistence::get_project(&state.db, &id).await {
+        return persistence_error_to_response(error);
+    }
+    auto_replan_transition(
+        &state,
+        &id,
+        AutoReplanState::Off,
+        None,
+        "AutoReplanDisarmed",
+    )
+    .await
+}
+
+async fn resume_auto_replan(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let project = match persistence::get_project(&state.db, &id).await {
+        Ok(project) => project,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    match project.auto_replan_state {
+        AutoReplanState::Paused => {
+            auto_replan_transition(
+                &state,
+                &id,
+                AutoReplanState::Armed,
+                None,
+                "AutoReplanResumed",
+            )
+            .await
+        }
+        AutoReplanState::Off | AutoReplanState::Armed => auto_replan_conflict(
+            "Auto-Replan is not paused",
+            "Auto-Replan can only be resumed from Paused".to_string(),
+        ),
+    }
+}
+
+async fn pause_auto_replan_for_test(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<TestPauseAutoReplanRequest>,
+) -> Response {
+    if let Err(error) = persistence::get_project(&state.db, &id).await {
+        return persistence_error_to_response(error);
+    }
+    auto_replan_transition(
+        &state,
+        &id,
+        AutoReplanState::Paused,
+        Some(request.reason),
+        "AutoReplanPaused",
+    )
+    .await
+}
+
+async fn auto_replan_transition(
+    state: &Arc<AppState>,
+    project_id: &str,
+    next: AutoReplanState,
+    reason: Option<PauseReason>,
+    activity_kind: &str,
+) -> Response {
+    let store = persistence::AutoReplanStateStore::new(&state.db);
+    let status = match store.set(project_id, next, reason).await {
+        Ok(status) => status,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    if let Err(error) = crate::control_plane_events::record_activity(
+        &state.db,
+        &state.event_bus,
+        project_id,
+        None,
+        activity_kind,
+        reason.map(PauseReason::as_wire),
+    )
+    .await
+    {
+        return persistence_error_to_response(error);
+    }
+    crate::control_plane_events::publish_auto_replan_state_changed(
+        &state.event_bus,
+        project_id,
+        status.state,
+        status.pause_reason,
+    );
+    match persistence::get_project(&state.db, project_id).await {
+        Ok(project) => Json(with_git_summary(project)).into_response(),
+        Err(error) => persistence_error_to_response(error),
+    }
+}
+
+fn auto_replan_conflict(title: &str, detail: String) -> Response {
+    sync_problem_response(
+        StatusCode::CONFLICT,
+        "urn:agentic-afk:auto-replan-state-conflict",
+        title,
+        detail,
+    )
+}
+
 /// Bundle the current Project state into one response. Composed of the
 /// four existing per-panel reads (`project`, `planning-snapshot`,
 /// `assignment-state`, `activity`) plus the latest event-bus `sequence` at
@@ -945,6 +1085,11 @@ struct TestRecordActivityRequest {
     detail: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TestPauseAutoReplanRequest {
+    reason: PauseReason,
+}
+
 /// Mounted only when `AGENTIC_AFK_TEST_ENDPOINTS=1`. Records a Project
 /// Activity entry via the production `control_plane_events`, so Playwright can
 /// drive the live-update flow without needing the full assignment pipeline
@@ -965,6 +1110,10 @@ fn test_endpoints_router() -> Router<Arc<AppState>> {
         .route(
             "/api/_test/projects/{id}/planning-snapshot",
             post(test_seed_planning_snapshot),
+        )
+        .route(
+            "/api/_test/projects/{id}/auto-replan/pause",
+            post(pause_auto_replan_for_test),
         )
 }
 
@@ -1579,6 +1728,13 @@ pub(crate) fn persistence_error_to_response(err: PersistenceError) -> Response {
         PersistenceError::PhaseOutputMismatch { .. } => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "urn:agentic-afk:phase-output-mismatch",
+            "Internal Server Error",
+        ),
+        PersistenceError::InvalidAutoReplanState { .. }
+        | PersistenceError::InvalidPauseReason { .. }
+        | PersistenceError::InvalidAutoReplanTransition(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "urn:agentic-afk:auto-replan-persistence-error",
             "Internal Server Error",
         ),
     };

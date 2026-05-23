@@ -139,6 +139,12 @@ impl ProjectStoreState {
             ProjectEvent::ProjectChanged(project) => {
                 self.project = Some(project);
             }
+            ProjectEvent::AutoReplanStateChanged { state, reason } => {
+                if let Some(project) = self.project.as_mut() {
+                    project.auto_replan_state = state;
+                    project.auto_replan_pause_reason = reason;
+                }
+            }
             ProjectEvent::PlanningSnapshotChanged { snapshot } => {
                 self.planning_snapshot = snapshot;
             }
@@ -175,6 +181,9 @@ pub enum MutationKey {
     EnableIssueSource(ProjectId, String, String),
     SetExecutionConfig(ProjectId),
     StartPlanRun(ProjectId),
+    ArmAutoReplan(ProjectId),
+    DisarmAutoReplan(ProjectId),
+    ResumeAutoReplan(ProjectId),
     /// Source-Issue-keyed re-enable (issue #55 / ADR-0038). Replaces
     /// the legacy Assignment-keyed re-enable because the durable
     /// authority is the **Source Issue**; the Issue Assignment row may
@@ -479,8 +488,8 @@ impl ProjectStore {
 mod tests {
     use super::*;
     use agentic_afk_contracts::{
-        AssignmentAttemptResponse, IssueAssignmentResponse, IssueSource, IssueSourceCandidate,
-        IssueSourceSyncResponse, PlanningSnapshotResponse, ProjectResponse,
+        AssignmentAttemptResponse, AutoReplanState, IssueAssignmentResponse, IssueSource,
+        IssueSourceCandidate, IssueSourceSyncResponse, PlanningSnapshotResponse, ProjectResponse,
     };
 
     fn planning_snapshot_with_source(locator: &str) -> PlanningSnapshotResponse {
@@ -538,6 +547,8 @@ mod tests {
                 trusted: true,
                 git_summary: None,
                 enabled_issue_source: None,
+                auto_replan_state: AutoReplanState::Off,
+                auto_replan_pause_reason: None,
             },
             planning_snapshot: None,
             activity,
@@ -755,6 +766,8 @@ mod tests {
                     kind: "github".into(),
                     locator: "acme/repo".into(),
                 }),
+                auto_replan_state: AutoReplanState::Off,
+                auto_replan_pause_reason: None,
             },
             planning_snapshot: Some(planning_snapshot_with_source("acme/repo")),
             activity: vec![activity_entry("a-1", "started")],

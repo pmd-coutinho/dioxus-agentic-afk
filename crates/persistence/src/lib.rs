@@ -3,10 +3,10 @@
 //! Provides SQLite-backed storage for Projects.
 
 use agentic_afk_contracts::{
-    AssignmentAttemptResponse, AssignmentTerminalOutcome, BlockReason, BlockReasonResponse,
-    CreateProjectRequest, EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource,
-    IssueSourceSyncResponse, IssueSourceSyncStatusResponse, ProjectId, ProjectResponse,
-    SourceIssueSnapshot,
+    AssignmentAttemptResponse, AssignmentTerminalOutcome, AutoReplanState, BlockReason,
+    BlockReasonResponse, CreateProjectRequest, EnableIssueSourceRequest, IssueAssignmentResponse,
+    IssueSource, IssueSourceSyncResponse, IssueSourceSyncStatusResponse, ProjectId,
+    ProjectResponse, SourceIssueSnapshot,
 };
 pub use agentic_afk_planning_snapshot::RawPlanningSnapshot;
 
@@ -17,6 +17,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 mod activity;
+mod auto_replan;
 mod plan_run;
 mod prd_overrides;
 
@@ -24,6 +25,7 @@ pub use activity::{
     PROJECT_ACTIVITY_DETAIL_MAX_BYTES, ProjectActivityEntry, list_project_activity,
     record_project_activity,
 };
+pub use auto_replan::{AutoReplanStateStore, AutoReplanStatus};
 pub use prd_overrides::{PrdOverride, list_prd_overrides, mark_prd, unmark_prd};
 pub use plan_run::{
     create_plan_run, finish_plan_run, get_active_plan_run, get_plan_run,
@@ -81,6 +83,12 @@ pub enum PersistenceError {
         body_phase: &'static str,
         outcome: String,
     },
+    #[error("invalid Auto-Replan state for project {project_id}: {value}")]
+    InvalidAutoReplanState { project_id: String, value: String },
+    #[error("invalid Auto-Replan pause reason for project {project_id}: {value}")]
+    InvalidPauseReason { project_id: String, value: String },
+    #[error("invalid Auto-Replan transition: {0}")]
+    InvalidAutoReplanTransition(String),
 }
 
 /// Hard ceiling on the serialized JSON size of a single Phase Output body.
@@ -173,14 +181,28 @@ pub async fn create_project(
         trusted: false,
         git_summary: None,
         enabled_issue_source: None,
+        auto_replan_state: AutoReplanState::Off,
+        auto_replan_pause_reason: None,
     })
 }
 
 /// List all Projects.
 pub async fn list_projects(db: &Db) -> Result<Vec<ProjectResponse>, PersistenceError> {
-    let rows = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         r#"
-        SELECT projects.id, projects.path, projects.trusted, project_issue_sources.kind, project_issue_sources.locator
+        SELECT projects.id, projects.path, projects.trusted, projects.auto_replan_state,
+               projects.auto_replan_pause_reason, project_issue_sources.kind, project_issue_sources.locator
         FROM projects
         LEFT JOIN project_issue_sources ON project_issue_sources.project_id = projects.id
         ORDER BY projects.path
@@ -191,21 +213,38 @@ pub async fn list_projects(db: &Db) -> Result<Vec<ProjectResponse>, PersistenceE
 
     Ok(rows
         .into_iter()
-        .map(|(id, path, trusted, kind, locator)| ProjectResponse {
-            id: ProjectId(id),
-            path,
-            trusted: trusted != 0,
-            git_summary: None,
-            enabled_issue_source: issue_source_from_row(kind, locator),
+        .map(|(id, path, trusted, state, reason, kind, locator)| {
+            let auto_replan = auto_replan::status_from_row(&id, state, reason)?;
+            Ok(ProjectResponse {
+                id: ProjectId(id),
+                path,
+                trusted: trusted != 0,
+                git_summary: None,
+                enabled_issue_source: issue_source_from_row(kind, locator),
+                auto_replan_state: auto_replan.state,
+                auto_replan_pause_reason: auto_replan.pause_reason,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, PersistenceError>>()?)
 }
 
 /// Get a single Project by ID.
 pub async fn get_project(db: &Db, id: &str) -> Result<ProjectResponse, PersistenceError> {
-    let row = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>)>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         r#"
-        SELECT projects.id, projects.path, projects.trusted, project_issue_sources.kind, project_issue_sources.locator
+        SELECT projects.id, projects.path, projects.trusted, projects.auto_replan_state,
+               projects.auto_replan_pause_reason, project_issue_sources.kind, project_issue_sources.locator
         FROM projects
         LEFT JOIN project_issue_sources ON project_issue_sources.project_id = projects.id
         WHERE projects.id = ?
@@ -216,13 +255,18 @@ pub async fn get_project(db: &Db, id: &str) -> Result<ProjectResponse, Persisten
     .await?;
 
     match row {
-        Some((id, path, trusted, kind, locator)) => Ok(ProjectResponse {
-            id: ProjectId(id),
-            path,
-            trusted: trusted != 0,
-            git_summary: None,
-            enabled_issue_source: issue_source_from_row(kind, locator),
-        }),
+        Some((id, path, trusted, state, reason, kind, locator)) => {
+            let auto_replan = auto_replan::status_from_row(&id, state, reason)?;
+            Ok(ProjectResponse {
+                id: ProjectId(id),
+                path,
+                trusted: trusted != 0,
+                git_summary: None,
+                enabled_issue_source: issue_source_from_row(kind, locator),
+                auto_replan_state: auto_replan.state,
+                auto_replan_pause_reason: auto_replan.pause_reason,
+            })
+        }
         None => Err(PersistenceError::NotFound(id.to_string())),
     }
 }
@@ -987,20 +1031,23 @@ pub async fn seed_dev_project(
     let normalized_path = normalize_project_path(dev_path)?;
 
     // Check if already seeded
-    let existing = sqlx::query_as::<_, (String, String, i64)>(
-        "SELECT id, path, trusted FROM projects WHERE path = ?",
+    let existing = sqlx::query_as::<_, (String, String, i64, String, Option<String>)>(
+        "SELECT id, path, trusted, auto_replan_state, auto_replan_pause_reason FROM projects WHERE path = ?",
     )
     .bind(&normalized_path)
     .fetch_optional(db)
     .await?;
 
-    if let Some((id, path, trusted)) = existing {
+    if let Some((id, path, trusted, state, reason)) = existing {
+        let auto_replan = auto_replan::status_from_row(&id, state, reason)?;
         return Ok(ProjectResponse {
             id: ProjectId(id),
             path,
             trusted: trusted != 0,
             git_summary: None,
             enabled_issue_source: None,
+            auto_replan_state: auto_replan.state,
+            auto_replan_pause_reason: auto_replan.pause_reason,
         });
     }
 
@@ -1017,6 +1064,8 @@ pub async fn seed_dev_project(
         trusted: false,
         git_summary: None,
         enabled_issue_source: None,
+        auto_replan_state: AutoReplanState::Off,
+        auto_replan_pause_reason: None,
     })
 }
 

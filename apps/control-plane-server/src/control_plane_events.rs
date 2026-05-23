@@ -32,10 +32,10 @@
 use std::future::Future;
 
 use agentic_afk_contracts::{
-    AssignmentAttemptResponse, IssueAssignmentResponse, IssueSourceCandidate,
+    AssignmentAttemptResponse, AutoReplanState, IssueAssignmentResponse, IssueSourceCandidate,
     IssueSourceSyncResponse, PhaseOutputResponse, PlanRunResponse, PlanningSnapshotResponse,
-    ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse, ProjectId,
-    ProjectResponse,
+    PauseReason, ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse,
+    ProjectId, ProjectResponse,
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError, ProjectActivityEntry};
 
@@ -132,6 +132,18 @@ pub fn publish_project_changed(bus: &EventBus, project_id: &str, project: Projec
     bus.publish(
         &ProjectId(project_id.to_string()),
         ProjectEvent::ProjectChanged(project),
+    )
+}
+
+pub fn publish_auto_replan_state_changed(
+    bus: &EventBus,
+    project_id: &str,
+    state: AutoReplanState,
+    reason: Option<PauseReason>,
+) -> u64 {
+    bus.publish(
+        &ProjectId(project_id.to_string()),
+        ProjectEvent::AutoReplanStateChanged { state, reason },
     )
 }
 

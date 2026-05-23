@@ -12,10 +12,11 @@ use ui::{
 };
 
 use agentic_afk_contracts::{
-    AppInfoResponse, EnableIssueSourceRequest, GitSummary, IssueAssignmentResponse,
-    IssueSourceCandidate, IssueSourceSyncResponse, PlanRunResponse, PlanningSnapshotResponse,
-    ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse, ProjectId,
-    ProjectResponse, ProjectSnapshotResponse, SetProjectExecutionConfigRequest,
+    AppInfoResponse, AutoReplanState, EnableIssueSourceRequest, GitSummary,
+    IssueAssignmentResponse, IssueSourceCandidate, IssueSourceSyncResponse, PlanRunResponse,
+    PlanningSnapshotResponse, ProjectActivityEntryResponse, ProjectEvent,
+    ProjectExecutionConfigResponse, ProjectId, ProjectResponse, ProjectSnapshotResponse,
+    SetProjectExecutionConfigRequest,
     SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
@@ -402,6 +403,60 @@ fn TrustProjectButton(project_id: String) -> Element {
                 }
             },
             "Trust Project"
+        }
+    }
+}
+
+#[component]
+fn AutoReplanControl(project: ProjectResponse) -> Element {
+    let store = use_context::<ProjectStore>();
+    let project_id = project.id.0.clone();
+    let (tone, label) = derive_auto_replan_pill(project.auto_replan_state);
+    let (key, button_label, variant, endpoint) = match project.auto_replan_state {
+        AutoReplanState::Off => (
+            MutationKey::ArmAutoReplan(project.id.clone()),
+            "Arm",
+            ButtonVariant::Primary,
+            "arm",
+        ),
+        AutoReplanState::Armed => (
+            MutationKey::DisarmAutoReplan(project.id.clone()),
+            "Disarm",
+            ButtonVariant::Destructive,
+            "disarm",
+        ),
+        AutoReplanState::Paused => (
+            MutationKey::ResumeAutoReplan(project.id.clone()),
+            "Resume",
+            ButtonVariant::Primary,
+            "resume",
+        ),
+    };
+    rsx! {
+        div { class: "flex flex-wrap items-center gap-2",
+            StatusPill { tone, label: label.to_string() }
+            ActionButton {
+                mutation_key: key.clone(),
+                variant,
+                testid: Some("auto-replan-action".to_string()),
+                error_marker: Some("auto-replan".to_string()),
+                on_press: {
+                    let store = store.clone();
+                    let key = key.clone();
+                    let project_id = project_id.clone();
+                    let endpoint = endpoint.to_string();
+                    move |_| {
+                        let store = store.clone();
+                        let key = key.clone();
+                        let project_id = project_id.clone();
+                        let endpoint = endpoint.clone();
+                        spawn(async move {
+                            let _ = store.mutate(key, auto_replan_api(project_id, endpoint)).await;
+                        });
+                    }
+                },
+                "{button_label}"
+            }
         }
     }
 }
@@ -1254,6 +1309,7 @@ fn ProjectMetaCard(project: ProjectResponse) -> Element {
                         if !project.trusted {
                             TrustProjectButton { project_id: project.id.0.clone() }
                         }
+                        AutoReplanControl { project: project.clone() }
                     }
                     KeyValueList {
                         KeyValueRow { label: "Path".to_string(), value: project.path.clone() }
@@ -1526,6 +1582,14 @@ fn derive_trust_pill(trusted: bool) -> (PillTone, &'static str) {
         (PillTone::Verified, "Trusted")
     } else {
         (PillTone::Stale, "Untrusted")
+    }
+}
+
+fn derive_auto_replan_pill(state: AutoReplanState) -> (PillTone, &'static str) {
+    match state {
+        AutoReplanState::Off => (PillTone::Idle, "Off"),
+        AutoReplanState::Armed => (PillTone::Verified, "Armed"),
+        AutoReplanState::Paused => (PillTone::Failed, "Paused"),
     }
 }
 
@@ -2103,6 +2167,27 @@ async fn trust_project_api(
         .send()
         .await
         .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
+}
+
+async fn auto_replan_api(
+    project_id: String,
+    endpoint: String,
+) -> Result<ProjectResponse, project_store::MutationFailure> {
+    let response = gloo_net::http::Request::post(&format!(
+        "/api/projects/{project_id}/auto-replan/{endpoint}"
+    ))
+    .send()
+    .await
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
     let status = response.status();
     if !(200..300).contains(&status) {
         let body = response.text().await.unwrap_or_default();

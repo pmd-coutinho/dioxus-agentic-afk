@@ -41,6 +41,74 @@ pub struct ProjectResponse {
     pub trusted: bool,
     pub git_summary: Option<GitSummary>,
     pub enabled_issue_source: Option<IssueSource>,
+    #[serde(default)]
+    pub auto_replan_state: AutoReplanState,
+    #[serde(default)]
+    pub auto_replan_pause_reason: Option<PauseReason>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoReplanState {
+    #[default]
+    Off,
+    Armed,
+    Paused,
+}
+
+impl AutoReplanState {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Armed => "armed",
+            Self::Paused => "paused",
+        }
+    }
+
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "off" => Some(Self::Off),
+            "armed" => Some(Self::Armed),
+            "paused" => Some(Self::Paused),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseReason {
+    EmptyBacklog,
+    AssignmentBlocked,
+    PushNonFastForward,
+    MergeStagedLeft,
+    PlanningFailed,
+    SyncFailed,
+}
+
+impl PauseReason {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::EmptyBacklog => "empty_backlog",
+            Self::AssignmentBlocked => "assignment_blocked",
+            Self::PushNonFastForward => "push_non_fast_forward",
+            Self::MergeStagedLeft => "merge_staged_left",
+            Self::PlanningFailed => "planning_failed",
+            Self::SyncFailed => "sync_failed",
+        }
+    }
+
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "empty_backlog" => Some(Self::EmptyBacklog),
+            "assignment_blocked" => Some(Self::AssignmentBlocked),
+            "push_non_fast_forward" => Some(Self::PushNonFastForward),
+            "merge_staged_left" => Some(Self::MergeStagedLeft),
+            "planning_failed" => Some(Self::PlanningFailed),
+            "sync_failed" => Some(Self::SyncFailed),
+            _ => None,
+        }
+    }
 }
 
 /// Read-only Git metadata derived from a Project path.
@@ -719,6 +787,10 @@ pub enum ProjectEvent {
     /// Top-level Project metadata changed (trusted flag, enabled Issue
     /// Source, etc.).
     ProjectChanged(ProjectResponse),
+    AutoReplanStateChanged {
+        state: AutoReplanState,
+        reason: Option<PauseReason>,
+    },
     /// The client's `Last-Event-ID` predates the per-Project ring buffer.
     /// The client must re-fetch `/snapshot` to recover authoritative state.
     Resync,
@@ -781,6 +853,8 @@ mod tests {
             trusted: false,
             git_summary: None,
             enabled_issue_source: None,
+            auto_replan_state: AutoReplanState::Off,
+            auto_replan_pause_reason: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: ProjectResponse = serde_json::from_str(&json).unwrap();
@@ -867,6 +941,22 @@ mod tests {
     #[test]
     fn block_reason_from_wire_rejects_unknown() {
         assert_eq!(BlockReason::from_wire("nope"), None);
+    }
+
+    #[test]
+    fn auto_replan_state_and_pause_reason_round_trip() {
+        assert_eq!(AutoReplanState::Armed.as_wire(), "armed");
+        assert_eq!(
+            AutoReplanState::from_wire("paused"),
+            Some(AutoReplanState::Paused)
+        );
+        assert_eq!(AutoReplanState::from_wire("unknown"), None);
+        assert_eq!(PauseReason::MergeStagedLeft.as_wire(), "merge_staged_left");
+        assert_eq!(
+            PauseReason::from_wire("push_non_fast_forward"),
+            Some(PauseReason::PushNonFastForward)
+        );
+        assert_eq!(PauseReason::from_wire("unknown"), None);
     }
 
     #[test]

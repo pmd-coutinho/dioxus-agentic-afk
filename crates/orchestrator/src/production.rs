@@ -391,6 +391,8 @@ mod tests {
             git_summary: None,
             trusted: true,
             enabled_issue_source: None,
+            auto_replan_state: agentic_afk_contracts::AutoReplanState::Off,
+            auto_replan_pause_reason: None,
         }
     }
 

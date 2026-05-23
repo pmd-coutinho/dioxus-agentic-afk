@@ -264,6 +264,11 @@ impl CoordinatorError {
             PersistenceError::PhaseOutputMismatch { .. } => {
                 (500, "urn:agentic-afk:phase-output-mismatch")
             }
+            PersistenceError::InvalidAutoReplanState { .. }
+            | PersistenceError::InvalidPauseReason { .. }
+            | PersistenceError::InvalidAutoReplanTransition(_) => {
+                (500, "urn:agentic-afk:auto-replan-persistence-error")
+            }
         };
         Self::new(status, problem_type, error.to_string())
     }
@@ -2084,6 +2089,8 @@ mod tests {
                 kind: "github".to_string(),
                 locator: "owner/repo".to_string(),
             }),
+            auto_replan_state: agentic_afk_contracts::AutoReplanState::Off,
+            auto_replan_pause_reason: None,
         }
     }
 
