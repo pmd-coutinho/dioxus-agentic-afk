@@ -586,9 +586,22 @@ pub async fn serve(config: ControlPlaneConfig) -> anyhow::Result<()> {
     // recovery window picks up the AssignmentStatusChanged + Activity
     // deltas without waiting for a snapshot refresh.
     let bus = event_bus::EventBus::new();
-    let _recovery = agentic_afk_orchestrator::boot_recovery_scanner::run(
+    let recovery_publisher = BootRecoveryEventBusPublisher::new(bus.clone(), db.clone());
+    let _recovery =
+        agentic_afk_orchestrator::boot_recovery_scanner::run(&db, &recovery_publisher).await?;
+
+    // Issue #75: Codex Sandbox boot sweep. Runs after the DB-side
+    // recovery scanner so any container whose owning assignment was
+    // just transitioned to `blocked` is observed correctly. Docker
+    // unavailable is warn-not-fatal; HTTP still serves and the next
+    // Plan Run trigger fails preflight until Docker is back.
+    let docker_ops = agentic_afk_orchestrator::boot_container_sweeper::CliDockerOps::new(
+        config.docker_binary_path.clone(),
+    );
+    let _container_sweep = agentic_afk_orchestrator::boot_container_sweeper::run(
         &db,
-        &BootRecoveryEventBusPublisher::new(bus.clone(), db.clone()),
+        &recovery_publisher,
+        &docker_ops,
     )
     .await?;
 

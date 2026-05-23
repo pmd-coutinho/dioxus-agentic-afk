@@ -19,6 +19,7 @@ pub mod production;
 pub mod push_attempt;
 pub mod re_enable_source_issue;
 pub mod review_loop;
+pub mod boot_container_sweeper;
 pub mod codex_runner;
 pub mod sandbox;
 
