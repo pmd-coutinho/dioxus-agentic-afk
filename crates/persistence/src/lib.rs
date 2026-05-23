@@ -1680,6 +1680,89 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn write_seam_accepts_merge_with_merged_and_blocked() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Merge {
+            merged_source_ids: vec!["42".into()],
+            verification: vec!["cargo test".into()],
+            gaps: vec![],
+            summary: "integrated cleanly".into(),
+            block_reason: None,
+        };
+        let stored =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "merge", "merged", &body)
+                .await
+                .unwrap();
+        assert_eq!(stored.outcome, "merged");
+        assert_eq!(
+            stored
+                .body_json
+                .get("merged_source_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1)
+        );
+
+        let body = PhaseOutputBody::Merge {
+            merged_source_ids: vec![],
+            verification: vec![],
+            gaps: vec![],
+            summary: "conflict".into(),
+            block_reason: Some("unresolvable conflict".into()),
+        };
+        let stored =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "merge", "blocked", &body)
+                .await
+                .unwrap();
+        assert_eq!(stored.outcome, "blocked");
+    }
+
+    #[tokio::test]
+    async fn write_seam_rejects_merge_with_non_merge_outcome() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Merge {
+            merged_source_ids: vec![],
+            verification: vec![],
+            gaps: vec![],
+            summary: "x".into(),
+            block_reason: None,
+        };
+        // `approved` belongs to the Review pairing — Merge bodies must
+        // never land with a non-merge outcome.
+        let result =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "merge", "approved", &body)
+                .await;
+        assert!(
+            matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
+            "expected PhaseOutputMismatch, got {result:?}"
+        );
+    }
+
     fn make_issue(source_id: &str, readiness: &str, lifecycle_status: &str) -> SourceIssueSnapshot {
         SourceIssueSnapshot {
             source_id: source_id.to_string(),

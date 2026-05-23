@@ -180,7 +180,7 @@ fn wrap_legacy_body(
         "planning" => PhaseOutputBody::Planning(body_json.clone()),
         "implementation" => parse_implementation_body(body_json),
         "review" => parse_review_body(body_json),
-        "merge" => PhaseOutputBody::Merge(body_json.clone()),
+        "merge" => parse_merge_body(body_json),
         // Unknown phase: route to Failed so the row still lands with a
         // typed body the Dashboard can render.
         _ => PhaseOutputBody::Failed {
@@ -204,6 +204,14 @@ fn parse_implementation_body(body_json: &serde_json::Value) -> PhaseOutputBody {
 /// the [`agentic_afk_contracts::ReviewFinding`] custom deserializer.
 fn parse_review_body(body_json: &serde_json::Value) -> PhaseOutputBody {
     inject_phase_and_deserialize(body_json, "review")
+}
+
+/// Deserialize a free-form merge body into the typed
+/// [`PhaseOutputBody::Merge`] variant so legacy in-the-wild rows surface
+/// `merged_source_ids` / `verification` / `summary` / `block_reason` on
+/// the Dashboard rather than the opaque pretty-printed JSON fallback.
+fn parse_merge_body(body_json: &serde_json::Value) -> PhaseOutputBody {
+    inject_phase_and_deserialize(body_json, "merge")
 }
 
 /// Stamp the `phase` discriminator onto a free-form body and let serde
@@ -306,6 +314,18 @@ fn validate_outcome_body(outcome: &str, body: &PhaseOutputBody) -> Result<(), Pe
     // (e.g. `ready_for_review`, `merged`) would corrupt the audit log.
     if matches!(body, PhaseOutputBody::Review { .. })
         && !matches!(outcome, "approved" | "rejected")
+    {
+        return Err(PersistenceError::PhaseOutputMismatch {
+            body_phase: body.phase_tag(),
+            outcome: outcome.to_string(),
+        });
+    }
+    // Merge body pairs with `merged` (clean local integration) or
+    // `blocked` (merge could not finish safely; `block_reason` carries
+    // the reason). Runner/parse failures land as `Failed` with
+    // `outcome = "failed"` via the failure path above.
+    if matches!(body, PhaseOutputBody::Merge { .. })
+        && !matches!(outcome, "merged" | "blocked")
     {
         return Err(PersistenceError::PhaseOutputMismatch {
             body_phase: body.phase_tag(),

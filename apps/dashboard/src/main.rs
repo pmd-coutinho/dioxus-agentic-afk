@@ -1064,8 +1064,46 @@ fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element 
                 }
             }
         },
+        PhaseOutputBody::Merge { merged_source_ids, verification, gaps, summary, block_reason } => rsx! {
+            div { class: "flex flex-col gap-2",
+                "data-testid": "phase-output-merge",
+                if !summary.is_empty() {
+                    p { class: "text-[12px] text-ink",
+                        "data-testid": "phase-output-merge-summary",
+                        "{summary}"
+                    }
+                }
+                if let Some(reason) = block_reason.as_ref() {
+                    p { class: "text-[12px] text-coral",
+                        "data-testid": "phase-output-merge-block-reason",
+                        "{reason}"
+                    }
+                }
+                if !merged_source_ids.is_empty() {
+                    ul { class: "list-disc pl-4 text-[11px] text-ink",
+                        "data-testid": "phase-output-merge-commits",
+                        for source_id in merged_source_ids.iter() {
+                            li { "data-testid": "phase-output-merge-source", "{source_id}" }
+                        }
+                    }
+                }
+                if !verification.is_empty() {
+                    pre { class: "whitespace-pre-wrap font-mono text-[11px] text-ink-2 rounded border border-line/40 bg-surface-2/60 p-2",
+                        "data-testid": "phase-output-merge-verification",
+                        "{verification.join(\"\\n\")}"
+                    }
+                }
+                if !gaps.is_empty() {
+                    ul { class: "list-disc pl-4 text-[11px] text-coral",
+                        "data-testid": "phase-output-merge-gaps",
+                        for gap in gaps.iter() {
+                            li { "data-testid": "phase-output-merge-gap", "{gap}" }
+                        }
+                    }
+                }
+            }
+        },
         PhaseOutputBody::Planning(body)
-        | PhaseOutputBody::Merge(body)
         | PhaseOutputBody::Push(body) => {
             let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
             rsx! {

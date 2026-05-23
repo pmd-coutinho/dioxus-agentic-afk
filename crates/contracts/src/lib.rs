@@ -404,8 +404,30 @@ pub enum PhaseOutputBody {
         #[serde(default)]
         summary: String,
     },
-    /// Merge Phase body (stub).
-    Merge(serde_json::Value),
+    /// Merge Phase body — the structured product of one Merge pass on an
+    /// Issue Assignment. `merged_source_ids` lists the Source Issue ids
+    /// whose branches were integrated (empty when blocked);
+    /// `verification` carries the verification command transcript the
+    /// merger ran for the integrated result; `gaps` is the merger's
+    /// self-reported list of verification gaps the next phase should
+    /// know about; `summary` is the one-line collapsed Dashboard
+    /// summary; `block_reason` is set only when the merge could not
+    /// finish safely (paired with `outcome = "blocked"`). Validated
+    /// against `outcome = "merged"` or `outcome = "blocked"` at the
+    /// persistence write seam — runner/parse failures land as `Failed`
+    /// with `outcome = "failed"`.
+    Merge {
+        #[serde(default)]
+        merged_source_ids: Vec<String>,
+        #[serde(default)]
+        verification: Vec<String>,
+        #[serde(default)]
+        gaps: Vec<String>,
+        #[serde(default)]
+        summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_reason: Option<String>,
+    },
     /// Integration Branch push body (stub).
     Push(serde_json::Value),
     /// Failure body — carries the surfaced error and the RFC-7807
@@ -469,7 +491,7 @@ impl PhaseOutputBody {
             Self::Planning(_) => "planning",
             Self::Implementation { .. } => "implementation",
             Self::Review { .. } => "review",
-            Self::Merge(_) => "merge",
+            Self::Merge { .. } => "merge",
             Self::Push(_) => "push",
             Self::Failed { .. } => "failed",
         }
@@ -893,6 +915,41 @@ mod tests {
             }
             other => panic!("expected Review, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn phase_output_body_merge_round_trips() {
+        let body = PhaseOutputBody::Merge {
+            merged_source_ids: vec!["42".to_string()],
+            verification: vec!["cargo test --workspace".to_string()],
+            gaps: vec![],
+            summary: "integrated cleanly".to_string(),
+            block_reason: None,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"phase\":\"merge\""), "{json}");
+        assert!(json.contains("\"merged_source_ids\":[\"42\"]"), "{json}");
+        assert!(json.contains("\"summary\":\"integrated cleanly\""), "{json}");
+        let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, body);
+    }
+
+    #[test]
+    fn phase_output_body_merge_blocked_carries_block_reason() {
+        let body = PhaseOutputBody::Merge {
+            merged_source_ids: vec![],
+            verification: vec!["cargo test".to_string()],
+            gaps: vec!["unresolved conflict in src/foo.rs".to_string()],
+            summary: "conflict".to_string(),
+            block_reason: Some("unresolvable merge conflict".to_string()),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            json.contains("\"block_reason\":\"unresolvable merge conflict\""),
+            "{json}"
+        );
+        let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, body);
     }
 
     #[test]

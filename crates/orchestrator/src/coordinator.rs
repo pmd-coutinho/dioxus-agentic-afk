@@ -1091,6 +1091,35 @@ fn parse_review_phase_body(body: &serde_json::Value) -> agentic_afk_contracts::P
     }
 }
 
+/// Lift a parsed Merge Phase body (free-form JSON from the merger
+/// stdout) into the typed
+/// [`agentic_afk_contracts::PhaseOutputBody::Merge`] variant so the
+/// persistence write seam validates outcome ↔ body pairing (ADR-0038).
+/// Missing fields default to empty so partial merger output still lands
+/// as Merge rather than degrading to Failed. `block_reason` is lifted
+/// when present so the Dashboard expanded row can surface it.
+fn parse_merge_phase_body(body: &serde_json::Value) -> agentic_afk_contracts::PhaseOutputBody {
+    let merged_source_ids = string_array(body, "merged_source_ids");
+    let verification = string_array(body, "verification");
+    let gaps = string_array(body, "gaps");
+    let summary = body
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let block_reason = body
+        .get("block_reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    agentic_afk_contracts::PhaseOutputBody::Merge {
+        merged_source_ids,
+        verification,
+        gaps,
+        summary,
+        block_reason,
+    }
+}
+
 fn string_array(body: &serde_json::Value, key: &str) -> Vec<String> {
     body.get(key)
         .and_then(serde_json::Value::as_array)
@@ -1160,39 +1189,50 @@ async fn finalize_parallel_plan_run(
         let merge_outcome: AssignmentMergeOutcome = match deps.merger.run(&prompt) {
             Err(error) => {
                 let reason = error.to_string();
-                let _ = persistence::record_assignment_phase_output(
+                let failed_body = agentic_afk_contracts::PhaseOutputBody::Failed {
+                    error: reason.clone(),
+                    problem_type: Some("urn:agentic-afk:merge-phase-runner-failed".to_string()),
+                };
+                let _ = persistence::record_assignment_phase_output_typed(
                     db,
                     &plan_run.id,
                     &merge_assignment.id,
                     "merge",
                     "failed",
-                    &serde_json::json!({ "error": &reason }),
+                    &failed_body,
                 )
                 .await;
                 AssignmentMergeOutcome::Blocked { reason }
             }
             Ok(merge_stdout) => match crate::parse_merge_output(&merge_stdout) {
                 Err(error) => {
-                    let _ = persistence::record_assignment_phase_output(
+                    let failed_body = agentic_afk_contracts::PhaseOutputBody::Failed {
+                        error: error.clone(),
+                        problem_type: Some(
+                            "urn:agentic-afk:merge-output-unparseable".to_string(),
+                        ),
+                    };
+                    let _ = persistence::record_assignment_phase_output_typed(
                         db,
                         &plan_run.id,
                         &merge_assignment.id,
                         "merge",
                         "failed",
-                        &serde_json::json!({ "error": &error }),
+                        &failed_body,
                     )
                     .await;
                     let err = CoordinatorError::from(MergeRejection::Unparseable(error));
                     AssignmentMergeOutcome::Blocked { reason: err.detail }
                 }
                 Ok(parsed) => {
-                    let merge_output = persistence::record_assignment_phase_output(
+                    let merge_body = parse_merge_phase_body(&parsed.body);
+                    let merge_output = persistence::record_assignment_phase_output_typed(
                         db,
                         &plan_run.id,
                         &merge_assignment.id,
                         "merge",
                         &parsed.outcome,
-                        &parsed.body,
+                        &merge_body,
                     )
                     .await
                     .map_err(CoordinatorError::from_persistence)?;
