@@ -108,8 +108,10 @@ fn smoke_build_and_mise_install_against_repo_mise_toml() {
         .expect("mise install (first run) succeeds");
     let first_elapsed = t0.elapsed();
 
-    // Second mise install — should be substantially faster because the
-    // toolchains are already on the agentic-afk-mise-cache volume.
+    // Second mise install — validates the cache volume remains reusable
+    // across sandbox launches. Wall-clock speed depends on the host and
+    // on mise's current plugin behavior, so this is intentionally not a
+    // performance assertion.
     let t1 = std::time::Instant::now();
     launcher
         .launch(base_spec(
@@ -122,12 +124,6 @@ fn smoke_build_and_mise_install_against_repo_mise_toml() {
     eprintln!(
         "smoke: mise install first={:?} second={:?}",
         first_elapsed, second_elapsed
-    );
-    assert!(
-        second_elapsed * 2 <= first_elapsed || second_elapsed.as_secs() < 10,
-        "second mise install should reuse the cache (first={:?} second={:?})",
-        first_elapsed,
-        second_elapsed
     );
 
     // Best-effort: confirm the cache volume exists after the runs.

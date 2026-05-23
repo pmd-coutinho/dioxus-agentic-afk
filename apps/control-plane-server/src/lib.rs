@@ -2188,11 +2188,25 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
         );
     }
 
+    if state.plan_run_deps.production_sandbox.is_some()
+        && !command_available(&state.config.worktrunk_binary_path)
+    {
+        return sync_problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "urn:agentic-afk:worktrunk-unavailable",
+            "Unprocessable Entity",
+            format!(
+                "Worktrunk binary `{}` was not found. Install Worktrunk or set AGENTIC_AFK_WORKTRUNK_BIN to its executable path before starting a Plan Run.",
+                state.config.worktrunk_binary_path.display()
+            ),
+        );
+    }
+
     // Codex Sandbox preflight (issue #73). Runs before any Plan Run row,
     // claim write, or Source Issue Lifecycle transition. Failures become
     // a 422 problem-JSON response with a stable URN so the trigger
-    // surfaces the operator-actionable cause (docker down, codex auth
-    // missing, no mise.toml, runtime image build failed).
+    // surfaces the operator-actionable cause (worktrunk missing, docker
+    // down, codex auth missing, no mise.toml, runtime image build failed).
     if let Err(failure) = state
         .sandbox_preflight
         .check(std::path::Path::new(&project.path))
@@ -2308,6 +2322,36 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     {
         Ok(finished) => (StatusCode::CREATED, Json(finished)).into_response(),
         Err(error) => coordinator_error_to_response(error),
+    }
+}
+
+fn command_available(command: &std::path::Path) -> bool {
+    if command.is_absolute() || command.components().count() > 1 {
+        return executable_file(command);
+    }
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(command))
+        .any(|candidate| executable_file(&candidate))
+}
+
+fn executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 

@@ -22,18 +22,38 @@ RUN apt-get update \
         openssh-client \
         gnupg \
         xz-utils \
+        libatomic1 \
+        build-essential \
+        pkg-config \
+        libssl-dev \
  && rm -rf /var/lib/apt/lists/*
+
+# Docker initializes a fresh named volume from the image path it is mounted
+# over. Keep the mise cache writable for containers that run as the host UID.
+# The Codex home also needs to exist before file bind mounts land under
+# /tmp/codex-home/.codex; otherwise Docker-created parent dirs may be
+# root-owned and `mise trust` cannot write ~/.local/state.
+RUN mkdir -p /cache/mise /tmp/codex-home/.codex \
+ && chmod -R 0777 /cache/mise /tmp/codex-home
 
 # Install mise into /usr/local/bin so it is on PATH for every UID the
 # container is run with (the host's developer UID via --user).
 RUN curl -fsSL https://mise.run | MISE_VERSION="${MISE_VERSION}" MISE_INSTALL_PATH=/usr/local/bin/mise sh
 
-# Install codex CLI. Pulled from the published npm package via a pinned
-# version; the binary ends up on PATH as `codex`.
-ARG CODEX_VERSION=0.21.0
-RUN curl -fsSL "https://github.com/openai/codex/releases/download/v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" \
+# Install codex CLI from the pinned GitHub release; the binary ends up on
+# PATH as `codex`.
+ARG CODEX_VERSION=0.133.0
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+        amd64) codex_arch="x86_64" ;; \
+        arm64) codex_arch="aarch64" ;; \
+        *) echo "unsupported Docker TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && codex_bin="codex-${codex_arch}-unknown-linux-musl" \
+ && curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/${codex_bin}.tar.gz" \
       -o /tmp/codex.tar.gz \
- && tar -xzf /tmp/codex.tar.gz -C /usr/local/bin codex \
+ && tar -xzf /tmp/codex.tar.gz -C /usr/local/bin "${codex_bin}" \
+ && mv "/usr/local/bin/${codex_bin}" /usr/local/bin/codex \
  && rm /tmp/codex.tar.gz \
  && chmod +x /usr/local/bin/codex
 

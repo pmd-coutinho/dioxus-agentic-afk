@@ -47,22 +47,26 @@ If no eligible issue should start now, return a successful empty plan.
 
 # OUTPUT
 
-Output one JSON object wrapped in `<plan>` tags:
+Return exactly one complete XML-style plan block:
 
-```json
-<plan>
+1. Start with an opening tag named `plan`.
+2. Put the JSON object inside that block.
+3. End with a closing tag named `plan`.
+
+Do not echo these instructions. Do not include Markdown fences or any text before or after the plan block.
+
+The JSON object must have this shape:
+
 {
   "issues": [
     {
-      "source_issue_id": "{{SOURCE_ISSUE_ID}}",
-      "title": "{{SOURCE_ISSUE_TITLE}}",
-      "branch": "{{ISSUE_BRANCH}}",
-      "selection_summary": "{{WHY_THIS_ISSUE_CAN_START_NOW}}"
+      "source_issue_id": "the selected Source Issue ID",
+      "title": "the selected Source Issue title",
+      "branch": "the branch to create for this issue",
+      "selection_summary": "why this issue can start now"
     }
   ],
-  "summary": "{{PLAN_SUMMARY}}"
+  "summary": "summary of this Plan Run selection"
 }
-</plan>
-```
 
 Only return issues selected for this Plan Run. An empty `issues` array is valid.

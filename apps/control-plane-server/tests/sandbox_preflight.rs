@@ -11,7 +11,8 @@ use agentic_afk_control_plane_server::{
     StaticIntegrationBranchRefresher, event_bus::EventBus, router_with_full_deps_and_preflight,
 };
 use agentic_afk_orchestrator::{
-    RejectingSandboxPreflight, SandboxFailureTemplate, SandboxPreflightCheck,
+    AlwaysOkSandboxPreflight, RejectingSandboxPreflight, SandboxFailureTemplate,
+    SandboxPreflightCheck, SandboxProductionConfig,
 };
 use agentic_afk_persistence as persistence;
 use axum::body::Body;
@@ -212,4 +213,63 @@ async fn runtime_image_build_failed_returns_422_with_urn_and_stderr_detail() {
         "urn:agentic-afk:sandbox-runtime-image-build-failed",
     )
     .await;
+}
+
+#[tokio::test]
+async fn worktrunk_missing_returns_422_before_plan_run_row() {
+    let project_dir = std::env::temp_dir().join(format!(
+        "agentic-afk-worktrunk-preflight-it-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let mut config = config("sqlite::memory:");
+    config.worktrunk_binary_path = project_dir.join("missing-wt");
+
+    let mut deps = PlanRunDeps::default_test_deps();
+    deps.production_sandbox = Some(SandboxProductionConfig {
+        docker_binary: "docker".into(),
+        image_tag: "agentic-afk-runtime:test".into(),
+        codex_auth_path: "/dev/null".into(),
+        codex_config_path: "/dev/null".into(),
+        user: None,
+    });
+    let router = router_with_full_deps_and_preflight(
+        config,
+        db.clone(),
+        EventBus::new(),
+        deps,
+        Arc::new(AlwaysOkSandboxPreflight),
+    );
+    let project = create_and_trust_project(&router, &project_dir).await;
+
+    let trigger_resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/plan-runs", project.id.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(trigger_resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = trigger_resp.into_body().collect().await.unwrap().to_bytes();
+    let problem: ProblemDetailJson = serde_json::from_slice(&body).expect("problem json parses");
+    assert_eq!(problem.status, 422);
+    assert_eq!(problem.problem_type, "urn:agentic-afk:worktrunk-unavailable");
+
+    let rows = persistence::list_recent_plan_runs(&db, &project.id.0, 10)
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "worktrunk preflight must not create Plan Run rows");
+
+    let _ = std::fs::remove_dir_all(&project_dir);
 }

@@ -102,6 +102,7 @@ fn planning_launch_mounts_project_read_only_and_returns_stdout() {
     assert_eq!(launches.len(), 1);
     let launch = &launches[0];
     assert_eq!(launch.phase, SandboxPhase::Planning);
+    assert_codex_exec_uses_last_message_capture(&launch.command, "plan now");
     let work_mount = bind_mount(&launch.mounts, "/host/proj").expect("project bind mount");
     match work_mount {
         SandboxMount::Bind {
@@ -136,6 +137,7 @@ fn implementation_launch_mounts_assignment_worktree_read_write() {
 
     let launch = &launcher.launches()[0];
     assert_eq!(launch.phase, SandboxPhase::Implementation);
+    assert_codex_exec_uses_last_message_capture(&launch.command, "implement now");
     let work_mount =
         bind_mount(&launch.mounts, "/host/worktrees/issue-1").expect("worktree bind mount");
     match work_mount {
@@ -152,6 +154,25 @@ fn implementation_launch_mounts_assignment_worktree_read_write() {
         }
         _ => panic!(),
     }
+}
+
+fn assert_codex_exec_uses_last_message_capture(command: &[String], prompt: &str) {
+    assert_eq!(command.first().map(String::as_str), Some("bash"));
+    assert_eq!(command.get(1).map(String::as_str), Some("-lc"));
+    let script = command.get(2).expect("bash script present");
+    assert!(
+        script.contains("--output-last-message"),
+        "command must capture only Codex final answer: {script}"
+    );
+    assert!(
+        script.contains(">\"$transcript\""),
+        "command must redirect Codex transcript away from stdout: {script}"
+    );
+    assert_eq!(
+        command.last().map(String::as_str),
+        Some(prompt),
+        "prompt is passed as a shell argument"
+    );
 }
 
 #[test]

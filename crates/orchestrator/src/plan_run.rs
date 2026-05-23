@@ -326,18 +326,53 @@ pub fn parse_review_output(stdout: &str) -> Result<ParsedReviewOutput, String> {
 fn extract_tagged_json(stdout: &str, tag: &str) -> Result<serde_json::Value, String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
-    let start = stdout
-        .find(&open)
+    let end = stdout
+        .rfind(&close)
+        .ok_or_else(|| format!("output missing {close} closing tag"))?;
+    let start = stdout[..end]
+        .rfind(&open)
         .ok_or_else(|| format!("output missing {open} opening tag"))?
         + open.len();
-    let end = stdout
-        .find(&close)
-        .ok_or_else(|| format!("output missing {close} closing tag"))?;
     if end < start {
         return Err(format!("output has malformed {tag} tags"));
     }
-    let body = stdout[start..end].trim();
-    serde_json::from_str(body).map_err(|error| format!("{tag} output is not valid JSON: {error}"))
+    let body = strip_json_code_fence(stdout[start..end].trim());
+    serde_json::from_str(body).map_err(|error| {
+        format!(
+            "{tag} output is not valid JSON: {error}; body starts with: {}",
+            excerpt_for_error(body)
+        )
+    })
+}
+
+fn strip_json_code_fence(body: &str) -> &str {
+    let after_open = if let Some(after_open) = body.strip_prefix("```json") {
+        after_open
+    } else if let Some(after_open) = body.strip_prefix("```") {
+        after_open
+    } else {
+        return body;
+    };
+    let after_open = after_open.trim_start();
+    let Some(before_close) = after_open.strip_suffix("```") else {
+        return body;
+    };
+    before_close.trim()
+}
+
+fn excerpt_for_error(body: &str) -> String {
+    const LIMIT: usize = 240;
+    let normalized = body
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    let mut chars = normalized.chars();
+    let excerpt = chars.by_ref().take(LIMIT).collect::<String>();
+    if chars.next().is_none() {
+        normalized
+    } else {
+        format!("{excerpt}...")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -367,19 +402,13 @@ impl PlanningPhaseRunner for UnimplementedPlanningPhaseRunner {
 /// Extract the JSON body delimited by `<plan>...</plan>` from raw planner
 /// stdout and parse the issue selection.
 pub fn parse_planning_output(stdout: &str) -> Result<ParsedPlanningOutput, String> {
-    let start = stdout
-        .find("<plan>")
-        .ok_or_else(|| "planning output missing <plan> opening tag".to_string())?
-        + "<plan>".len();
-    let end = stdout
-        .find("</plan>")
-        .ok_or_else(|| "planning output missing </plan> closing tag".to_string())?;
-    if end < start {
-        return Err("planning output has malformed <plan> tags".to_string());
-    }
-    let body = stdout[start..end].trim();
-    let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|error| format!("planning output is not valid JSON: {error}"))?;
+    let body = extract_planning_body(stdout)?;
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|error| {
+        format!(
+            "planning output is not valid JSON: {error}; body starts with: {}",
+            excerpt_for_error(body)
+        )
+    })?;
     let issues = value
         .get("issues")
         .and_then(serde_json::Value::as_array)
@@ -388,6 +417,35 @@ pub fn parse_planning_output(stdout: &str) -> Result<ParsedPlanningOutput, Strin
         is_empty: issues.is_empty(),
         body: value,
     })
+}
+
+fn extract_planning_body(stdout: &str) -> Result<&str, String> {
+    if let Some(end) = stdout.rfind("</plan>") {
+        let start = stdout[..end]
+            .rfind("<plan>")
+            .ok_or_else(|| {
+                format!(
+                    "planning output missing <plan> opening tag; output ends with: {}",
+                    excerpt_for_error(stdout)
+                )
+            })?
+            + "<plan>".len();
+        if end < start {
+            return Err("planning output has malformed <plan> tags".to_string());
+        }
+        return Ok(strip_json_code_fence(stdout[start..end].trim()));
+    }
+
+    let start = stdout
+        .rfind("<plan>")
+        .ok_or_else(|| {
+            format!(
+                "planning output missing <plan> opening tag; output ends with: {}",
+                excerpt_for_error(stdout)
+            )
+        })?
+        + "<plan>".len();
+    Ok(strip_json_code_fence(stdout[start..].trim()))
 }
 
 #[derive(Clone, Debug)]
@@ -1201,6 +1259,98 @@ impl MergePhaseRunner for PerSourceMergePhaseRunner {
     ) -> Result<String, PlanRunPhaseError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         pick_stdout_for_source(&self.map, self.fallback.as_deref(), prompt, &self.counters)
+    }
+}
+
+#[cfg(test)]
+mod parse_planning_output_tests {
+    use super::*;
+
+    #[test]
+    fn parses_json_inside_plan_tags() {
+        let parsed = parse_planning_output(r#"<plan>{"issues":[],"summary":"none"}</plan>"#)
+            .expect("planning output parses");
+
+        assert!(parsed.is_empty);
+        assert_eq!(parsed.body["summary"], "none");
+    }
+
+    #[test]
+    fn tolerates_json_code_fence_inside_plan_tags() {
+        let parsed = parse_planning_output(
+            r#"<plan>
+```json
+{"issues":[],"summary":"none"}
+```
+</plan>"#,
+        )
+        .expect("fenced planning output parses");
+
+        assert!(parsed.is_empty);
+        assert_eq!(parsed.body["summary"], "none");
+    }
+
+    #[test]
+    fn tolerates_generic_code_fence_inside_plan_tags() {
+        let parsed = parse_planning_output(
+            r#"<plan>
+```
+{"issues":[],"summary":"none"}
+```
+</plan>"#,
+        )
+        .expect("fenced planning output parses");
+
+        assert!(parsed.is_empty);
+        assert_eq!(parsed.body["summary"], "none");
+    }
+
+    #[test]
+    fn parses_last_plan_block_when_prompt_text_is_echoed() {
+        let stdout = r#"Output one JSON object wrapped in `<plan>` tags:
+<plan>
+{
+  "issues": [
+    {
+      "source_issue_id": "{{SOURCE_ISSUE_ID}}",
+      "title": "{{SOURCE_ISSUE_TITLE}}",
+      "branch": "{{ISSUE_BRANCH}}",
+      "selection_summary": "{{WHY_THIS_ISSUE_CAN_START_NOW}}"
+    }
+  ],
+  "summary": "{{PLAN_SUMMARY}}"
+}
+</plan>
+
+<plan>{"issues":[],"summary":"real answer"}</plan>"#;
+
+        let parsed = parse_planning_output(stdout).expect("last planning block parses");
+
+        assert!(parsed.is_empty);
+        assert_eq!(parsed.body["summary"], "real answer");
+    }
+
+    #[test]
+    fn parses_complete_json_after_plan_opening_without_closing_tag() {
+        let parsed = parse_planning_output(r#"<plan>{"issues":[],"summary":"no close"}"#)
+            .expect("planning output without closing tag parses when JSON is complete");
+
+        assert!(parsed.is_empty);
+        assert_eq!(parsed.body["summary"], "no close");
+    }
+
+    #[test]
+    fn invalid_json_error_includes_short_body_excerpt() {
+        let error = parse_planning_output("<plan>not json</plan>").unwrap_err();
+
+        assert!(error.contains("body starts with: not json"), "{error}");
+    }
+
+    #[test]
+    fn missing_plan_tag_error_includes_output_excerpt() {
+        let error = parse_planning_output("plain text").unwrap_err();
+
+        assert!(error.contains("output ends with: plain text"), "{error}");
     }
 }
 

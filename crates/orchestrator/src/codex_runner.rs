@@ -103,12 +103,7 @@ impl DockerCodexRunner {
             mounts: self.mounts(self.project_path.clone(), true),
             workdir: PathBuf::from("/work"),
             env: vec![("HOME".to_string(), "/tmp/codex-home".to_string())],
-            command: vec![
-                "codex".to_string(),
-                "exec".to_string(),
-                "--dangerously-bypass-approvals-and-sandbox".to_string(),
-                prompt.to_string(),
-            ],
+            command: codex_exec_command(prompt),
             memory,
             cpus,
             pids_limit: pids,
@@ -145,12 +140,7 @@ impl DockerCodexRunner {
             mounts: self.mounts(PathBuf::from(&context.assignment.worktree_path), false),
             workdir: PathBuf::from("/work"),
             env: vec![("HOME".to_string(), "/tmp/codex-home".to_string())],
-            command: vec![
-                "codex".to_string(),
-                "exec".to_string(),
-                "--dangerously-bypass-approvals-and-sandbox".to_string(),
-                prompt.to_string(),
-            ],
+            command: codex_exec_command(prompt),
             memory,
             cpus,
             pids_limit: pids,
@@ -182,6 +172,21 @@ impl DockerCodexRunner {
             },
         ]
     }
+}
+
+fn codex_exec_command(prompt: &str) -> Vec<String> {
+    vec![
+        "bash".to_string(),
+        "-lc".to_string(),
+        r#"set -euo pipefail
+last_message="$(mktemp /tmp/agentic-afk-last-message.XXXXXX)"
+transcript="$(mktemp /tmp/agentic-afk-codex-transcript.XXXXXX)"
+codex exec --dangerously-bypass-approvals-and-sandbox --output-last-message "$last_message" "$1" >"$transcript"
+cat "$last_message""#
+            .to_string(),
+        "agentic-afk-codex-exec".to_string(),
+        prompt.to_string(),
+    ]
 }
 
 impl PlanningPhaseRunner for DockerCodexRunner {
