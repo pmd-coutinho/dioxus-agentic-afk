@@ -45,12 +45,16 @@ The coarse implementation state of a **Source Issue** as reported by the **Contr
 _Avoid_: Local-only status, dashboard state, hidden progress
 
 **Assignment Status**:
-The fine-grained execution state of one **Issue Assignment** inside its **Plan Run**, distinct from **Lifecycle Status**. The values are Implementing, Implemented, Reviewed, Merging, Merged, and Blocked. **Assignment Status** is **Control Plane** detail and is not written back to the **Issue Source**; coarse **Lifecycle Status** is.
+The fine-grained execution state of one **Issue Assignment** inside its **Plan Run**, distinct from **Lifecycle Status**. The values are Implementing, Implemented, Reviewed, Merging, MergeStaged, Merged, and Blocked. **MergeStaged** sits between **Merging** and **Merged**: the **Merge Phase** has integrated locally and verified, but the **Integration Branch** push has not yet succeeded; `Merged` always implies a successful push. **Assignment Status** is **Control Plane** detail and is not written back to the **Issue Source**; coarse **Lifecycle Status** is.
 _Avoid_: Lifecycle Status, dashboard label, source-issue field
 
 **Issue Assignment**:
 One selected **Ready Issue** and its issue branch as it moves through implementation and the **Review Phase** within a **Plan Run**.
 _Avoid_: Shared issue work, automatic sub-agent split, pooled task
+
+**Block Reason**:
+The typed cause of a blocked **Issue Assignment**, paired with an optional freeform detail string for human context. Values are `ReviewRetryLimitExhausted`, `MergePhaseFailed`, `PushNonFastForward`, and `AbandonedStaged`. The typed kind drives **Control Plane** branching (badges, recovery affordances) while the detail carries cause-specific specifics like push stderr.
+_Avoid_: Freeform-only reason, dashboard-only label, agent narrative
 
 **Plan Run**:
 One manually started **Planning Phase** and the parallel issue work it selects through **Review Phase** and **Merge Phase**, all based on one refreshed **Integration Branch** baseline.
@@ -168,13 +172,15 @@ _Avoid_: afk, dioxus-agentic-afk
 - A failed **Merge Phase** blocks its **Plan Run**
 - A successful **Merge Phase** updates and pushes the **Project** **Integration Branch**
 - A successful **Merge Phase** completes the merged **Source Issues**
-- Finished **Plan Runs** clean up merged **Issue Assignment** worktrees and issue branches
+- Worktree and issue-branch cleanup for an **Issue Assignment** gates on its terminal **Assignment Status** (`merged` or `blocked`), not on **Plan Run** finish
+- A staged **Issue Assignment** in `merge_staged` keeps its worktree and issue branch until it reaches `merged` or `blocked`
 - Blocked **Issue Assignments** stay outside the **Merge Phase**
 - A **Plan Run** may finish after merging reviewed work while blocked **Issue Assignments** remain
-- Dormant blocked **Issue Assignments** do not consume **Max Parallel Tasks**
+- Dormant blocked and `merge_staged` **Issue Assignments** do not consume **Max Parallel Tasks**
 - Blocked issue work must be re-enabled by a human before a later **Plan Run** may select it again
 - Finished **Plan Runs** clean up blocked **Issue Assignment** worktrees and issue branches
-- Human re-enable clears the blocked **Lifecycle Status** without redefining **Ready Issue** readiness
+- Human re-enable is keyed to the **Source Issue**, not its dead **Issue Assignment** row; it clears local blocked state for the latest blocked **Issue Assignment** of that **Source Issue** if one exists, writes Lifecycle `Ready` back to the **Issue Source** (best-effort per ADR-0035 — failure proceeds locally and surfaces an **Activity** entry), and does not redefine **Ready Issue** readiness
+- A blocked **Issue Assignment** carries a typed **Block Reason** plus optional human-readable detail; **Block Reasons** include `ReviewRetryLimitExhausted`, `MergePhaseFailed`, `PushNonFastForward`, and `AbandonedStaged`
 - A **Plan Run** uses **Phase Prompts** for planning, implementation, review, and merge
 - A **Plan Run** preserves **Phase Outputs** after worktrees and issue branches are cleaned up
 - Finishing one **Plan Run** does not automatically start another **Planning Phase**
@@ -329,7 +335,8 @@ _Avoid_: afk, dioxus-agentic-afk
 - "blocked capacity" was resolved so dormant blocked **Issue Assignments** do not consume **Max Parallel Tasks**.
 - "blocked requeue" was rejected; blocked issue work requires human re-enable before later planning.
 - "blocked artifacts" were resolved as cleaned up with the finished **Plan Run**, not preserved branches or worktrees for recovery.
-- "re-enable" was resolved as clearing blocked **Lifecycle Status**, not redefining `ready-for-agent` readiness.
+- "re-enable" was resolved as a **Source Issue**-keyed action that clears local blocked state on the latest blocked **Issue Assignment** (if any) and writes Lifecycle `Ready` back to the **Issue Source** (best-effort per ADR-0035 — failure proceeds locally with an **Activity** entry) so the next **Plan Run** snapshot buckets the **Source Issue** as eligible; it does not redefine `ready-for-agent` readiness.
+- "block reason" was resolved as a typed **Block Reason** kind plus optional freeform detail, not a freeform-only string, to support per-cause dashboard affordances and observable taxonomy.
 - "merge" was resolved as the agent-owned **Merge Phase**.
 - "dependency resolved" was resolved as acceptance through the **Merge Phase**, not merely successful implementation or review.
 - "parallel work" was resolved as parallel **Issue Assignments** across different **Ready Issues**, not multiple issue tasks for one issue.
@@ -341,4 +348,4 @@ _Avoid_: afk, dioxus-agentic-afk
 - "blocker" was resolved as an explicit **Issue Dependency** recorded in the **Source Issue** description, not a GitHub blocked-by relationship or inferred file-level independence.
 - "next issue" was resolved by the **Planning Phase** among eligible **Ready Issues**, not by **Source Order** alone.
 - "parent issue" was resolved as grouping metadata, not execution order.
-- "push failure after local merge" is a known half-state: the **Merge Phase** records the per-**Issue Assignment** transition to `merged` before the **Integration Branch** push. If the push fails, **Assignment Status** remains `merged` locally while the **Source Issue** **Lifecycle Status** is never written to `Completed` and the **Plan Run** finishes `failed`. A future change may introduce an explicit pre-push staged state so `merged` always implies a successful push.
+- "push failure after local merge" is resolved by the `merge_staged` **Assignment Status**: the **Merge Phase** integrates locally and verifies, records `merge_staged`, then pushes; only on push success does it transition to `merged` and write Lifecycle `Completed`. If the push fails, the **Issue Assignment** stays `merge_staged` and the **Plan Run** finishes `failed`. Recovery is an operator-initiated **Retry Push** (push only — no re-verify, non-fast-forward auto-routes the **Issue Assignment** to `blocked`) or **Abandon Staged** (routes to `blocked`). `merge_staged` is dormant for **Max Parallel Tasks**. Worktree and issue-branch cleanup gate on the **Issue Assignment** reaching a terminal status (`merged` or `blocked`), not on the **Plan Run** finishing; a `failed` **Plan Run** stays `failed` even when a later retry advances the staged **Issue Assignment** to `merged`.
