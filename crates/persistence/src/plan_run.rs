@@ -498,7 +498,7 @@ pub async fn list_assignment_phase_outputs(
     db: &Db,
     assignment_id: &str,
 ) -> Result<Vec<PhaseOutputResponse>, PersistenceError> {
-    let rows = sqlx::query_as::<_, (String, String, String, String)>(
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, String)>(
         r#"
         SELECT phase, outcome, body_json, recorded_at
         FROM plan_run_phase_outputs
@@ -511,8 +511,7 @@ pub async fn list_assignment_phase_outputs(
     .await?;
     rows.into_iter()
         .map(|(phase, outcome, body_text, recorded_at)| {
-            let body_json: serde_json::Value = serde_json::from_str(&body_text)
-                .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
+            let body_json = parse_optional_body_json(body_text.as_deref())?;
             Ok(PhaseOutputResponse {
                 phase,
                 outcome,
@@ -522,6 +521,19 @@ pub async fn list_assignment_phase_outputs(
             })
         })
         .collect()
+}
+
+/// In-flight rows carry `body_json = NULL` (ADR-0042). Decode the column
+/// as `Null` JSON so the rest of the read path (Dashboard renderers,
+/// SSE deltas) does not need to special-case the missing-body shape.
+fn parse_optional_body_json(
+    body_text: Option<&str>,
+) -> Result<serde_json::Value, PersistenceError> {
+    let Some(text) = body_text else {
+        return Ok(serde_json::Value::Null);
+    };
+    serde_json::from_str(text)
+        .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))
 }
 
 /// Transition a Plan Run to a terminal state and stamp `finished_at`.
@@ -572,7 +584,7 @@ async fn list_phase_outputs(
     db: &Db,
     plan_run_id: &str,
 ) -> Result<Vec<PhaseOutputResponse>, PersistenceError> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, Option<String>)>(
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, String, Option<String>)>(
         r#"
         SELECT phase, outcome, body_json, recorded_at, assignment_id
         FROM plan_run_phase_outputs
@@ -585,8 +597,7 @@ async fn list_phase_outputs(
     .await?;
     rows.into_iter()
         .map(|(phase, outcome, body_text, recorded_at, assignment_id)| {
-            let body_json: serde_json::Value = serde_json::from_str(&body_text)
-                .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
+            let body_json = parse_optional_body_json(body_text.as_deref())?;
             Ok(PhaseOutputResponse {
                 phase,
                 outcome,
@@ -778,6 +789,28 @@ pub async fn list_in_flight_phase_rows(
             },
         )
         .collect())
+}
+
+/// Mark one specific phase output row as `interrupted` by row id. Used
+/// by the [`crate`]-internal BootRecoveryScanner caller path so per-row
+/// transitions (block-this-assignment, leave-this-merge-staged, etc.)
+/// can land row-by-row rather than via the batch
+/// [`mark_in_flight_rows_interrupted`] sweep.
+pub async fn mark_phase_row_interrupted(
+    db: &Db,
+    row_id: &str,
+) -> Result<(), PersistenceError> {
+    sqlx::query(
+        r#"
+        UPDATE plan_run_phase_outputs
+        SET outcome = 'interrupted'
+        WHERE id = ? AND outcome = 'in_flight'
+        "#,
+    )
+    .bind(row_id)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Flip every `in_flight` row to `interrupted` and return the affected

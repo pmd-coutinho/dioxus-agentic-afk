@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 
 pub mod coordinator;
 pub mod implementation_phase;
+pub mod boot_recovery_scanner;
 pub mod in_flight_phase_tracker;
 pub mod shutdown_coordinator;
 pub mod merge_phase;

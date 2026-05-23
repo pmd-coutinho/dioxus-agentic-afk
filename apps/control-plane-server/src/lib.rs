@@ -483,6 +483,17 @@ pub async fn serve(config: ControlPlaneConfig) -> anyhow::Result<()> {
     let db = persistence::connect(&config.database_url).await?;
     persistence::migrate(&db).await?;
 
+    // ADR-0042 S2: synchronous boot recovery between migrations and the
+    // HTTP bind. Reconciles any in_flight/interrupted phase rows left
+    // behind by a prior orchestrator process (SIGTERM, crash, OOM) so
+    // dashboards reconnect into a clean state instead of staring at
+    // assignments stuck at `implementing` with no live coordinator.
+    let _recovery = agentic_afk_orchestrator::boot_recovery_scanner::run(
+        &db,
+        &agentic_afk_orchestrator::boot_recovery_scanner::NoopEventPublisher,
+    )
+    .await?;
+
     let listener = tokio::net::TcpListener::bind(config.bind_address).await?;
     let local_addr = listener.local_addr()?;
     eprintln!("agentic-afk Local Control Plane listening on http://{local_addr}");
