@@ -461,6 +461,10 @@ fn router_with_full_deps(
             "/api/projects/{id}/assignments/{assignment_id}/abandon-staged",
             post(abandon_staged_assignment),
         )
+        .route(
+            "/api/projects/{id}/source-issues/{source_id}/prd",
+            post(mark_prd).delete(unmark_prd),
+        )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
         .with_state(state)
@@ -1814,6 +1818,54 @@ async fn abandon_staged_assignment(
         }
         Err(error) => coordinator_error_to_response(error),
     }
+}
+
+/// Mark a Source Issue as a Parent-Issue-style PRD so it is hidden from every
+/// active Planning Snapshot bucket. The marking is local to this Project; it
+/// is not written back to the upstream Issue Source.
+async fn mark_prd(
+    State(state): State<Arc<AppState>>,
+    Path((id, source_id)): Path<(String, String)>,
+) -> Response {
+    if let Err(error) = persistence::get_project(&state.db, &id).await {
+        return persistence_error_to_response(error);
+    }
+    if let Err(error) = persistence::mark_prd(&state.db, &id, &source_id).await {
+        return persistence_error_to_response(error);
+    }
+    publish_planning_snapshot_after_prd_change(&state, &id).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Remove a PRD marking so the Source Issue is once again bucketed normally on
+/// the Planning Snapshot.
+async fn unmark_prd(
+    State(state): State<Arc<AppState>>,
+    Path((id, source_id)): Path<(String, String)>,
+) -> Response {
+    if let Err(error) = persistence::get_project(&state.db, &id).await {
+        return persistence_error_to_response(error);
+    }
+    if let Err(error) = persistence::unmark_prd(&state.db, &id, &source_id).await {
+        return persistence_error_to_response(error);
+    }
+    publish_planning_snapshot_after_prd_change(&state, &id).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Republish the Project's Planning Snapshot after a PRD marking change so
+/// live Dashboards re-bucket without a manual refresh. Missing snapshot
+/// (Project without an enabled Issue Source) is a no-op.
+async fn publish_planning_snapshot_after_prd_change(state: &Arc<AppState>, project_id: &str) {
+    let snapshot = persistence::get_planning_snapshot(&state.db, project_id)
+        .await
+        .ok()
+        .map(agentic_afk_planning_snapshot::normalize);
+    crate::control_plane_events::publish_planning_snapshot_changed(
+        &state.event_bus,
+        project_id,
+        snapshot,
+    );
 }
 
 async fn list_plan_runs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {

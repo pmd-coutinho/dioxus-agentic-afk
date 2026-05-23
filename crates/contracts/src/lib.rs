@@ -106,6 +106,13 @@ pub struct PlanningSnapshotResponse {
     pub active: Vec<SourceIssueSnapshot>,
     pub completed: Vec<SourceIssueSnapshot>,
     pub eligible: Vec<SourceIssueSnapshot>,
+    /// Source Issues an operator has flagged locally as Parent-Issue-style
+    /// PRDs. PRD-marked rows are excluded from every active bucket above so
+    /// no agent can pick them for direct implementation. Carried on the
+    /// snapshot so the Dashboard can render the "N PRDs hidden" unmark
+    /// affordance without a separate fetch. See CONTEXT.md → Parent Issue.
+    #[serde(default)]
+    pub prd_overrides: Vec<SourceIssueSnapshot>,
 }
 
 /// Normalized scheduling metadata plus preserved raw Source Issue text.

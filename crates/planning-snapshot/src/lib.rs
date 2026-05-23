@@ -5,12 +5,16 @@
 use agentic_afk_contracts::{IssueSource, PlanningSnapshotResponse, SourceIssueSnapshot};
 
 /// Raw inputs for [`normalize`] — the unbucketed **Source Issue** snapshot for
-/// one **Project** plus its **Issue Source** sync metadata.
+/// one **Project** plus its **Issue Source** sync metadata. `prd_source_ids`
+/// is the set of Source Issue ids the operator has flagged locally as
+/// Parent-Issue-style PRDs; they are removed from every active bucket and
+/// returned in `prd_overrides`.
 pub struct RawPlanningSnapshot {
     pub source: IssueSource,
     pub last_successful_sync_at: Option<String>,
     pub last_failure: Option<String>,
     pub issues: Vec<SourceIssueSnapshot>,
+    pub prd_source_ids: std::collections::HashSet<String>,
 }
 
 /// Bucket **Source Issues** into the **Planning Phase** view defined by ADR-0036.
@@ -29,8 +33,13 @@ pub fn normalize(raw: RawPlanningSnapshot) -> PlanningSnapshotResponse {
         last_successful_sync_at,
         last_failure,
         issues,
+        prd_source_ids,
     } = raw;
 
+    // Ready-id set computed before stripping PRDs so a Ready Issue whose dep
+    // is a PRD-marked Ready Issue still routes to `dependency_blocked` if the
+    // operator un-marks the PRD later. The dep set tracks logical readiness,
+    // not bucket placement.
     let ready_ids = issues
         .iter()
         .filter(|issue| issue.readiness == "ready")
@@ -42,8 +51,13 @@ pub fn normalize(raw: RawPlanningSnapshot) -> PlanningSnapshotResponse {
     let mut active = Vec::new();
     let mut completed = Vec::new();
     let mut eligible = Vec::new();
+    let mut prd_overrides = Vec::new();
 
     for issue in issues {
+        if prd_source_ids.contains(&issue.source_id) {
+            prd_overrides.push(issue);
+            continue;
+        }
         if issue.readiness != "ready" {
             non_ready.push(issue);
         } else if issue.lifecycle_status == "completed" {
@@ -73,6 +87,7 @@ pub fn normalize(raw: RawPlanningSnapshot) -> PlanningSnapshotResponse {
         active,
         completed,
         eligible,
+        prd_overrides,
     }
 }
 
@@ -107,7 +122,17 @@ mod tests {
             last_successful_sync_at: None,
             last_failure: None,
             issues,
+            prd_source_ids: std::collections::HashSet::new(),
         }
+    }
+
+    fn raw_with_prds(
+        issues: Vec<SourceIssueSnapshot>,
+        prd_ids: &[&str],
+    ) -> RawPlanningSnapshot {
+        let mut raw = raw(issues);
+        raw.prd_source_ids = prd_ids.iter().map(|id| id.to_string()).collect();
+        raw
     }
 
     fn ids(issues: &[SourceIssueSnapshot]) -> Vec<&str> {
@@ -196,6 +221,59 @@ mod tests {
     }
 
     #[test]
+    fn prd_marked_ready_issue_lands_in_overrides_not_eligible() {
+        let out = normalize(raw_with_prds(
+            vec![
+                issue("prd", "ready", "ready", &[]),
+                issue("1", "ready", "ready", &[]),
+            ],
+            &["prd"],
+        ));
+        assert_eq!(ids(&out.prd_overrides), vec!["prd"]);
+        assert_eq!(ids(&out.eligible), vec!["1"]);
+    }
+
+    #[test]
+    fn prd_marked_active_issue_lands_in_overrides_not_active() {
+        let out = normalize(raw_with_prds(
+            vec![issue("prd", "ready", "running", &[])],
+            &["prd"],
+        ));
+        assert_eq!(ids(&out.prd_overrides), vec!["prd"]);
+        assert!(out.active.is_empty());
+    }
+
+    #[test]
+    fn prd_marked_non_ready_issue_lands_in_overrides_not_non_ready() {
+        let out = normalize(raw_with_prds(
+            vec![issue("prd", "open", "ready", &[])],
+            &["prd"],
+        ));
+        assert_eq!(ids(&out.prd_overrides), vec!["prd"]);
+        assert!(out.non_ready.is_empty());
+    }
+
+    #[test]
+    fn prd_marked_blocked_lifecycle_lands_in_overrides_not_active() {
+        let out = normalize(raw_with_prds(
+            vec![issue("prd", "ready", "blocked", &[])],
+            &["prd"],
+        ));
+        assert_eq!(ids(&out.prd_overrides), vec!["prd"]);
+        assert!(out.active.is_empty());
+    }
+
+    #[test]
+    fn unrelated_prd_id_does_not_strip_anything() {
+        let out = normalize(raw_with_prds(
+            vec![issue("1", "ready", "ready", &[])],
+            &["does-not-exist"],
+        ));
+        assert_eq!(ids(&out.eligible), vec!["1"]);
+        assert!(out.prd_overrides.is_empty());
+    }
+
+    #[test]
     fn preserves_source_metadata() {
         let r = RawPlanningSnapshot {
             source: IssueSource {
@@ -205,6 +283,7 @@ mod tests {
             last_successful_sync_at: Some("2026-01-01T00:00:00Z".to_string()),
             last_failure: Some("boom".to_string()),
             issues: vec![],
+            prd_source_ids: std::collections::HashSet::new(),
         };
         let out = normalize(r);
         assert_eq!(out.source.kind, "github");

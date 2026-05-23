@@ -188,6 +188,11 @@ pub enum MutationKey {
     /// to `blocked` with `BlockReason::AbandonedStaged` without any
     /// push.
     AbandonStagedAssignment(ProjectId, IssueAssignmentId),
+    /// Operator-initiated mark of a Source Issue as a Parent-Issue-style PRD
+    /// so it disappears from every active Planning Snapshot bucket.
+    MarkPrd(ProjectId, SourceIssueId),
+    /// Inverse of [`MutationKey::MarkPrd`].
+    UnmarkPrd(ProjectId, SourceIssueId),
 }
 
 /// Identifier for an Issue Assignment (a single attempt to land a Source
@@ -491,6 +496,7 @@ mod tests {
             active: vec![],
             completed: vec![],
             eligible: vec![],
+            prd_overrides: vec![],
         }
     }
 

@@ -121,7 +121,7 @@ The ordering of **Source Issues** as provided by the **Issue Source** for displa
 _Avoid_: Planner priority, batch selection, random queue
 
 **Parent Issue**:
-An issue that groups related **Ready Issues** into a larger body of work without itself defining the execution order.
+An issue that groups related **Ready Issues** into a larger body of work without itself defining the execution order. The operator may locally flag any **Source Issue** as Parent-Issue-style (a "PRD") so the **Control Plane** hides it from every active **Planning Snapshot** bucket; that marking does not write back to the **Issue Source**.
 _Avoid_: Epic, milestone, project
 
 **Activity**:

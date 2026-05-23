@@ -1784,27 +1784,36 @@ fn PlanningSnapshot(
                             project_id: project_id.clone(),
                             title: "Eligible Ready Issues".to_string(),
                             issues: snapshot.eligible,
+                            allow_mark_prd: true,
                         }
                         PlanningGroup {
                             project_id: project_id.clone(),
                             title: "Active Issues".to_string(),
                             issues: snapshot.active,
+                            allow_mark_prd: true,
                         }
                         PlanningGroup {
                             project_id: project_id.clone(),
                             title: "Blocked Ready Issues".to_string(),
                             issues: snapshot.dependency_blocked,
+                            allow_mark_prd: true,
                         }
                         PlanningGroup {
                             project_id: project_id.clone(),
                             title: "Completed Issues".to_string(),
                             issues: snapshot.completed,
+                            allow_mark_prd: false,
                         }
                         PlanningGroup {
-                            project_id,
+                            project_id: project_id.clone(),
                             title: "Non-ready Source Issues".to_string(),
                             issues: snapshot.non_ready,
+                            allow_mark_prd: true,
                         }
+                    }
+                    PrdOverridesFooter {
+                        project_id,
+                        overrides: snapshot.prd_overrides,
                     }
                 }
             }
@@ -1813,7 +1822,12 @@ fn PlanningSnapshot(
 }
 
 #[component]
-fn PlanningGroup(project_id: String, title: String, issues: Vec<SourceIssueSnapshot>) -> Element {
+fn PlanningGroup(
+    project_id: String,
+    title: String,
+    issues: Vec<SourceIssueSnapshot>,
+    allow_mark_prd: bool,
+) -> Element {
     rsx! {
         section { class: "min-w-0 border border-stroke bg-panel/40 p-4",
             h3 { class: "font-display text-[11px] uppercase tracking-[0.18em] text-ink-2", "{title}" }
@@ -1825,6 +1839,7 @@ fn PlanningGroup(project_id: String, title: String, issues: Vec<SourceIssueSnaps
                         PlanningIssue {
                             project_id: project_id.clone(),
                             issue,
+                            allow_mark_prd,
                         }
                     }
                 }
@@ -1834,8 +1849,11 @@ fn PlanningGroup(project_id: String, title: String, issues: Vec<SourceIssueSnaps
 }
 
 #[component]
-fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot) -> Element {
-    let _ = project_id;
+fn PlanningIssue(
+    project_id: String,
+    issue: SourceIssueSnapshot,
+    allow_mark_prd: bool,
+) -> Element {
     let dependencies = if issue.issue_dependencies.is_empty() {
         "No dependencies".to_string()
     } else {
@@ -1845,6 +1863,7 @@ fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot) -> Element {
         .parent_issue
         .clone()
         .unwrap_or_else(|| "No parent".to_string());
+    let source_id = issue.source_id.clone();
 
     rsx! {
         li { class: "grid gap-1 border-b border-stroke pb-3 text-[12px] text-ink-2 last:border-0 last:pb-0",
@@ -1855,6 +1874,135 @@ fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot) -> Element {
             p { class: "break-words font-mono text-[11px] text-ink-dim", "{issue.source_id}" }
             p { class: "font-mono text-[11px] text-ink-2", "Parent {parent}" }
             p { class: "font-mono text-[11px] text-ink-2", "{dependencies}" }
+            if allow_mark_prd {
+                MarkPrdButton { project_id, source_id }
+            }
+        }
+    }
+}
+
+#[component]
+fn MarkPrdButton(project_id: String, source_id: String) -> Element {
+    let store = use_context::<ProjectStore>();
+    let key = MutationKey::MarkPrd(
+        ProjectId(project_id.clone()),
+        SourceIssueId(source_id.clone()),
+    );
+    rsx! {
+        ActionButton {
+            mutation_key: key.clone(),
+            variant: ButtonVariant::Default,
+            testid: format!("mark-prd-{source_id}"),
+            error_marker: "mark-prd".to_string(),
+            on_press: {
+                let key = key.clone();
+                let project_id = project_id.clone();
+                let source_id = source_id.clone();
+                move |_| {
+                    let key = key.clone();
+                    let project_id = project_id.clone();
+                    let source_id = source_id.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let result = store
+                            .mutate(key, mark_prd_api(project_id, source_id))
+                            .await;
+                        if result.is_ok() {
+                            store.push_success(
+                                "Marked as PRD",
+                                "Hidden from Planning. Unmark from the PRDs footer.",
+                            );
+                        }
+                    });
+                }
+            },
+            "Mark as PRD"
+        }
+    }
+}
+
+#[component]
+fn PrdOverridesFooter(project_id: String, overrides: Vec<SourceIssueSnapshot>) -> Element {
+    let expanded = use_signal(|| false);
+    if overrides.is_empty() {
+        return rsx! {};
+    }
+    let count = overrides.len();
+    rsx! {
+        section { class: "mt-2 border border-stroke bg-panel/20 p-3",
+            "data-testid": "prd-overrides-footer",
+            button {
+                class: "font-display text-[11px] uppercase tracking-[0.18em] text-ink-2 hover:text-cyan",
+                "data-testid": "prd-overrides-toggle",
+                onclick: {
+                    let mut expanded = expanded;
+                    move |_| {
+                        let next = !*expanded.read();
+                        expanded.set(next);
+                    }
+                },
+                if *expanded.read() {
+                    "{count} PRDs hidden \u{00B7} Hide"
+                } else {
+                    "{count} PRDs hidden \u{00B7} Show"
+                }
+            }
+            if *expanded.read() {
+                ul { class: "mt-3 grid gap-2",
+                    for issue in overrides {
+                        PrdOverrideRow {
+                            project_id: project_id.clone(),
+                            issue,
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PrdOverrideRow(project_id: String, issue: SourceIssueSnapshot) -> Element {
+    let source_id = issue.source_id.clone();
+    rsx! {
+        li { class: "flex items-center justify-between gap-3 border-b border-stroke/40 pb-2 text-[12px] text-ink-2 last:border-0 last:pb-0",
+            div { class: "min-w-0",
+                p { class: "min-w-0 break-words font-display text-[13px] text-ink", "{issue.title}" }
+                p { class: "break-words font-mono text-[11px] text-ink-dim", "{issue.source_id}" }
+            }
+            UnmarkPrdButton { project_id, source_id }
+        }
+    }
+}
+
+#[component]
+fn UnmarkPrdButton(project_id: String, source_id: String) -> Element {
+    let store = use_context::<ProjectStore>();
+    let key = MutationKey::UnmarkPrd(
+        ProjectId(project_id.clone()),
+        SourceIssueId(source_id.clone()),
+    );
+    rsx! {
+        ActionButton {
+            mutation_key: key.clone(),
+            variant: ButtonVariant::Default,
+            testid: format!("unmark-prd-{source_id}"),
+            error_marker: "unmark-prd".to_string(),
+            on_press: {
+                let key = key.clone();
+                let project_id = project_id.clone();
+                let source_id = source_id.clone();
+                move |_| {
+                    let key = key.clone();
+                    let project_id = project_id.clone();
+                    let source_id = source_id.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let _ = store
+                            .mutate(key, unmark_prd_api(project_id, source_id))
+                            .await;
+                    });
+                }
+            },
+            "Unmark"
         }
     }
 }
@@ -1986,6 +2134,42 @@ async fn set_execution_config_api(
         .json()
         .await
         .map_err(|error| project_store::MutationFailure::network(error.to_string()))
+}
+
+async fn mark_prd_api(
+    project_id: String,
+    source_id: String,
+) -> Result<(), project_store::MutationFailure> {
+    let response = gloo_net::http::Request::post(&format!(
+        "/api/projects/{project_id}/source-issues/{source_id}/prd"
+    ))
+    .send()
+    .await
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    Ok(())
+}
+
+async fn unmark_prd_api(
+    project_id: String,
+    source_id: String,
+) -> Result<(), project_store::MutationFailure> {
+    let response = gloo_net::http::Request::delete(&format!(
+        "/api/projects/{project_id}/source-issues/{source_id}/prd"
+    ))
+    .send()
+    .await
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    Ok(())
 }
 
 async fn re_enable_source_issue_api(

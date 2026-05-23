@@ -18,11 +18,13 @@ use uuid::Uuid;
 
 mod activity;
 mod plan_run;
+mod prd_overrides;
 
 pub use activity::{
     PROJECT_ACTIVITY_DETAIL_MAX_BYTES, ProjectActivityEntry, list_project_activity,
     record_project_activity,
 };
+pub use prd_overrides::{PrdOverride, list_prd_overrides, mark_prd, unmark_prd};
 pub use plan_run::{
     create_plan_run, finish_plan_run, get_active_plan_run, get_plan_run,
     get_project_execution_config, list_assignment_phase_outputs, list_recent_plan_runs,
@@ -480,11 +482,18 @@ pub async fn get_planning_snapshot(
         )
         .collect::<Vec<_>>();
 
+    let prd_source_ids = list_prd_overrides(db, project_id)
+        .await?
+        .into_iter()
+        .map(|o| o.source_id)
+        .collect::<std::collections::HashSet<_>>();
+
     Ok(RawPlanningSnapshot {
         source: IssueSource { kind, locator },
         last_successful_sync_at,
         last_failure,
         issues,
+        prd_source_ids,
     })
 }
 
