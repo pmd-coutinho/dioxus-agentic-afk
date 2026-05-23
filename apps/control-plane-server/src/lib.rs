@@ -488,9 +488,15 @@ pub async fn serve(config: ControlPlaneConfig) -> anyhow::Result<()> {
     // behind by a prior orchestrator process (SIGTERM, crash, OOM) so
     // dashboards reconnect into a clean state instead of staring at
     // assignments stuck at `implementing` with no live coordinator.
+    //
+    // ADR-0042 S3: route the scanner through the same event bus the
+    // HTTP router will later wire so a dashboard tab open during the
+    // recovery window picks up the AssignmentStatusChanged + Activity
+    // deltas without waiting for a snapshot refresh.
+    let bus = event_bus::EventBus::new();
     let _recovery = agentic_afk_orchestrator::boot_recovery_scanner::run(
         &db,
-        &agentic_afk_orchestrator::boot_recovery_scanner::NoopEventPublisher,
+        &BootRecoveryEventBusPublisher::new(bus.clone(), db.clone()),
     )
     .await?;
 
@@ -503,7 +509,7 @@ pub async fn serve(config: ControlPlaneConfig) -> anyhow::Result<()> {
     // sleeps the configured grace window before axum tears down the
     // listener — leaving a clean recovery surface for the next boot.
     let shutdown_db = db.clone();
-    axum::serve(listener, router(config, db))
+    axum::serve(listener, router_with_bus(config, db, bus))
         .with_graceful_shutdown(async move {
             let report = agentic_afk_orchestrator::shutdown_coordinator::await_shutdown(
                 shutdown_db,
@@ -2301,6 +2307,95 @@ impl agentic_afk_orchestrator::EventPublisher for EventBusPublisher {
                 );
             }
         });
+    }
+}
+
+/// Multi-Project `EventPublisher` used by the BootRecoveryScanner
+/// (ADR-0042 S3). Unlike [`EventBusPublisher`] which is wired per-Plan-
+/// Run with a fixed Project id, the boot scanner reconciles rows across
+/// every Project simultaneously and so must route deltas back to the
+/// Project id supplied at each method call.
+#[derive(Clone)]
+pub struct BootRecoveryEventBusPublisher {
+    bus: event_bus::EventBus,
+    db: Db,
+}
+
+impl BootRecoveryEventBusPublisher {
+    pub fn new(bus: event_bus::EventBus, db: Db) -> Self {
+        Self { bus, db }
+    }
+}
+
+impl agentic_afk_orchestrator::EventPublisher for BootRecoveryEventBusPublisher {
+    fn plan_run_started(
+        &self,
+        _project_id: &str,
+        _plan_run: agentic_afk_contracts::PlanRunResponse,
+    ) {
+    }
+    fn plan_run_completed(
+        &self,
+        project_id: &str,
+        plan_run: agentic_afk_contracts::PlanRunResponse,
+    ) {
+        crate::control_plane_events::publish_plan_run_completed(
+            &self.bus,
+            project_id,
+            plan_run,
+        );
+    }
+    fn plan_run_phase_completed(
+        &self,
+        _project_id: &str,
+        _plan_run_id: &str,
+        _phase_output: agentic_afk_contracts::PhaseOutputResponse,
+    ) {
+    }
+    fn assignment_created(
+        &self,
+        _project_id: &str,
+        _assignment: agentic_afk_contracts::IssueAssignmentResponse,
+    ) {
+    }
+    fn assignment_status_changed(
+        &self,
+        project_id: &str,
+        assignment: agentic_afk_contracts::IssueAssignmentResponse,
+    ) {
+        crate::control_plane_events::publish_assignment_status_changed(
+            &self.bus,
+            project_id,
+            assignment,
+        );
+    }
+    fn record_activity(
+        &self,
+        project_id: &str,
+        assignment_id: Option<&str>,
+        kind: &str,
+        detail: Option<&str>,
+    ) {
+        // The scanner already persisted the Activity row directly
+        // through the persistence helper; here we just publish the bus
+        // delta so a long-lived dashboard tab connected during the
+        // recovery window picks it up live.
+        let entry = agentic_afk_contracts::ProjectActivityEntryResponse {
+            id: String::new(),
+            project_id: project_id.to_string(),
+            assignment_id: assignment_id.map(str::to_string),
+            kind: kind.to_string(),
+            detail: detail.map(str::to_string),
+            recorded_at: String::new(),
+        };
+        self.bus.publish(
+            &agentic_afk_contracts::ProjectId(project_id.to_string()),
+            agentic_afk_contracts::ProjectEvent::Activity(entry),
+        );
+        // Keep db wired for symmetry with EventBusPublisher in case the
+        // delta loses the race with the dashboard reconnect; the durable
+        // row is already in place so no follow-up write is needed.
+        let _ = &self.db;
     }
 }
 

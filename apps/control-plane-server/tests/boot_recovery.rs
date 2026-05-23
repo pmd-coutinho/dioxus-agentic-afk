@@ -10,10 +10,13 @@
 //!      assignment under it is now terminal.
 
 use agentic_afk_contracts::{BlockReason, CreateProjectRequest, IssueSource, SourceIssueSnapshot};
+use agentic_afk_contracts::{ProjectEvent, ProjectId};
+use agentic_afk_control_plane_server::{BootRecoveryEventBusPublisher, event_bus::EventBus};
 use agentic_afk_orchestrator::boot_recovery_scanner::{
     self, ACTIVITY_KIND_ASSIGNMENT_BLOCKED_ON_RESTART, NoopEventPublisher,
     PLAN_RUN_TERMINAL_FINISHED,
 };
+use futures_util::StreamExt;
 use agentic_afk_persistence::{
     self as persistence, connect_in_memory, create_plan_run, create_plan_run_assignment,
     create_project, insert_in_flight_phase_output, list_project_activity, migrate,
@@ -119,4 +122,100 @@ async fn killed_mid_implementation_recovers_to_blocked_finished_with_activity() 
         .filter(|a| a.kind == ACTIVITY_KIND_ASSIGNMENT_BLOCKED_ON_RESTART)
         .count();
     assert_eq!(matching_after, 1, "no duplicate Activity on re-scan");
+}
+
+#[tokio::test]
+async fn boot_recovery_publisher_emits_sse_deltas_for_dashboard_during_window() {
+    let db = connect_in_memory().await.unwrap();
+    migrate(&db).await.unwrap();
+    let project = create_project(
+        &db,
+        &CreateProjectRequest {
+            path: "/tmp".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let plan_run = create_plan_run(&db, &project.id.0, "main", "baseline-sha")
+        .await
+        .unwrap();
+    let assignment = create_plan_run_assignment(
+        &db,
+        &plan_run.id,
+        &project.id.0,
+        &IssueSource {
+            kind: "local_markdown".into(),
+            locator: "docs/".into(),
+        },
+        &SourceIssueSnapshot {
+            source_id: "issue-77".into(),
+            title: "Killed during review".into(),
+            readiness: "ready".into(),
+            lifecycle_status: "ready".into(),
+            parent_issue: None,
+            issue_dependencies: vec![],
+            source_order: 1,
+            raw_text: "raw".into(),
+        },
+        "agent/issue-77",
+        "selected",
+    )
+    .await
+    .unwrap();
+    set_assignment_status(&db, &assignment.id, "implemented", None)
+        .await
+        .unwrap();
+    let _ = insert_in_flight_phase_output(
+        &db,
+        &plan_run.id,
+        Some(&assignment.id),
+        "review",
+    )
+    .await
+    .unwrap();
+
+    let bus = EventBus::new();
+    // Subscribe BEFORE the scanner publishes so the broadcast channel
+    // catches the deltas live (mirrors a dashboard tab open across the
+    // recovery window).
+    let stream = bus.subscribe(&ProjectId(project.id.0.clone()), None);
+    tokio::pin!(stream);
+
+    let publisher = BootRecoveryEventBusPublisher::new(bus.clone(), db.clone());
+    boot_recovery_scanner::run(&db, &publisher).await.unwrap();
+
+    let mut saw_status_change = false;
+    let mut saw_activity = false;
+    let mut saw_plan_run_completed = false;
+    while let Some(seq) = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        stream.next(),
+    )
+    .await
+    .ok()
+    .flatten()
+    {
+        match seq.event {
+            ProjectEvent::AssignmentStatusChanged(a) => {
+                assert_eq!(a.id, assignment.id);
+                assert_eq!(
+                    a.block_reason.as_ref().map(|r| r.kind.as_wire()),
+                    Some("orchestrator_restart"),
+                );
+                saw_status_change = true;
+            }
+            ProjectEvent::Activity(entry) => {
+                if entry.kind == ACTIVITY_KIND_ASSIGNMENT_BLOCKED_ON_RESTART {
+                    saw_activity = true;
+                }
+            }
+            ProjectEvent::PlanRunCompleted(_) => {
+                saw_plan_run_completed = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_status_change, "AssignmentStatusChanged delta with OrchestratorRestart kind expected");
+    assert!(saw_activity, "AssignmentBlockedOnRestart Activity delta expected");
+    assert!(saw_plan_run_completed, "PlanRunCompleted (finished) delta expected");
 }
