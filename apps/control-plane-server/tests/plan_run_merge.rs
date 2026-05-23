@@ -587,23 +587,20 @@ async fn parse_merge_output_rejects_unknown_outcomes() {
 }
 
 #[tokio::test]
-async fn integration_push_failure_does_not_complete_source_issue() {
-    // PRD #35 / gap 4: Source Issue completion write-back happens only
-    // AFTER the verified Integration Branch push succeeds. If the push
-    // fails, the merged assignment remains in `merged` state locally but
-    // the upstream Issue Source MUST NOT receive a `completed` lifecycle
-    // write — the developer has not actually received the work.
-    //
-    // We exercise the push-failure branch with a failing pusher fake and
-    // assert two things: (a) no `completed` lifecycle row ever lands on
-    // the local-markdown Issue Source's frontmatter (write_assignment_lifecycle
-    // is a no-op for unknown source kinds, so we look at the surrounding
-    // Plan Run shape instead); (b) the Plan Run finishes as `failed` and
-    // the failing-push Phase Output is recorded.
+async fn integration_push_failure_stages_assignment_and_fails_plan_run() {
+    // Issue #51 / ADR-0037: the Merge Phase transitions a verified
+    // assignment to `merge_staged` BEFORE the Integration Branch push.
+    // When the push fails, the assignment stays at `merge_staged`
+    // (dormant, awaiting operator recovery), the Plan Run finishes
+    // `failed`, the worktree is NOT cleaned up (cleanup gates on terminal
+    // status), and the Source Issue Lifecycle is NOT advanced to
+    // `Completed`. The HTTP response is the final Plan Run shape (201
+    // CREATED), mirroring the blocked-merge path.
     let db = persistence::connect_in_memory().await.unwrap();
     persistence::migrate(&db).await.unwrap();
     let pusher = Arc::new(FakeIntegrationBranchPusher::failing("upstream rejected"));
     let cleaner = Arc::new(FakeAssignmentWorktreeCleaner::new());
+    let lifecycle = Arc::new(FakeLifecycleWriter::new());
     let router = router_with_plan_run_merge_deps(
         config(),
         db.clone(),
@@ -614,7 +611,7 @@ async fn integration_push_failure_does_not_complete_source_issue() {
             r#"<plan>{"issues":[{"source_issue_id":"42","title":"t","branch":"agent/issue-42","selection_summary":"ok"}],"summary":"s"}</plan>"#,
         )),
         Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir())),
-        Arc::new(FakeLifecycleWriter::new()),
+        lifecycle.clone(),
         Arc::new(FakeImplementationPhaseRunner::with_stdout(IMPL_OK)),
         Arc::new(FakeReviewPhaseRunner::with_stdout(REVIEW_APPROVED)),
         Arc::new(FakeMergePhaseRunner::with_stdout(MERGE_OK)),
@@ -700,8 +697,8 @@ async fn integration_push_failure_does_not_complete_source_issue() {
     let resp = start(&router, &pid).await;
     assert_eq!(
         resp.status(),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "{}",
+        StatusCode::CREATED,
+        "push failure now finishes the Plan Run gracefully: {}",
         read_text(resp).await
     );
 
@@ -714,10 +711,27 @@ async fn integration_push_failure_does_not_complete_source_issue() {
     let run = &runs[0];
     assert_eq!(run.state, "failed", "push failure fails the Plan Run");
 
+    // ADR-0037: the assignment stays at `merge_staged` after a push
+    // failure (dormant for Max Parallel Tasks, awaiting Retry Push /
+    // Abandon Staged).
+    let assignment = &run.assignments[0];
+    assert_eq!(
+        assignment.status, "merge_staged",
+        "push failure must leave the assignment at merge_staged"
+    );
+
+    // Cleanup is gated on terminal Assignment Status (`merged` or
+    // `blocked`). A staged assignment retains its worktree and issue
+    // branch for operator recovery.
+    assert_eq!(
+        cleaner.call_count(),
+        0,
+        "staged assignment must keep its worktree until it reaches a terminal status"
+    );
+
     // The merge Phase Output for this assignment captures the
     // integration-push failure so the developer can see WHY the run
     // failed even after the merged set was locally integrated.
-    let assignment = &run.assignments[0];
     let merge_outputs: Vec<_> = assignment
         .phase_outputs
         .iter()
@@ -727,6 +741,198 @@ async fn integration_push_failure_does_not_complete_source_issue() {
         merge_outputs.iter().any(|p| p.outcome == "failed"),
         "push failure must surface as a failed merge Phase Output: {:?}",
         merge_outputs
+    );
+
+    // Source Issue Lifecycle MUST NOT advance to `Completed` because the
+    // upstream never received the integrated tree.
+    let completed_writes: Vec<_> = lifecycle
+        .calls()
+        .into_iter()
+        .filter(|(_, status)| {
+            matches!(status, agentic_afk_orchestrator::LifecycleStatus::Completed)
+        })
+        .collect();
+    assert!(
+        completed_writes.is_empty(),
+        "push failure must not write Lifecycle Completed: {completed_writes:?}"
+    );
+
+    drop(dir);
+}
+
+#[tokio::test]
+async fn happy_path_push_passes_assignment_through_merge_staged_to_merged() {
+    // Issue #51 / ADR-0037: on the push-success path the assignment
+    // passes through `merge_staged` momentarily and ends at `merged`, the
+    // Plan Run finishes `succeeded`, and the Source Issue Lifecycle is
+    // written back as `Completed`. The transient `merge_staged`
+    // transition is published via the SSE delta seam.
+    use agentic_afk_contracts::{ProjectEvent, ProjectId};
+    use agentic_afk_control_plane_server::event_bus::EventBus;
+    use agentic_afk_control_plane_server::router_with_plan_run_merge_deps_and_bus;
+    use futures_util::StreamExt;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let pusher = Arc::new(FakeIntegrationBranchPusher::new());
+    let cleaner = Arc::new(FakeAssignmentWorktreeCleaner::new());
+    let lifecycle = Arc::new(FakeLifecycleWriter::new());
+    let bus = EventBus::new();
+
+    let router = router_with_plan_run_merge_deps_and_bus(
+        config(),
+        db.clone(),
+        Arc::new(StaticIntegrationBranchRefresher::new(RefreshedBaseline {
+            commit_sha: "baseline-sha".into(),
+        })),
+        Arc::new(FakePlanningPhaseRunner::with_stdout(
+            r#"<plan>{"issues":[{"source_issue_id":"42","title":"t","branch":"agent/issue-42","selection_summary":"ok"}],"summary":"s"}</plan>"#,
+        )),
+        Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir())),
+        lifecycle.clone(),
+        Arc::new(FakeImplementationPhaseRunner::with_stdout(IMPL_OK)),
+        Arc::new(FakeReviewPhaseRunner::with_stdout(REVIEW_APPROVED)),
+        Arc::new(FakeMergePhaseRunner::with_stdout(MERGE_OK)),
+        pusher.clone(),
+        cleaner.clone(),
+        bus.clone(),
+    );
+
+    let dir = temp_dir("push-ok-staged");
+    std::fs::create_dir_all(&dir).unwrap();
+    let project: ProjectResponse = read_json(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&CreateProjectRequest {
+                            path: dir.to_string_lossy().into_owned(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let pid = project.id.0.clone();
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{pid}/trust"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    persistence::enable_issue_source(
+        &db,
+        &pid,
+        &EnableIssueSourceRequest {
+            kind: "github".into(),
+            locator: "owner/repo".into(),
+        },
+    )
+    .await
+    .unwrap();
+    persistence::replace_planning_snapshot(
+        &db,
+        &pid,
+        &IssueSource {
+            kind: "github".into(),
+            locator: "owner/repo".into(),
+        },
+        &[issue("42")],
+        "unix:1",
+    )
+    .await
+    .unwrap();
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{pid}/execution-config"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&SetProjectExecutionConfigRequest {
+                        integration_branch: "main".into(),
+                        max_parallel_tasks: 1,
+                        review_retry_limit: 1,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Subscribe BEFORE triggering — capture every Plan Run delta.
+    let mut subscriber = Box::pin(bus.subscribe(&ProjectId(pid.clone()), None));
+
+    let resp = start(&router, &pid).await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+
+    // Plan Run is `succeeded` and the assignment ended at `merged`.
+    let runs = persistence::list_recent_plan_runs(&db, &pid, 10)
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(run.state, "succeeded");
+    assert_eq!(run.assignments[0].status, "merged");
+
+    // Push happened exactly once and cleanup ran for the merged
+    // assignment.
+    assert_eq!(pusher.call_count(), 1);
+    assert_eq!(cleaner.call_count(), 1);
+
+    // The Source Issue Lifecycle was advanced to `Completed` after the
+    // verified push.
+    let completed_writes: Vec<_> = lifecycle
+        .calls()
+        .into_iter()
+        .filter(|(_, status)| {
+            matches!(status, agentic_afk_orchestrator::LifecycleStatus::Completed)
+        })
+        .collect();
+    assert_eq!(
+        completed_writes.len(),
+        1,
+        "push success must write Lifecycle Completed once"
+    );
+
+    // SSE delta seam: the transient `merge_staged` transition is
+    // published. Drain the recorded events and look for the merge_staged
+    // status on the assignment.
+    let mut saw_merge_staged = false;
+    let mut saw_merged = false;
+    while let Ok(Some(event)) = timeout(Duration::from_millis(250), subscriber.next()).await {
+        if let ProjectEvent::AssignmentStatusChanged(assignment) = event.event {
+            if assignment.status == "merge_staged" {
+                saw_merge_staged = true;
+            }
+            if assignment.status == "merged" {
+                saw_merged = true;
+            }
+        }
+    }
+    assert!(
+        saw_merge_staged,
+        "happy-path push must publish a merge_staged transition over SSE"
+    );
+    assert!(
+        saw_merged,
+        "happy-path push must publish the final merged transition over SSE"
     );
 
     drop(dir);

@@ -121,6 +121,41 @@ pub struct SourceIssueSnapshot {
     pub raw_text: String,
 }
 
+/// Fine-grained execution state of one **Issue Assignment** inside its
+/// **Plan Run** (CONTEXT.md → Assignment Status). The wire encoding is the
+/// lowercase discriminator string stored in `issue_assignments.status` and
+/// surfaced on [`IssueAssignmentResponse::status`]. `MergeStaged` (ADR-0037)
+/// sits between `Merging` and `Merged`: the Merge Phase has integrated
+/// locally and verified but the Integration Branch push has not yet
+/// succeeded. `Merged` always implies a pushed Integration Branch.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignmentStatusKind {
+    Implementing,
+    Implemented,
+    Reviewed,
+    Merging,
+    MergeStaged,
+    Merged,
+    Blocked,
+}
+
+impl AssignmentStatusKind {
+    /// Stable wire encoding used in `issue_assignments.status` and the
+    /// `IssueAssignmentResponse::status` field surfaced over SSE / REST.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Implementing => "implementing",
+            Self::Implemented => "implemented",
+            Self::Reviewed => "reviewed",
+            Self::Merging => "merging",
+            Self::MergeStaged => "merge_staged",
+            Self::Merged => "merged",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
 /// Durable view of one Issue Assignment.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct IssueAssignmentResponse {

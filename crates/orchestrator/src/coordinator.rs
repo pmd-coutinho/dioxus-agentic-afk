@@ -1129,19 +1129,21 @@ async fn finalize_parallel_plan_run(
 
         match &merge_outcome {
             AssignmentMergeOutcome::Merged => {
-                let merged = transition_assignment(
+                // ADR-0037: after local integration + verification the
+                // assignment transitions to `merge_staged` and stays there
+                // until the Integration Branch push succeeds. Only a
+                // successful push advances `merge_staged` → `merged`; a
+                // push failure leaves the assignment dormant at
+                // `merge_staged` for operator recovery.
+                let staged = transition_assignment(
                     db,
                     events,
                     project_id,
                     &merge_assignment.id,
-                    AssignmentStatus::Merged,
+                    AssignmentStatus::MergeStaged,
                 )
                 .await?;
-                // Source Issue completion only after the verified
-                // Integration Branch push. The completed lifecycle
-                // write-back is deferred until after `pusher.push`
-                // succeeds below.
-                merged_assignments.push(merged);
+                merged_assignments.push(staged);
             }
             AssignmentMergeOutcome::Blocked { reason } => {
                 let blocked = transition_assignment(
@@ -1183,18 +1185,33 @@ async fn finalize_parallel_plan_run(
     // The push is part of the canonical merge boundary: blocked merges
     // never push, and the push happens after every merge attempt has
     // settled so the upstream only sees the final integrated tree.
+    //
+    // ADR-0037: each successfully-integrated assignment is currently at
+    // `merge_staged`. Push success advances `merge_staged` → `merged` and
+    // proceeds with the Lifecycle `Completed` write-back. Push failure
+    // leaves the assignment at `merge_staged` (dormant, awaiting operator
+    // Retry Push / Abandon Staged) and finishes the Plan Run as `failed`.
     let any_merged = merge_outcomes
         .iter()
         .any(|o| matches!(o, AssignmentMergeOutcome::Merged));
+    // Assignments that successfully advanced to `merged` after a verified
+    // push. Distinct from `merged_assignments` (currently `merge_staged`)
+    // so cleanup can gate on terminal status per ADR-0037.
+    let mut pushed_assignments: Vec<IssueAssignmentResponse> = Vec::new();
+    // Assignments that remained at `merge_staged` because the push failed.
+    // Worktree and issue-branch cleanup is deferred until they reach a
+    // terminal status (`merged` or `blocked`).
+    let mut staged_assignments: Vec<IssueAssignmentResponse> = Vec::new();
+    let mut push_failed = false;
     if any_merged {
         if let Err(error) = deps
             .pusher
             .push(project_path, &exec_config.integration_branch)
         {
-            // Push failure: surface the error but keep the merged
-            // assignments as `merged` (the integration already happened
-            // locally). The Plan Run finishes as `failed` so the
-            // developer notices.
+            // Push failure (ADR-0037): record the push failure as a
+            // failed merge Phase Output for each staged assignment, leave
+            // each assignment at `merge_staged` (no transition), defer
+            // worktree cleanup, and finish the Plan Run as `failed`.
             for assignment in &merged_assignments {
                 let _ = persistence::record_assignment_phase_output(
                     db,
@@ -1206,45 +1223,52 @@ async fn finalize_parallel_plan_run(
                 )
                 .await;
             }
-            if let Ok(run) = persistence::finish_plan_run(db, &plan_run.id, "failed").await {
-                events.plan_run_completed(project_id, run);
+            staged_assignments.extend(merged_assignments.iter().cloned());
+            push_failed = true;
+        } else {
+            // Push succeeded: advance every staged assignment to `merged`
+            // and write the Source Issue Lifecycle `Completed` back. The
+            // lifecycle write-back happens only after the verified push so
+            // upstream state never claims work the developer did not
+            // actually receive.
+            for staged in &merged_assignments {
+                let merged = transition_assignment(
+                    db,
+                    events,
+                    project_id,
+                    &staged.id,
+                    AssignmentStatus::Merged,
+                )
+                .await?;
+                pushed_assignments.push(merged);
             }
-            return Err(CoordinatorError::new(
-                500,
-                "urn:agentic-afk:integration-branch-push-failed",
-                error.to_string(),
-            ));
-        }
-
-        // Push succeeded: now complete the Source Issues. Completion only
-        // after the verified Integration Branch push so upstream lifecycle
-        // state never claims work the developer did not actually receive.
-        if project.enabled_issue_source.is_some() {
-            for assignment in &merged_assignments {
-                if let Err(error) = deps
-                    .lifecycle
-                    .write(&assignment.source_id, crate::LifecycleStatus::Completed)
-                {
-                    events.record_activity(
-                        project_id,
-                        Some(&assignment.id),
-                        "lifecycle_writeback_failed",
-                        Some(&format!(
-                            "completed Lifecycle Status write-back after push failed: {error}"
-                        )),
-                    );
+            if project.enabled_issue_source.is_some() {
+                for assignment in &pushed_assignments {
+                    if let Err(error) = deps
+                        .lifecycle
+                        .write(&assignment.source_id, crate::LifecycleStatus::Completed)
+                    {
+                        events.record_activity(
+                            project_id,
+                            Some(&assignment.id),
+                            "lifecycle_writeback_failed",
+                            Some(&format!(
+                                "completed Lifecycle Status write-back after push failed: {error}"
+                            )),
+                        );
+                    }
                 }
             }
         }
     }
 
-    // Cleanup: merged assignments AND blocked assignments both get their
-    // worktrees + deterministic branches cleaned at Plan Run finish, so
-    // dormant blocked work does not consume Max Parallel Tasks via stale
-    // worktrees. Phase Outputs are already durable on the Plan Run row,
-    // so cleanup is safe.
+    // Cleanup gating (ADR-0037): only assignments in a terminal Assignment
+    // Status (`merged` or `blocked`) have their worktrees and issue
+    // branches cleaned at Plan Run finish. Dormant `merge_staged`
+    // assignments retain their worktree and issue branch so operator
+    // recovery (Retry Push / Abandon Staged) can act on them.
     let mut cleanup_targets: Vec<IssueAssignmentResponse> = Vec::new();
-    cleanup_targets.extend(merged_assignments.iter().cloned());
+    cleanup_targets.extend(pushed_assignments.iter().cloned());
     cleanup_targets.extend(blocked_assignments.iter().cloned());
     for assignment in &cleanup_targets {
         if assignment.worktree_path.is_empty() {
@@ -1266,10 +1290,21 @@ async fn finalize_parallel_plan_run(
     // decision. Empty-planning selections never reach this function (the
     // empty-planning path returns earlier in `finalize_empty_planning`),
     // so `planning_was_empty` is always `false` here.
-    let terminal = decide_plan_run_terminal(&PlanRunFinalize {
-        planning_was_empty: false,
-        outcomes: merge_outcomes,
-    });
+    //
+    // ADR-0037: a push failure leaves staged assignments at `merge_staged`
+    // and the Plan Run finishes `failed` regardless of how many
+    // assignments locally integrated. The pure decision treats any
+    // `Merged` outcome as `Succeeded`, so we override on push failure.
+    let terminal = if push_failed {
+        crate::plan_run_finalize::PlanRunTerminal::Failed
+    } else {
+        decide_plan_run_terminal(&PlanRunFinalize {
+            planning_was_empty: false,
+            outcomes: merge_outcomes,
+        })
+    };
+    // Suppress unused warning when push_failed shortcut is taken.
+    let _ = &staged_assignments;
     let finished = persistence::finish_plan_run(db, &plan_run.id, terminal.as_str())
         .await
         .map_err(CoordinatorError::from_persistence)?;

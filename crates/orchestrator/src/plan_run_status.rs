@@ -23,6 +23,10 @@ pub enum AssignmentStatus {
     Implemented,
     Reviewed,
     Merging,
+    /// The Merge Phase has integrated locally and verified, but the
+    /// Integration Branch push has not yet succeeded. Dormant for Max
+    /// Parallel Tasks. See ADR-0037 and CONTEXT.md → Assignment Status.
+    MergeStaged,
     Merged,
     Blocked { reason: String },
 }
@@ -37,6 +41,7 @@ impl AssignmentStatus {
             Self::Implemented => "implemented",
             Self::Reviewed => "reviewed",
             Self::Merging => "merging",
+            Self::MergeStaged => "merge_staged",
             Self::Merged => "merged",
             Self::Blocked { .. } => "blocked",
         }

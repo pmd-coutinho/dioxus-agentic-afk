@@ -655,8 +655,17 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
         "merged" => PillTone::Verified,
         "reviewed" => PillTone::Verified,
         "implemented" | "claimed" | "implementing" | "merging" => PillTone::Running,
+        // ADR-0037: `merge_staged` is dormant — local integration is done
+        // but the Integration Branch push has not yet succeeded. Render
+        // it as a pending state (read-only badge for this slice; Retry
+        // Push / Abandon Staged affordances land in follow-up work).
+        "merge_staged" => PillTone::Pending,
         "rejected" | "blocked" => PillTone::Failed,
         _ => PillTone::Pending,
+    };
+    let status_testid = match assignment.status.as_str() {
+        "merge_staged" => Some("assignment-status-merge-staged"),
+        _ => None,
     };
     let summary = assignment
         .selection_summary
@@ -672,7 +681,13 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
         div { class: "flex flex-col gap-1 rounded border border-line/40 bg-surface-2/40 p-2",
             "data-testid": "plan-run-assignment-row",
             div { class: "flex items-center gap-2",
-                StatusPill { tone, label: assignment.status.clone() }
+                if let Some(testid) = status_testid {
+                    span { "data-testid": testid,
+                        StatusPill { tone, label: assignment.status.clone() }
+                    }
+                } else {
+                    StatusPill { tone, label: assignment.status.clone() }
+                }
                 p { class: "font-mono text-[12px] text-ink",
                     "{assignment.source_id}: {assignment.source_title}"
                 }

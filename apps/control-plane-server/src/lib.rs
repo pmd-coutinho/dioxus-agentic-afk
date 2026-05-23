@@ -310,6 +310,45 @@ pub fn router_with_plan_run_all_deps(
     )
 }
 
+/// Same as `router_with_plan_run_merge_deps` but accepts a shared
+/// `EventBus`, so tests can subscribe to the SSE delta seam (issue #51 /
+/// ADR-0037) while driving the implementation → review → merge → push
+/// flow end-to-end.
+#[allow(clippy::too_many_arguments)]
+pub fn router_with_plan_run_merge_deps_and_bus(
+    config: ControlPlaneConfig,
+    db: Db,
+    refresher: Arc<dyn IntegrationBranchRefresher>,
+    planner: Arc<dyn PlanningPhaseRunner>,
+    worktree: Arc<dyn AssignmentWorktreeProvisioner>,
+    lifecycle: Arc<dyn IssueLifecycleWriter>,
+    implementation: Arc<dyn ImplementationPhaseRunner>,
+    review: Arc<dyn ReviewPhaseRunner>,
+    merger: Arc<dyn MergePhaseRunner>,
+    pusher: Arc<dyn IntegrationBranchPusher>,
+    cleaner: Arc<dyn AssignmentWorktreeCleaner>,
+    event_bus: event_bus::EventBus,
+) -> Router {
+    router_with_full_deps(
+        config,
+        db,
+        event_bus,
+        PlanRunDeps {
+            refresher,
+            planner,
+            worktree,
+            lifecycle,
+            implementation,
+            review,
+            merger,
+            pusher,
+            cleaner,
+            production_codex_binary: None,
+            production_gh_binary: None,
+        },
+    )
+}
+
 /// Build a router with the full Plan Run dependency surface, including
 /// the Merge Phase seams (issue #45). Used by tests that drive the
 /// implementation → review → merge flow end-to-end.
