@@ -368,10 +368,42 @@ pub struct PlanRunResponse {
 pub enum PhaseOutputBody {
     /// Planning Phase body (stub — see ADR-0038, future slice).
     Planning(serde_json::Value),
-    /// Implementation Phase body (stub).
-    Implementation(serde_json::Value),
-    /// Review Phase body (stub).
-    Review(serde_json::Value),
+    /// Implementation Phase body — the structured product of one
+    /// Implementation pass on an Issue Assignment. `commits` is the list
+    /// of commit SHAs touched on the Issue Branch; `verification` carries
+    /// the verification command transcript the agent ran (one entry per
+    /// command); `gaps` is the agent's self-reported list of open items
+    /// the next phase should know about; `summary` is a one-line human
+    /// summary for the collapsed Dashboard row. Validated against
+    /// `outcome = "ready_for_review"` at the persistence write seam.
+    Implementation {
+        #[serde(default)]
+        commits: Vec<String>,
+        #[serde(default)]
+        verification: Vec<String>,
+        #[serde(default)]
+        gaps: Vec<String>,
+        #[serde(default)]
+        summary: String,
+    },
+    /// Review Phase body — the structured product of one Review pass on
+    /// an Issue Assignment. `findings` is the ordered list of reviewer
+    /// findings (each with optional `location` and required `message`);
+    /// `verification` carries the verification command transcript the
+    /// reviewer ran; `gaps` mirrors the implementation shape; `summary`
+    /// is the one-line collapsed summary. Validated against
+    /// `outcome = "approved"` or `outcome = "rejected"` at the
+    /// persistence write seam.
+    Review {
+        #[serde(default)]
+        findings: Vec<ReviewFinding>,
+        #[serde(default)]
+        verification: Vec<String>,
+        #[serde(default)]
+        gaps: Vec<String>,
+        #[serde(default)]
+        summary: String,
+    },
     /// Merge Phase body (stub).
     Merge(serde_json::Value),
     /// Integration Branch push body (stub).
@@ -387,6 +419,47 @@ pub enum PhaseOutputBody {
     },
 }
 
+/// One reviewer finding inside a [`PhaseOutputBody::Review`]. `location`
+/// names the source location (file path, function, or commit ref) the
+/// finding is anchored to; `message` is the freeform reviewer text. Both
+/// surface on the Dashboard expanded Review row.
+///
+/// Tolerant deserialization: a bare JSON string (legacy reviewer output
+/// that only emitted message text) is accepted and becomes
+/// `ReviewFinding { location: None, message }` so existing fakes and
+/// in-the-wild rows keep working.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ReviewFinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    pub message: String,
+}
+
+impl<'de> Deserialize<'de> for ReviewFinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Text(String),
+            Structured {
+                #[serde(default)]
+                location: Option<String>,
+                message: String,
+            },
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Text(message) => Ok(ReviewFinding {
+                location: None,
+                message,
+            }),
+            Raw::Structured { location, message } => Ok(ReviewFinding { location, message }),
+        }
+    }
+}
+
 impl PhaseOutputBody {
     /// Variant discriminator as it appears in the serialized `phase` tag.
     /// Matches the existing `phase` column written by the persistence
@@ -394,8 +467,8 @@ impl PhaseOutputBody {
     pub fn phase_tag(&self) -> &'static str {
         match self {
             Self::Planning(_) => "planning",
-            Self::Implementation(_) => "implementation",
-            Self::Review(_) => "review",
+            Self::Implementation { .. } => "implementation",
+            Self::Review { .. } => "review",
             Self::Merge(_) => "merge",
             Self::Push(_) => "push",
             Self::Failed { .. } => "failed",
@@ -766,6 +839,59 @@ mod tests {
                 assert_eq!(problem_type, None);
             }
             other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phase_output_body_implementation_round_trips() {
+        let body = PhaseOutputBody::Implementation {
+            commits: vec!["abc123".to_string()],
+            verification: vec!["cargo test --workspace".to_string()],
+            gaps: vec!["no e2e yet".to_string()],
+            summary: "shipped".to_string(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"phase\":\"implementation\""), "{json}");
+        assert!(json.contains("\"commits\":[\"abc123\"]"), "{json}");
+        assert!(json.contains("\"summary\":\"shipped\""), "{json}");
+        let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, body);
+    }
+
+    #[test]
+    fn phase_output_body_review_round_trips_with_structured_finding() {
+        let body = PhaseOutputBody::Review {
+            findings: vec![ReviewFinding {
+                location: Some("src/lib.rs:42".to_string()),
+                message: "missing null check".to_string(),
+            }],
+            verification: vec!["cargo test".to_string()],
+            gaps: vec![],
+            summary: "needs more".to_string(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"phase\":\"review\""), "{json}");
+        assert!(json.contains("\"location\":\"src/lib.rs:42\""), "{json}");
+        let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, body);
+    }
+
+    #[test]
+    fn review_finding_accepts_bare_string_legacy_shape() {
+        // Existing reviewer fakes emit `findings: ["missing tests"]` rather
+        // than the structured `{location, message}` object. The tolerant
+        // deserializer must accept the legacy shape so the Failed-style
+        // permissive path on the Dashboard and persistence stay quiet.
+        let json = r#"{"phase":"review","findings":["missing tests"],"summary":"x"}"#;
+        let body: PhaseOutputBody = serde_json::from_str(json).unwrap();
+        match body {
+            PhaseOutputBody::Review { findings, summary, .. } => {
+                assert_eq!(findings.len(), 1);
+                assert_eq!(findings[0].location, None);
+                assert_eq!(findings[0].message, "missing tests");
+                assert_eq!(summary, "x");
+            }
+            other => panic!("expected Review, got {other:?}"),
         }
     }
 

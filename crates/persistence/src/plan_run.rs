@@ -178,8 +178,8 @@ fn wrap_legacy_body(
     }
     match phase {
         "planning" => PhaseOutputBody::Planning(body_json.clone()),
-        "implementation" => PhaseOutputBody::Implementation(body_json.clone()),
-        "review" => PhaseOutputBody::Review(body_json.clone()),
+        "implementation" => parse_implementation_body(body_json),
+        "review" => parse_review_body(body_json),
         "merge" => PhaseOutputBody::Merge(body_json.clone()),
         // Unknown phase: route to Failed so the row still lands with a
         // typed body the Dashboard can render.
@@ -188,6 +188,40 @@ fn wrap_legacy_body(
             problem_type: None,
         },
     }
+}
+
+/// Deserialize a free-form implementation body into the typed
+/// [`PhaseOutputBody::Implementation`] variant. Falls back to a Failed
+/// row when the body lacks the required shape so legacy in-the-wild rows
+/// still land somewhere the Dashboard can render.
+fn parse_implementation_body(body_json: &serde_json::Value) -> PhaseOutputBody {
+    inject_phase_and_deserialize(body_json, "implementation")
+}
+
+/// Deserialize a free-form review body into the typed
+/// [`PhaseOutputBody::Review`] variant. Tolerant of legacy reviewer fakes
+/// that emit `findings: ["msg"]` rather than `[{location, message}]` via
+/// the [`agentic_afk_contracts::ReviewFinding`] custom deserializer.
+fn parse_review_body(body_json: &serde_json::Value) -> PhaseOutputBody {
+    inject_phase_and_deserialize(body_json, "review")
+}
+
+/// Stamp the `phase` discriminator onto a free-form body and let serde
+/// route it into the matching typed [`PhaseOutputBody`] variant. Falls
+/// back to a Failed row when the body cannot be coerced so legacy
+/// in-the-wild rows still land somewhere the Dashboard can render.
+fn inject_phase_and_deserialize(body_json: &serde_json::Value, phase_tag: &str) -> PhaseOutputBody {
+    let mut value = body_json.clone();
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "phase".to_string(),
+            serde_json::Value::String(phase_tag.to_string()),
+        );
+    }
+    serde_json::from_value::<PhaseOutputBody>(value).unwrap_or_else(|_| PhaseOutputBody::Failed {
+        error: body_json.to_string(),
+        problem_type: None,
+    })
 }
 
 /// Single chokepoint for Phase Output persistence (ADR-0038).
@@ -255,6 +289,24 @@ fn validate_outcome_body(outcome: &str, body: &PhaseOutputBody) -> Result<(), Pe
         });
     }
     if is_failed_outcome && !is_failed_body && !matches!(body, PhaseOutputBody::Push(_)) {
+        return Err(PersistenceError::PhaseOutputMismatch {
+            body_phase: body.phase_tag(),
+            outcome: outcome.to_string(),
+        });
+    }
+    // Implementation body only pairs with `ready_for_review`. The
+    // legitimate failure path uses the Failed variant.
+    if matches!(body, PhaseOutputBody::Implementation { .. }) && outcome != "ready_for_review" {
+        return Err(PersistenceError::PhaseOutputMismatch {
+            body_phase: body.phase_tag(),
+            outcome: outcome.to_string(),
+        });
+    }
+    // Review body pairs with `approved` or `rejected`. Other outcomes
+    // (e.g. `ready_for_review`, `merged`) would corrupt the audit log.
+    if matches!(body, PhaseOutputBody::Review { .. })
+        && !matches!(outcome, "approved" | "rejected")
+    {
         return Err(PersistenceError::PhaseOutputMismatch {
             body_phase: body.phase_tag(),
             outcome: outcome.to_string(),

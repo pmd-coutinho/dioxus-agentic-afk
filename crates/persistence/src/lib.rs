@@ -1400,7 +1400,12 @@ mod tests {
             .unwrap();
         // Implementation body paired with outcome="failed" must be rejected
         // at the single write-seam chokepoint.
-        let body = PhaseOutputBody::Implementation(serde_json::json!({}));
+        let body = PhaseOutputBody::Implementation {
+            commits: vec![],
+            verification: vec![],
+            gaps: vec![],
+            summary: String::new(),
+        };
         let result =
             record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "failed", &body).await;
         assert!(
@@ -1518,6 +1523,160 @@ mod tests {
         assert_eq!(
             stored.body_json.get("error").and_then(|v| v.as_str()),
             Some("planner unparseable")
+        );
+    }
+
+    #[tokio::test]
+    async fn write_seam_accepts_implementation_with_ready_for_review() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Implementation {
+            commits: vec!["abc".into()],
+            verification: vec!["cargo test".into()],
+            gaps: vec![],
+            summary: "shipped".into(),
+        };
+        let stored = record_plan_run_phase_output_typed(
+            &db,
+            &plan_run.id,
+            "implementation",
+            "ready_for_review",
+            &body,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.phase, "implementation");
+        assert_eq!(stored.outcome, "ready_for_review");
+        assert_eq!(
+            stored.body_json.get("phase").and_then(|v| v.as_str()),
+            Some("implementation")
+        );
+        assert_eq!(
+            stored.body_json.get("summary").and_then(|v| v.as_str()),
+            Some("shipped")
+        );
+    }
+
+    #[tokio::test]
+    async fn write_seam_rejects_implementation_with_non_ready_outcome() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Implementation {
+            commits: vec![],
+            verification: vec![],
+            gaps: vec![],
+            summary: "x".into(),
+        };
+        // Implementation body must only pair with `ready_for_review`. The
+        // legitimate failure path uses the Failed variant.
+        let result = record_plan_run_phase_output_typed(
+            &db,
+            &plan_run.id,
+            "implementation",
+            "approved",
+            &body,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
+            "expected PhaseOutputMismatch, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_seam_accepts_review_with_approved_and_rejected() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Review {
+            findings: vec![],
+            verification: vec![],
+            gaps: vec![],
+            summary: "lgtm".into(),
+        };
+        let stored =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "review", "approved", &body)
+                .await
+                .unwrap();
+        assert_eq!(stored.outcome, "approved");
+
+        let body = PhaseOutputBody::Review {
+            findings: vec![agentic_afk_contracts::ReviewFinding {
+                location: Some("src/x.rs:1".into()),
+                message: "missing test".into(),
+            }],
+            verification: vec![],
+            gaps: vec![],
+            summary: "needs more".into(),
+        };
+        let stored =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "review", "rejected", &body)
+                .await
+                .unwrap();
+        assert_eq!(stored.outcome, "rejected");
+        let findings = stored.body_json.get("findings").and_then(|v| v.as_array());
+        assert!(findings.is_some_and(|arr| arr.len() == 1));
+    }
+
+    #[tokio::test]
+    async fn write_seam_rejects_review_with_non_review_outcome() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Review {
+            findings: vec![],
+            verification: vec![],
+            gaps: vec![],
+            summary: "x".into(),
+        };
+        let result =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "review", "ready_for_review", &body)
+                .await;
+        assert!(
+            matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
+            "expected PhaseOutputMismatch, got {result:?}"
         );
     }
 

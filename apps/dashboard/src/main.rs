@@ -986,9 +986,85 @@ fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element 
                 }
             }
         },
+        PhaseOutputBody::Implementation { commits, verification, gaps, summary } => rsx! {
+            div { class: "flex flex-col gap-2",
+                "data-testid": "phase-output-implementation",
+                if !summary.is_empty() {
+                    p { class: "text-[12px] text-ink",
+                        "data-testid": "phase-output-impl-summary",
+                        "{summary}"
+                    }
+                }
+                if !commits.is_empty() {
+                    ul { class: "list-disc pl-4 text-[11px] text-ink",
+                        "data-testid": "phase-output-commits",
+                        for commit in commits.iter() {
+                            li { "data-testid": "phase-output-commit", "{commit}" }
+                        }
+                    }
+                }
+                if !verification.is_empty() {
+                    pre { class: "whitespace-pre-wrap font-mono text-[11px] text-ink-2 rounded border border-line/40 bg-surface-2/60 p-2",
+                        "data-testid": "phase-output-verification",
+                        "{verification.join(\"\\n\")}"
+                    }
+                }
+                if !gaps.is_empty() {
+                    ul { class: "list-disc pl-4 text-[11px] text-coral",
+                        "data-testid": "phase-output-gaps",
+                        for gap in gaps.iter() {
+                            li { "data-testid": "phase-output-gap", "{gap}" }
+                        }
+                    }
+                }
+            }
+        },
+        PhaseOutputBody::Review { findings, verification, gaps, summary } => rsx! {
+            div { class: "flex flex-col gap-2",
+                "data-testid": "phase-output-review",
+                if !summary.is_empty() {
+                    p { class: "text-[12px] text-ink",
+                        "data-testid": "phase-output-review-summary",
+                        "{summary}"
+                    }
+                }
+                if !findings.is_empty() {
+                    ol { class: "list-decimal pl-4 text-[11px] text-ink",
+                        "data-testid": "phase-output-review-findings",
+                        for finding in findings.iter() {
+                            li { class: "flex flex-col",
+                                "data-testid": "phase-output-review-finding",
+                                if let Some(loc) = finding.location.as_ref() {
+                                    span { class: "font-mono text-[10px] text-ink-2",
+                                        "data-testid": "phase-output-review-finding-location",
+                                        "{loc}"
+                                    }
+                                }
+                                span {
+                                    "data-testid": "phase-output-review-finding-message",
+                                    "{finding.message}"
+                                }
+                            }
+                        }
+                    }
+                }
+                if !verification.is_empty() {
+                    pre { class: "whitespace-pre-wrap font-mono text-[11px] text-ink-2 rounded border border-line/40 bg-surface-2/60 p-2",
+                        "data-testid": "phase-output-verification",
+                        "{verification.join(\"\\n\")}"
+                    }
+                }
+                if !gaps.is_empty() {
+                    ul { class: "list-disc pl-4 text-[11px] text-coral",
+                        "data-testid": "phase-output-gaps",
+                        for gap in gaps.iter() {
+                            li { "data-testid": "phase-output-gap", "{gap}" }
+                        }
+                    }
+                }
+            }
+        },
         PhaseOutputBody::Planning(body)
-        | PhaseOutputBody::Implementation(body)
-        | PhaseOutputBody::Review(body)
         | PhaseOutputBody::Merge(body)
         | PhaseOutputBody::Push(body) => {
             let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());

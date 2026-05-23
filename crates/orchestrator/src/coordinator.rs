@@ -838,13 +838,14 @@ async fn run_assignment_implement_review(
             )
             .await);
         }
-        let impl_output = persistence::record_assignment_phase_output(
+        let impl_body = parse_implementation_phase_body(&impl_parsed.body);
+        let impl_output = persistence::record_assignment_phase_output_typed(
             db,
             &plan_run.id,
             &assignment.id,
             "implementation",
             &impl_parsed.outcome,
-            &impl_parsed.body,
+            &impl_body,
         )
         .await
         .map_err(CoordinatorError::from_persistence)?;
@@ -899,13 +900,14 @@ async fn run_assignment_implement_review(
                 .await);
             }
         };
-        let review_output = persistence::record_assignment_phase_output(
+        let review_body = parse_review_phase_body(&review_parsed.body);
+        let review_output = persistence::record_assignment_phase_output_typed(
             db,
             &plan_run.id,
             &assignment.id,
             "review",
             &review_parsed.outcome,
-            &review_parsed.body,
+            &review_body,
         )
         .await
         .map_err(CoordinatorError::from_persistence)?;
@@ -1015,13 +1017,17 @@ async fn fail_assignment_phase(
     error: &str,
     problem_type: &str,
 ) -> CoordinatorError {
-    let _ = persistence::record_assignment_phase_output(
+    let body = agentic_afk_contracts::PhaseOutputBody::Failed {
+        error: error.to_string(),
+        problem_type: Some(problem_type.to_string()),
+    };
+    let _ = persistence::record_assignment_phase_output_typed(
         db,
         assignment.plan_run_id.as_deref().unwrap_or_default(),
         &assignment.id,
         phase,
         "failed",
-        &serde_json::json!({ "error": error }),
+        &body,
     )
     .await;
     if let Ok(updated) =
@@ -1030,6 +1036,70 @@ async fn fail_assignment_phase(
         events.assignment_status_changed(project_id, updated);
     }
     CoordinatorError::new(500, problem_type, error)
+}
+
+/// Lift a parsed Implementation Phase body (free-form JSON from the agent
+/// stdout) into the typed [`agentic_afk_contracts::PhaseOutputBody::Implementation`]
+/// variant so the persistence write seam validates outcome ↔ body pairing
+/// (ADR-0038). Missing fields default to empty so partial agent output
+/// still lands as Implementation rather than degrading to Failed.
+fn parse_implementation_phase_body(
+    body: &serde_json::Value,
+) -> agentic_afk_contracts::PhaseOutputBody {
+    let commits = string_array(body, "commits");
+    let verification = string_array(body, "verification");
+    let gaps = string_array(body, "gaps");
+    let summary = body
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    agentic_afk_contracts::PhaseOutputBody::Implementation {
+        commits,
+        verification,
+        gaps,
+        summary,
+    }
+}
+
+/// Lift a parsed Review Phase body (free-form JSON from the agent stdout)
+/// into the typed [`agentic_afk_contracts::PhaseOutputBody::Review`] variant.
+/// Findings are deserialized via [`agentic_afk_contracts::ReviewFinding`]
+/// which tolerates both bare-string and `{location, message}` shapes so
+/// existing fakes keep working.
+fn parse_review_phase_body(body: &serde_json::Value) -> agentic_afk_contracts::PhaseOutputBody {
+    let findings = body
+        .get("findings")
+        .cloned()
+        .map(|v| {
+            serde_json::from_value::<Vec<agentic_afk_contracts::ReviewFinding>>(v)
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    let verification = string_array(body, "verification");
+    let gaps = string_array(body, "gaps");
+    let summary = body
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    agentic_afk_contracts::PhaseOutputBody::Review {
+        findings,
+        verification,
+        gaps,
+        summary,
+    }
+}
+
+fn string_array(body: &serde_json::Value, key: &str) -> Vec<String> {
+    body.get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Finish a Plan Run after the parallel implementation + review tranche
