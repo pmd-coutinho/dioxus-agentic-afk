@@ -28,11 +28,13 @@ pub use activity::{
 pub use auto_replan::{AutoReplanStateStore, AutoReplanStatus};
 pub use prd_overrides::{PrdOverride, list_prd_overrides, mark_prd, unmark_prd};
 pub use plan_run::{
-    create_plan_run, finish_plan_run, get_active_plan_run, get_plan_run,
-    get_project_execution_config, list_assignment_phase_outputs, list_recent_plan_runs,
+    InFlightPhaseRowSummary, complete_in_flight_phase_output, create_plan_run,
+    finish_plan_run, get_active_plan_run, get_plan_run, get_project_execution_config,
+    insert_in_flight_phase_output, list_assignment_phase_outputs,
+    list_in_flight_phase_rows, list_recent_plan_runs, mark_in_flight_rows_interrupted,
     record_assignment_phase_output, record_assignment_phase_output_typed,
-    record_plan_run_phase_output, record_plan_run_phase_output_typed,
-    set_project_execution_config,
+    record_in_flight_phase_process, record_plan_run_phase_output,
+    record_plan_run_phase_output_typed, set_project_execution_config,
 };
 
 // Re-export new Plan Run assignment helpers at the crate root for
@@ -2052,6 +2054,104 @@ mod tests {
             matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
             "expected PhaseOutputMismatch, got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn in_flight_row_round_trips_pid_and_terminal_body() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let row_id = insert_in_flight_phase_output(&db, &plan_run.id, None, "planning")
+            .await
+            .unwrap();
+
+        let pre = list_in_flight_phase_rows(&db).await.unwrap();
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0].id, row_id);
+        assert_eq!(pre[0].outcome, "in_flight");
+        assert_eq!(pre[0].phase, "planning");
+        assert_eq!(pre[0].process_id, None);
+
+        record_in_flight_phase_process(&db, &row_id, 1234, "unix:1000")
+            .await
+            .unwrap();
+        let after_pid = list_in_flight_phase_rows(&db).await.unwrap();
+        assert_eq!(after_pid[0].process_id, Some(1234));
+
+        let body = PhaseOutputBody::Planning {
+            selections: vec![],
+            summary: "no work".into(),
+            rejected_candidates: vec![],
+        };
+        complete_in_flight_phase_output(&db, &row_id, "succeeded_empty", &body)
+            .await
+            .unwrap();
+        let after_complete = list_in_flight_phase_rows(&db).await.unwrap();
+        assert!(after_complete.is_empty(), "completed row no longer in-flight");
+
+        let outputs = list_phase_outputs_for_tests(&db, &plan_run.id).await;
+        assert_eq!(outputs.len(), 1, "exactly one row per phase invocation");
+        assert_eq!(outputs[0].1, "succeeded_empty");
+    }
+
+    #[tokio::test]
+    async fn mark_in_flight_rows_interrupted_is_idempotent_and_returns_pids() {
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let row_a = insert_in_flight_phase_output(&db, &plan_run.id, None, "planning")
+            .await
+            .unwrap();
+        record_in_flight_phase_process(&db, &row_a, 42, "unix:1")
+            .await
+            .unwrap();
+
+        let first = mark_in_flight_rows_interrupted(&db).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].process_id, Some(42));
+        assert_eq!(first[0].outcome, "in_flight");
+
+        let still = list_in_flight_phase_rows(&db).await.unwrap();
+        assert_eq!(still.len(), 1);
+        assert_eq!(still[0].outcome, "interrupted");
+
+        // Second call: no `in_flight` rows remain, but the `interrupted`
+        // row is still surfaced so the recovery path is idempotent.
+        let second = mark_in_flight_rows_interrupted(&db).await.unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].outcome, "interrupted");
+    }
+
+    async fn list_phase_outputs_for_tests(
+        db: &Db,
+        plan_run_id: &str,
+    ) -> Vec<(String, String)> {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT phase, outcome FROM plan_run_phase_outputs WHERE plan_run_id = ? ORDER BY recorded_at",
+        )
+        .bind(plan_run_id)
+        .fetch_all(db)
+        .await
+        .unwrap()
     }
 
     fn make_issue(source_id: &str, readiness: &str, lifecycle_status: &str) -> SourceIssueSnapshot {

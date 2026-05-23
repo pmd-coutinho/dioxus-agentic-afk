@@ -646,6 +646,163 @@ pub async fn list_recent_plan_runs(
     Ok(out)
 }
 
+/// Insert an `in_flight` phase output row *before* the Codex Sandbox is
+/// launched (ADR-0042). The row carries `body_json = NULL` and no captured
+/// PID yet; the orchestrator calls [`record_in_flight_phase_process`] right
+/// after spawn and [`complete_in_flight_phase_output`] on terminal outcome.
+/// Returns the row id so the orchestrator can target the subsequent UPDATEs
+/// at the same row without scanning.
+pub async fn insert_in_flight_phase_output(
+    db: &Db,
+    plan_run_id: &str,
+    assignment_id: Option<&str>,
+    phase: &str,
+) -> Result<String, PersistenceError> {
+    let id = Uuid::new_v4().to_string();
+    let recorded_at = current_unix_timestamp();
+    sqlx::query(
+        r#"
+        INSERT INTO plan_run_phase_outputs (
+            id, plan_run_id, phase, outcome, body_json, recorded_at, assignment_id
+        )
+        VALUES (?, ?, ?, 'in_flight', NULL, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(plan_run_id)
+    .bind(phase)
+    .bind(&recorded_at)
+    .bind(assignment_id)
+    .execute(db)
+    .await?;
+    Ok(id)
+}
+
+/// Stamp the captured child PID + spawn timestamp onto an in-flight row
+/// (ADR-0042). Called by the orchestrator immediately after the Codex child
+/// is spawned, before any await that blocks on the child's exit, so the
+/// ShutdownCoordinator can SIGTERM the captured PID.
+pub async fn record_in_flight_phase_process(
+    db: &Db,
+    row_id: &str,
+    process_id: u32,
+    process_started_at: &str,
+) -> Result<(), PersistenceError> {
+    sqlx::query(
+        r#"
+        UPDATE plan_run_phase_outputs
+        SET process_id = ?, process_started_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(process_id as i64)
+    .bind(process_started_at)
+    .bind(row_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Replace an in-flight row's `outcome` + `body_json` with the terminal
+/// result (ADR-0042). Validates the outcome ↔ body pairing through the
+/// existing chokepoint and applies the same 64 KB truncation marker.
+pub async fn complete_in_flight_phase_output(
+    db: &Db,
+    row_id: &str,
+    outcome: &str,
+    body: &PhaseOutputBody,
+) -> Result<(), PersistenceError> {
+    validate_outcome_body(outcome, body)?;
+    let stored_body = truncate_body_if_needed(body)?;
+    let body_text = serde_json::to_string(&stored_body)
+        .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
+    sqlx::query(
+        r#"
+        UPDATE plan_run_phase_outputs
+        SET outcome = ?, body_json = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(outcome)
+    .bind(&body_text)
+    .bind(row_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Summary of one `in_flight` or `interrupted` row, returned by
+/// [`mark_in_flight_rows_interrupted`] and [`list_in_flight_phase_rows`]
+/// so callers (ShutdownCoordinator / BootRecoveryScanner) can SIGTERM
+/// captured PIDs and block the owning Issue Assignments without re-loading
+/// the row themselves.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InFlightPhaseRowSummary {
+    pub id: String,
+    pub plan_run_id: String,
+    pub assignment_id: Option<String>,
+    pub phase: String,
+    pub outcome: String,
+    pub process_id: Option<u32>,
+}
+
+/// Return every non-terminal phase output row (`outcome IN ('in_flight',
+/// 'interrupted')`). Used by both the ShutdownCoordinator (to find rows it
+/// must mark on the way out) and the BootRecoveryScanner (to find rows it
+/// must recover on the way in).
+pub async fn list_in_flight_phase_rows(
+    db: &Db,
+) -> Result<Vec<InFlightPhaseRowSummary>, PersistenceError> {
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, String, String, Option<i64>)>(
+        r#"
+        SELECT id, plan_run_id, assignment_id, phase, outcome, process_id
+        FROM plan_run_phase_outputs
+        WHERE outcome IN ('in_flight', 'interrupted')
+        ORDER BY recorded_at ASC, rowid ASC
+        "#,
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, plan_run_id, assignment_id, phase, outcome, process_id)| {
+                InFlightPhaseRowSummary {
+                    id,
+                    plan_run_id,
+                    assignment_id,
+                    phase,
+                    outcome,
+                    process_id: process_id.and_then(|pid| u32::try_from(pid).ok()),
+                }
+            },
+        )
+        .collect())
+}
+
+/// Flip every `in_flight` row to `interrupted` and return the affected
+/// rows so the caller (ShutdownCoordinator) can SIGTERM the captured PIDs.
+/// Idempotent: rows already at `interrupted` are left alone but still
+/// returned so a second call returns the same set without double-killing.
+pub async fn mark_in_flight_rows_interrupted(
+    db: &Db,
+) -> Result<Vec<InFlightPhaseRowSummary>, PersistenceError> {
+    // Snapshot first so the caller can SIGTERM the captured PIDs even when
+    // a concurrent completion flips a row to a terminal outcome between
+    // the SELECT and the UPDATE.
+    let affected = list_in_flight_phase_rows(db).await?;
+    sqlx::query(
+        r#"
+        UPDATE plan_run_phase_outputs
+        SET outcome = 'interrupted'
+        WHERE outcome = 'in_flight'
+        "#,
+    )
+    .execute(db)
+    .await?;
+    Ok(affected)
+}
+
 fn current_unix_timestamp() -> String {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
