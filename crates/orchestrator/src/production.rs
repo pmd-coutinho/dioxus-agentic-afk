@@ -105,6 +105,10 @@ impl IntegrationBranchPusher for GitIntegrationBranchPusher {
                 PlanRunPhaseError::IntegrationPush(format!("git push failed to spawn: {e}"))
             })?;
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            if is_non_fast_forward_stderr(&stderr) {
+                return Err(PlanRunPhaseError::NonFastForward { stderr });
+            }
             return Err(PlanRunPhaseError::IntegrationPush(format!(
                 "git push origin {integration_branch}: {}",
                 command_output(&output)
@@ -112,6 +116,21 @@ impl IntegrationBranchPusher for GitIntegrationBranchPusher {
         }
         Ok(())
     }
+}
+
+/// Heuristic detector for `git push` non-fast-forward rejection text.
+/// Matches the same canonical phrases as
+/// [`crate::push_attempt::classify_push_result`] so the production
+/// pusher and the classifier share one taxonomy.
+fn is_non_fast_forward_stderr(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    ["non-fast-forward", "non fast forward", "fetch first"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+        || lower.contains("would not be a fast-forward")
+        || lower.contains("would not be a fast forward")
+        || lower.contains("updates were rejected")
+        || lower.contains("tip of your current branch is behind")
 }
 
 /// Real Assignment Worktree provisioner: delegates to the existing
@@ -372,6 +391,156 @@ mod tests {
             git_summary: None,
             trusted: true,
             enabled_issue_source: None,
+        }
+    }
+
+    fn git_init_user_config(path: &Path) {
+        // Local repo identity is required for `git commit` to succeed in
+        // sandbox environments where the global git config may be absent.
+        for (key, val) in [("user.email", "test@example.com"), ("user.name", "Test")] {
+            assert!(Command::new("git")
+                .current_dir(path)
+                .args(["config", key, val])
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
+
+    fn git(path: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .output()
+            .expect("git command")
+    }
+
+    fn unique_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "agentic-afk-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn git_integration_branch_pusher_returns_non_fast_forward_on_diverged_remote() {
+        // Issue #63: production pusher must detect a non-fast-forward
+        // rejection from `git push` and return the typed `NonFastForward`
+        // variant (carrying the stderr) rather than the generic
+        // `IntegrationPush(String)`.
+        let root = unique_dir("ibp-nonff");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let remote = root.join("remote.git");
+        let local = root.join("local");
+        let other = root.join("other");
+
+        // Bare remote.
+        assert!(git(&root, &["init", "--bare", "-b", "main", remote.to_str().unwrap()])
+            .status
+            .success());
+
+        // Local clone, commit, push so the branch exists upstream.
+        assert!(git(
+            &root,
+            &["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
+        )
+        .status
+        .success());
+        git_init_user_config(&local);
+        std::fs::write(local.join("README.md"), "hello\n").unwrap();
+        assert!(git(&local, &["add", "."]).status.success());
+        assert!(git(&local, &["commit", "-m", "base"]).status.success());
+        assert!(git(&local, &["push", "-u", "origin", "main"]).status.success());
+
+        // Second clone advances `main` so the remote diverges from `local`.
+        assert!(git(
+            &root,
+            &["clone", remote.to_str().unwrap(), other.to_str().unwrap()],
+        )
+        .status
+        .success());
+        git_init_user_config(&other);
+        std::fs::write(other.join("OTHER.md"), "other\n").unwrap();
+        assert!(git(&other, &["add", "."]).status.success());
+        assert!(git(&other, &["commit", "-m", "other-commit"]).status.success());
+        assert!(git(&other, &["push", "origin", "main"]).status.success());
+
+        // Local makes a divergent commit (does NOT pull first).
+        std::fs::write(local.join("LOCAL.md"), "local\n").unwrap();
+        assert!(git(&local, &["add", "."]).status.success());
+        assert!(git(&local, &["commit", "-m", "local-commit"]).status.success());
+
+        // Drive the production pusher; expect `NonFastForward`.
+        let pusher = GitIntegrationBranchPusher;
+        let result = pusher.push(&local, "main");
+        let cleanup = || {
+            let _ = std::fs::remove_dir_all(&root);
+        };
+        match result {
+            Err(PlanRunPhaseError::NonFastForward { stderr }) => {
+                let lower = stderr.to_ascii_lowercase();
+                assert!(
+                    lower.contains("non-fast-forward")
+                        || lower.contains("fetch first")
+                        || lower.contains("rejected"),
+                    "stderr should carry remote rejection text, got: {stderr}"
+                );
+                cleanup();
+            }
+            other => {
+                cleanup();
+                panic!("expected NonFastForward, got {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn git_integration_branch_pusher_returns_integration_push_on_unreachable_remote() {
+        // Issue #63: failures that are NOT non-fast-forward (here: an
+        // unreachable remote URL) must still report through the generic
+        // `IntegrationPush(String)` variant so the classifier routes them
+        // as `PushOutcome::Other` and the operator can retry.
+        let root = unique_dir("ibp-unreachable");
+        let local = root.join("local");
+        std::fs::create_dir_all(&local).unwrap();
+
+        assert!(git(&local, &["init", "-b", "main"]).status.success());
+        git_init_user_config(&local);
+        std::fs::write(local.join("README.md"), "hi\n").unwrap();
+        assert!(git(&local, &["add", "."]).status.success());
+        assert!(git(&local, &["commit", "-m", "init"]).status.success());
+        // Point `origin` at a definitely-unreachable URL.
+        assert!(git(
+            &local,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "file:///nonexistent/agentic-afk-unreachable.git",
+            ],
+        )
+        .status
+        .success());
+
+        let pusher = GitIntegrationBranchPusher;
+        let result = pusher.push(&local, "main");
+        let cleanup = || {
+            let _ = std::fs::remove_dir_all(&root);
+        };
+        match result {
+            Err(PlanRunPhaseError::IntegrationPush(detail)) => {
+                assert!(!detail.is_empty());
+                cleanup();
+            }
+            other => {
+                cleanup();
+                panic!("expected IntegrationPush, got {other:?}");
+            }
         }
     }
 

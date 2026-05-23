@@ -30,6 +30,8 @@ pub enum PlanRunPhaseError {
     Merge(String),
     #[error("integration branch push failed: {0}")]
     IntegrationPush(String),
+    #[error("integration branch push rejected as non-fast-forward: {stderr}")]
+    NonFastForward { stderr: String },
     #[error("assignment worktree cleanup failed: {0}")]
     Cleanup(String),
 }
@@ -663,11 +665,38 @@ impl MergePhaseRunner for UnimplementedMergePhaseRunner {
     }
 }
 
+/// Scripted outcomes consumed by [`FakeIntegrationBranchPusher`] in FIFO
+/// order, one per `push` call. Mirrors the `PushOutcome` taxonomy from
+/// [`crate::push_attempt`] but is its own type because the fake harness
+/// needs `Transient` (mapping to [`PlanRunPhaseError::IntegrationPush`])
+/// separately from any classifier semantics: the fake is the boundary
+/// that *produces* errors, not one that classifies them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FakePushOutcome {
+    /// Push completed successfully.
+    Success,
+    /// Push failed with a transient/unclassified error: maps to
+    /// [`PlanRunPhaseError::IntegrationPush`] so the orchestrator's
+    /// classifier sees a generic-error payload.
+    Transient { stderr: String },
+    /// Push was rejected by the remote because the Integration Branch
+    /// has diverged: maps to [`PlanRunPhaseError::NonFastForward`].
+    NonFastForward { stderr: String },
+}
+
 /// Test pusher that records each push call. Used to assert that the
 /// Integration Branch is only pushed after a verified merge outcome.
+///
+/// Two construction modes:
+/// - Single-mode ([`Self::new`] / [`Self::failing`]): repeats the same
+///   outcome for every call. Kept for unmigrated tests.
+/// - Scriptable ([`Self::with_outcomes`]): consumes a `Vec<FakePushOutcome>`
+///   FIFO, one entry per push. Over-consuming panics so tests catch
+///   accidental extra pushes.
 pub struct FakeIntegrationBranchPusher {
     calls: Mutex<Vec<(PathBuf, String)>>,
     error: Option<String>,
+    outcomes: Option<Mutex<Vec<FakePushOutcome>>>,
 }
 
 impl FakeIntegrationBranchPusher {
@@ -675,6 +704,7 @@ impl FakeIntegrationBranchPusher {
         Self {
             calls: Mutex::new(Vec::new()),
             error: None,
+            outcomes: None,
         }
     }
 
@@ -682,6 +712,22 @@ impl FakeIntegrationBranchPusher {
         Self {
             calls: Mutex::new(Vec::new()),
             error: Some(error.into()),
+            outcomes: None,
+        }
+    }
+
+    /// Scripted constructor: outcomes are consumed FIFO, one per `push`
+    /// call. Pushing more times than the script has entries panics with a
+    /// clear message so tests catch unexpected extra pushes immediately.
+    pub fn with_outcomes(outcomes: Vec<FakePushOutcome>) -> Self {
+        assert!(
+            !outcomes.is_empty(),
+            "FakeIntegrationBranchPusher::with_outcomes needs at least one outcome"
+        );
+        Self {
+            calls: Mutex::new(Vec::new()),
+            error: None,
+            outcomes: Some(Mutex::new(outcomes)),
         }
     }
 
@@ -710,6 +756,24 @@ impl IntegrationBranchPusher for FakeIntegrationBranchPusher {
             .lock()
             .unwrap()
             .push((project_path.to_path_buf(), integration_branch.to_string()));
+        if let Some(outcomes) = &self.outcomes {
+            let mut queue = outcomes.lock().unwrap();
+            assert!(
+                !queue.is_empty(),
+                "FakeIntegrationBranchPusher: push called {} time(s) but script is exhausted",
+                self.calls.lock().unwrap().len()
+            );
+            let next = queue.remove(0);
+            return match next {
+                FakePushOutcome::Success => Ok(()),
+                FakePushOutcome::Transient { stderr } => {
+                    Err(PlanRunPhaseError::IntegrationPush(stderr))
+                }
+                FakePushOutcome::NonFastForward { stderr } => {
+                    Err(PlanRunPhaseError::NonFastForward { stderr })
+                }
+            };
+        }
         if let Some(error) = &self.error {
             Err(PlanRunPhaseError::IntegrationPush(error.clone()))
         } else {
@@ -1074,5 +1138,75 @@ impl MergePhaseRunner for PerSourceMergePhaseRunner {
     fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         pick_stdout_for_source(&self.map, self.fallback.as_deref(), prompt, &self.counters)
+    }
+}
+
+#[cfg(test)]
+mod fake_pusher_tests {
+    //! Unit tests for the scriptable `FakeIntegrationBranchPusher`
+    //! (issue #63). The fake is the test seam that lets push-failure
+    //! scenarios be expressed as data; FIFO consumption and panic-on-
+    //! overflow are the contract the orchestrator tests rely on.
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn scripted_pusher_consumes_outcomes_fifo() {
+        let pusher = FakeIntegrationBranchPusher::with_outcomes(vec![
+            FakePushOutcome::Transient {
+                stderr: "ssh: connection reset by peer".into(),
+            },
+            FakePushOutcome::NonFastForward {
+                stderr: "! [rejected] main -> main (non-fast-forward)".into(),
+            },
+            FakePushOutcome::Success,
+        ]);
+        let path = PathBuf::from("/tmp/proj");
+
+        match pusher.push(&path, "main") {
+            Err(PlanRunPhaseError::IntegrationPush(detail)) => {
+                assert!(detail.contains("connection reset"));
+            }
+            other => panic!("expected Transient -> IntegrationPush, got {other:?}"),
+        }
+        match pusher.push(&path, "main") {
+            Err(PlanRunPhaseError::NonFastForward { stderr }) => {
+                assert!(stderr.contains("non-fast-forward"));
+            }
+            other => panic!("expected NonFastForward, got {other:?}"),
+        }
+        assert!(pusher.push(&path, "main").is_ok());
+        assert_eq!(pusher.call_count(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "script is exhausted")]
+    fn scripted_pusher_panics_when_over_called() {
+        let pusher =
+            FakeIntegrationBranchPusher::with_outcomes(vec![FakePushOutcome::Success]);
+        let path = PathBuf::from("/tmp/proj");
+        let _ = pusher.push(&path, "main");
+        let _ = pusher.push(&path, "main");
+    }
+
+    #[test]
+    fn single_mode_constructors_remain_available() {
+        // Unmigrated tests continue to use `new()` and `failing(...)`
+        // unchanged.
+        let path = PathBuf::from("/tmp/proj");
+
+        let ok_pusher = FakeIntegrationBranchPusher::new();
+        assert!(ok_pusher.push(&path, "main").is_ok());
+        assert!(ok_pusher.push(&path, "main").is_ok());
+
+        let fail_pusher = FakeIntegrationBranchPusher::failing("boom");
+        match fail_pusher.push(&path, "main") {
+            Err(PlanRunPhaseError::IntegrationPush(d)) => assert_eq!(d, "boom"),
+            other => panic!("expected IntegrationPush, got {other:?}"),
+        }
+        match fail_pusher.push(&path, "main") {
+            Err(PlanRunPhaseError::IntegrationPush(d)) => assert_eq!(d, "boom"),
+            other => panic!("expected IntegrationPush again, got {other:?}"),
+        }
     }
 }

@@ -75,6 +75,9 @@ impl PushOutcome {
 pub fn classify_push_result(result: Result<(), PlanRunPhaseError>) -> PushOutcome {
     match result {
         Ok(()) => PushOutcome::Success,
+        Err(PlanRunPhaseError::NonFastForward { stderr }) => {
+            PushOutcome::NonFastForward { detail: stderr }
+        }
         Err(PlanRunPhaseError::IntegrationPush(detail)) => classify_failure_detail(detail),
         Err(other) => PushOutcome::Other {
             detail: other.to_string(),
@@ -163,6 +166,22 @@ mod tests {
             "remote: Permission to owner/repo.git denied to alice.".to_string(),
         ));
         assert!(matches!(classify_push_result(result), PushOutcome::Other { .. }));
+    }
+
+    #[test]
+    fn non_fast_forward_variant_classifies_as_non_fast_forward() {
+        // Issue #63: production pushers can now return the typed
+        // `NonFastForward` variant directly instead of relying on the
+        // classifier to inspect stderr inside an `IntegrationPush` payload.
+        let result = Err(PlanRunPhaseError::NonFastForward {
+            stderr: "! [rejected] main -> main (non-fast-forward)".to_string(),
+        });
+        match classify_push_result(result) {
+            PushOutcome::NonFastForward { detail } => {
+                assert!(detail.contains("non-fast-forward"));
+            }
+            other => panic!("expected NonFastForward, got {other:?}"),
+        }
     }
 
     #[test]

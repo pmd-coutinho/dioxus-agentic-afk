@@ -37,7 +37,7 @@ pub use production::{
 pub use plan_run::{
     AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, FakeAssignmentWorktreeCleaner,
     FakeImplementationPhaseRunner, FakeIntegrationBranchPusher, FakeLifecycleWriter,
-    FakeMergePhaseRunner, FakePlanningPhaseRunner, FakeReviewPhaseRunner,
+    FakeMergePhaseRunner, FakePlanningPhaseRunner, FakePushOutcome, FakeReviewPhaseRunner,
     FakeWorktreeProvisioner, ImplementationPhaseRunner, IntegrationBranchPusher,
     IntegrationBranchRefresher, IssueLifecycleWriter, LifecycleStatus, MergePhaseRunner,
     ParsedImplementationOutput, ParsedMergeOutput, ParsedPlanningOutput, ParsedReviewOutput,
