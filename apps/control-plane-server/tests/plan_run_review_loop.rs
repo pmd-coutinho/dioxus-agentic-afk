@@ -297,11 +297,20 @@ async fn exhausting_review_retry_limit_blocks_the_assignment() {
     assert_eq!(assignment.review_rejection_count, 1);
     let reason = assignment
         .block_reason
-        .as_deref()
+        .as_ref()
         .expect("block_reason recorded for exhausted Review Loop");
+    assert_eq!(
+        reason.kind,
+        agentic_afk_contracts::BlockReason::ReviewRetryLimitExhausted,
+        "exhausted Review Loop must record the typed ReviewRetryLimitExhausted kind"
+    );
+    let detail = reason
+        .detail
+        .as_deref()
+        .expect("typed Review Loop block reason carries cause-specific detail");
     assert!(
-        reason.to_lowercase().contains("review"),
-        "block_reason should reference the Review Loop: {reason}"
+        detail.to_lowercase().contains("review"),
+        "block_reason detail should reference the Review Loop: {detail}"
     );
 
     // Only one implementation and one review pass; the loop is bounded.
@@ -426,6 +435,43 @@ async fn re_enable_rejects_non_blocked_assignment() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    drop(fixture.project_dir);
+}
+
+#[tokio::test]
+async fn review_loop_exhaustion_api_response_carries_typed_review_retry_limit_exhausted_kind() {
+    // Issue #52 / ADR-0038: the Issue Assignment API response must carry
+    // the typed `BlockReason` kind (review_retry_limit_exhausted) plus the
+    // preserved freeform detail. The Dashboard's typed-badge rendering
+    // depends on the wire taxonomy, so this asserts the JSON shape directly.
+    let fixture = build_fixture(vec![IMPL_OK], vec![REVIEW_REJECTED], 1).await;
+    let pid = fixture.project.id.0.clone();
+    let _ = start(&fixture.router, &pid).await;
+
+    let resp = fixture
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/projects/{pid}/snapshot"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_text(resp).await;
+    assert!(
+        body.contains("\"kind\":\"review_retry_limit_exhausted\""),
+        "snapshot must expose typed block_reason.kind for an exhausted Review Loop: {body}"
+    );
+    // The freeform detail text from the existing Review Loop block path is
+    // preserved under the typed kind.
+    assert!(
+        body.contains("Review Loop exhausted"),
+        "preserved freeform detail must remain visible on the API response: {body}"
+    );
     drop(fixture.project_dir);
 }
 

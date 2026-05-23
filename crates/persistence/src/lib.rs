@@ -3,9 +3,10 @@
 //! Provides SQLite-backed storage for Projects.
 
 use agentic_afk_contracts::{
-    AssignmentAttemptResponse, AssignmentTerminalOutcome, CreateProjectRequest,
-    EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource, IssueSourceSyncResponse,
-    IssueSourceSyncStatusResponse, ProjectId, ProjectResponse, SourceIssueSnapshot,
+    AssignmentAttemptResponse, AssignmentTerminalOutcome, BlockReason, BlockReasonResponse,
+    CreateProjectRequest, EnableIssueSourceRequest, IssueAssignmentResponse, IssueSource,
+    IssueSourceSyncResponse, IssueSourceSyncStatusResponse, ProjectId, ProjectResponse,
+    SourceIssueSnapshot,
 };
 pub use agentic_afk_planning_snapshot::RawPlanningSnapshot;
 
@@ -645,12 +646,13 @@ pub(crate) async fn get_issue_assignment(
             Option<String>,
             i64,
             Option<String>,
+            Option<String>,
         ),
     >(
         r#"
         SELECT id, project_id, source_id, source_title, branch, worktree_path, status,
                status_detail, plan_run_id, selection_summary,
-               review_rejection_count, block_reason
+               review_rejection_count, block_reason, block_reason_kind
         FROM issue_assignments
         WHERE id = ?
         "#,
@@ -670,13 +672,21 @@ pub(crate) async fn get_issue_assignment(
         plan_run_id,
         selection_summary,
         review_rejection_count,
-        block_reason,
+        block_reason_detail,
+        block_reason_kind,
     )) = row
     else {
         return Err(PersistenceError::AssignmentNotFound(
             assignment_id.to_string(),
         ));
     };
+    let block_reason = block_reason_kind
+        .as_deref()
+        .and_then(BlockReason::from_wire)
+        .map(|kind| BlockReasonResponse {
+            kind,
+            detail: block_reason_detail.clone(),
+        });
     let latest_attempt =
         sqlx::query_as::<_, (String, String, Option<i64>, Option<String>, Option<String>)>(
             r#"
@@ -749,18 +759,23 @@ pub async fn increment_review_rejection(
 }
 
 /// Move an Issue Assignment into the coarse blocked lifecycle state with a
-/// human-readable reason. Used when the Review Loop exhausts the per-Project
-/// Review Retry Limit (issue #44) and for other phase-level block paths.
-pub async fn block_assignment(
+/// typed **Block Reason** (ADR-0038). `kind` populates
+/// `block_reason_kind` for taxonomy-driven Dashboard affordances; `detail`
+/// keeps the existing freeform text used as `status_detail` and as the
+/// human-readable specifics under the typed badge. Freeform-only blocking
+/// is no longer supported.
+pub async fn record_blocked_with_kind(
     db: &Db,
     assignment_id: &str,
-    reason: &str,
+    kind: BlockReason,
+    detail: Option<&str>,
 ) -> Result<IssueAssignmentResponse, PersistenceError> {
     let result = sqlx::query(
-        "UPDATE issue_assignments SET status = 'blocked', status_detail = ?, block_reason = ? WHERE id = ?",
+        "UPDATE issue_assignments SET status = 'blocked', status_detail = ?, block_reason = ?, block_reason_kind = ? WHERE id = ?",
     )
-    .bind(reason)
-    .bind(reason)
+    .bind(detail)
+    .bind(detail)
+    .bind(kind.as_wire())
     .bind(assignment_id)
     .execute(db)
     .await?;
@@ -788,7 +803,7 @@ pub async fn re_enable_blocked_assignment(
         )));
     }
     let result = sqlx::query(
-        "UPDATE issue_assignments SET status = 're_enabled', status_detail = NULL, block_reason = NULL, review_rejection_count = 0 WHERE id = ?",
+        "UPDATE issue_assignments SET status = 're_enabled', status_detail = NULL, block_reason = NULL, block_reason_kind = NULL, review_rejection_count = 0 WHERE id = ?",
     )
     .bind(assignment_id)
     .execute(db)
@@ -1191,6 +1206,114 @@ mod tests {
         assert!(ids.contains(&"ready-blocked".to_string()));
         assert!(ids.contains(&"ready-completed".to_string()));
         assert!(ids.contains(&"not-ready".to_string()));
+    }
+
+    #[tokio::test]
+    async fn record_blocked_with_kind_persists_typed_block_reason() {
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let source = IssueSource {
+            kind: "github".into(),
+            locator: "owner/repo".into(),
+        };
+        enable_issue_source(
+            &db,
+            &project.id.0,
+            &EnableIssueSourceRequest {
+                kind: source.kind.clone(),
+                locator: source.locator.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let issue = make_issue("42", "ready", "ready");
+        let assignment = create_issue_assignment(&db, &project.id.0, &source, &issue, "agent/42")
+            .await
+            .unwrap();
+
+        let updated = record_blocked_with_kind(
+            &db,
+            &assignment.id,
+            BlockReason::ReviewRetryLimitExhausted,
+            Some("Review Loop exhausted: 3 rejection(s)"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.status, "blocked");
+        let reason = updated
+            .block_reason
+            .as_ref()
+            .expect("typed block reason recorded");
+        assert_eq!(reason.kind, BlockReason::ReviewRetryLimitExhausted);
+        assert_eq!(
+            reason.detail.as_deref(),
+            Some("Review Loop exhausted: 3 rejection(s)")
+        );
+
+        // Re-enable clears both kind and detail.
+        let cleared = re_enable_blocked_assignment(&db, &assignment.id)
+            .await
+            .unwrap();
+        assert!(cleared.block_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_blocked_with_kind_supports_merge_phase_failed() {
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let source = IssueSource {
+            kind: "github".into(),
+            locator: "owner/repo".into(),
+        };
+        enable_issue_source(
+            &db,
+            &project.id.0,
+            &EnableIssueSourceRequest {
+                kind: source.kind.clone(),
+                locator: source.locator.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let issue = make_issue("99", "ready", "ready");
+        let assignment = create_issue_assignment(&db, &project.id.0, &source, &issue, "agent/99")
+            .await
+            .unwrap();
+
+        let updated = record_blocked_with_kind(
+            &db,
+            &assignment.id,
+            BlockReason::MergePhaseFailed,
+            Some("unresolvable merge conflict requires human review"),
+        )
+        .await
+        .unwrap();
+        let reason = updated
+            .block_reason
+            .as_ref()
+            .expect("typed block reason recorded");
+        assert_eq!(reason.kind, BlockReason::MergePhaseFailed);
+        assert!(
+            reason
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("merge conflict"))
+        );
     }
 
     fn make_issue(source_id: &str, readiness: &str, lifecycle_status: &str) -> SourceIssueSnapshot {

@@ -315,11 +315,20 @@ async fn blocked_merge_does_not_push_and_fails_plan_run_with_block_reason() {
     assert_eq!(assignment.status, "blocked");
     let reason = assignment
         .block_reason
-        .as_deref()
+        .as_ref()
         .expect("block_reason recorded for blocked Merge Phase");
+    assert_eq!(
+        reason.kind,
+        agentic_afk_contracts::BlockReason::MergePhaseFailed,
+        "blocked Merge Phase must record the typed MergePhaseFailed kind"
+    );
+    let detail = reason
+        .detail
+        .as_deref()
+        .expect("typed Merge Phase block reason carries cause-specific detail");
     assert!(
-        reason.contains("merge conflict") || reason.contains("conflict"),
-        "block_reason should describe the merge conflict: {reason}"
+        detail.contains("merge conflict") || detail.contains("conflict"),
+        "block_reason detail should describe the merge conflict: {detail}"
     );
 
     // Durable merge Phase Output with the blocked outcome is preserved.
@@ -349,6 +358,43 @@ async fn blocked_merge_does_not_push_and_fails_plan_run_with_block_reason() {
         "Assignment Worktree must be cleaned up at Plan Run finish for blocked merges (issue #46)"
     );
 
+    drop(fixture.project_dir);
+}
+
+#[tokio::test]
+async fn merge_phase_failure_api_response_carries_typed_merge_phase_failed_kind() {
+    // Issue #52 / ADR-0038: the Issue Assignment API response must carry
+    // the typed `BlockReason` kind (merge_phase_failed) plus the preserved
+    // freeform detail. The Dashboard's typed-badge rendering depends on
+    // the wire taxonomy, so this asserts the JSON shape directly.
+    let fixture = build_fixture(IMPL_OK, REVIEW_APPROVED, MERGE_BLOCKED, None).await;
+    let pid = fixture.project.id.0.clone();
+    let _ = start(&fixture.router, &pid).await;
+
+    let resp = fixture
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/projects/{pid}/snapshot"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_text(resp).await;
+    assert!(
+        body.contains("\"kind\":\"merge_phase_failed\""),
+        "snapshot must expose typed block_reason.kind for a failed Merge Phase: {body}"
+    );
+    // The freeform detail text from the existing Merge Phase block path is
+    // preserved under the typed kind.
+    assert!(
+        body.contains("unresolvable merge conflict"),
+        "preserved freeform detail must remain visible on the API response: {body}"
+    );
     drop(fixture.project_dir);
 }
 

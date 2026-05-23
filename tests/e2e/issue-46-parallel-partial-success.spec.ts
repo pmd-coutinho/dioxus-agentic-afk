@@ -127,8 +127,11 @@ test('parallel partial-success Plan Run shows merged + blocked assignments toget
         },
       ],
       review_rejection_count: 1,
-      block_reason:
-        'Review Loop exhausted: 1 rejection(s) reached the Project Review Retry Limit (1).',
+      block_reason: {
+        kind: 'review_retry_limit_exhausted',
+        detail:
+          'Review Loop exhausted: 1 rejection(s) reached the Project Review Retry Limit (1).',
+      },
     },
   });
 

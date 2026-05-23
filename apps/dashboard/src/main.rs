@@ -702,8 +702,14 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
             }
             if let Some(reason) = block_reason.clone() {
                 p { class: "font-mono text-[11px] text-coral",
-                    "data-testid": "assignment-block-reason",
-                    "Blocked: {reason}"
+                    "data-testid": "assignment-block-reason-kind",
+                    "Blocked: {reason.kind.as_wire()}"
+                }
+                if let Some(detail) = reason.detail.clone() {
+                    p { class: "font-mono text-[11px] text-coral",
+                        "data-testid": "assignment-block-reason-detail",
+                        "{detail}"
+                    }
                 }
             }
             if !phase_outputs.is_empty() {

@@ -81,7 +81,11 @@ test('blocked assignment exposes rejection count, block reason, and Re-enable bu
         },
       ],
       review_rejection_count: 2,
-      block_reason: 'Review Loop exhausted: 2 rejection(s) reached the Project Review Retry Limit (2).',
+      block_reason: {
+        kind: 'review_retry_limit_exhausted',
+        detail:
+          'Review Loop exhausted: 2 rejection(s) reached the Project Review Retry Limit (2).',
+      },
     },
   });
 
@@ -91,7 +95,10 @@ test('blocked assignment exposes rejection count, block reason, and Re-enable bu
 
   // Review rejection count + block reason rendered for the developer.
   await expect(page.getByTestId('assignment-review-rejection-count')).toContainText('2');
-  await expect(page.getByTestId('assignment-block-reason')).toContainText(
+  await expect(page.getByTestId('assignment-block-reason-kind')).toContainText(
+    'review_retry_limit_exhausted',
+  );
+  await expect(page.getByTestId('assignment-block-reason-detail')).toContainText(
     'Review Loop exhausted',
   );
 

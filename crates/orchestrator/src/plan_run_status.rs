@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use agentic_afk_contracts::IssueAssignmentResponse;
+use agentic_afk_contracts::{BlockReason, IssueAssignmentResponse};
 use agentic_afk_persistence::{self as persistence, Db};
 
 use crate::coordinator::{CoordinatorError, EventPublisher};
@@ -28,13 +28,19 @@ pub enum AssignmentStatus {
     /// Parallel Tasks. See ADR-0037 and CONTEXT.md → Assignment Status.
     MergeStaged,
     Merged,
-    Blocked { reason: String },
+    /// Blocked with a typed **Block Reason** (ADR-0038). `kind` drives
+    /// Dashboard affordances; `detail` is the optional freeform text
+    /// surfaced as the status detail.
+    Blocked {
+        kind: BlockReason,
+        detail: String,
+    },
 }
 
 impl AssignmentStatus {
     /// Persisted string discriminator used in the `issue_assignments.status`
     /// column. Pairs with `persistence::set_assignment_status` /
-    /// `persistence::block_assignment`.
+    /// `persistence::record_blocked_with_kind`.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Implementing => "implementing",
@@ -50,9 +56,9 @@ impl AssignmentStatus {
 
 /// Persist a new `AssignmentStatus` and publish the resulting
 /// `AssignmentStatusChanged` event in one step. Blocked transitions use
-/// `persistence::block_assignment` so the `block_reason` column is set
-/// alongside the status; every other transition uses
-/// `persistence::set_assignment_status`.
+/// `persistence::record_blocked_with_kind` so the typed `block_reason_kind`
+/// and freeform `block_reason` detail (ADR-0038) are set alongside the
+/// status; every other transition uses `persistence::set_assignment_status`.
 pub async fn transition_assignment(
     db: &Db,
     events: &Arc<dyn EventPublisher>,
@@ -61,8 +67,8 @@ pub async fn transition_assignment(
     status: AssignmentStatus,
 ) -> Result<IssueAssignmentResponse, CoordinatorError> {
     let updated = match &status {
-        AssignmentStatus::Blocked { reason } => {
-            persistence::block_assignment(db, assignment_id, reason)
+        AssignmentStatus::Blocked { kind, detail } => {
+            persistence::record_blocked_with_kind(db, assignment_id, *kind, Some(detail))
                 .await
                 .map_err(CoordinatorError::from_persistence)?
         }

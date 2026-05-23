@@ -971,7 +971,8 @@ async fn block_assignment_for_loop(
         project_id,
         &assignment.id,
         AssignmentStatus::Blocked {
-            reason: reason.to_string(),
+            kind: agentic_afk_contracts::BlockReason::ReviewRetryLimitExhausted,
+            detail: reason.to_string(),
         },
     )
     .await?;
@@ -1152,7 +1153,8 @@ async fn finalize_parallel_plan_run(
                     project_id,
                     &merge_assignment.id,
                     AssignmentStatus::Blocked {
-                        reason: reason.clone(),
+                        kind: agentic_afk_contracts::BlockReason::MergePhaseFailed,
+                        detail: reason.clone(),
                     },
                 )
                 .await?;

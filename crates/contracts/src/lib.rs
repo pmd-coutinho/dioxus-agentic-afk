@@ -185,11 +185,61 @@ pub struct IssueAssignmentResponse {
     /// Reset to zero when a human re-enables a blocked assignment.
     #[serde(default)]
     pub review_rejection_count: i64,
-    /// Human-readable reason captured when an assignment was blocked by an
-    /// exhausted Review Loop (or another phase failure). `None` for
-    /// assignments that have never been blocked.
+    /// Typed cause of a blocked **Issue Assignment** paired with optional
+    /// freeform `detail` (ADR-0038). `None` for assignments that have never
+    /// been blocked or have since been re-enabled.
     #[serde(default)]
-    pub block_reason: Option<String>,
+    pub block_reason: Option<BlockReasonResponse>,
+}
+
+/// Typed cause of a blocked **Issue Assignment** (CONTEXT.md → Block Reason,
+/// ADR-0038). The wire encoding is the lowercase snake-case discriminator
+/// emitted by [`BlockReason::as_wire`]. This slice introduces the two
+/// variants needed by current code; follow-up slices add `PushNonFastForward`
+/// and `AbandonedStaged`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockReason {
+    /// The Review Loop reached the per-Project Review Retry Limit without
+    /// approval (see CONTEXT.md → Review Retry Limit).
+    ReviewRetryLimitExhausted,
+    /// The Merge Phase could not reach a successful merge (conflict the
+    /// agent could not resolve, integration verification failure it could
+    /// not fix, runner failure, or unparseable output).
+    MergePhaseFailed,
+}
+
+impl BlockReason {
+    /// Stable wire encoding stored in `issue_assignments.block_reason_kind`
+    /// and surfaced on [`BlockReasonResponse::kind`] over REST and SSE.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::ReviewRetryLimitExhausted => "review_retry_limit_exhausted",
+            Self::MergePhaseFailed => "merge_phase_failed",
+        }
+    }
+
+    /// Parse the wire encoding back into a typed variant. Returns `None`
+    /// for unrecognized values (e.g. legacy rows whose `block_reason_kind`
+    /// is `NULL` or a future variant the current binary does not know).
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "review_retry_limit_exhausted" => Some(Self::ReviewRetryLimitExhausted),
+            "merge_phase_failed" => Some(Self::MergePhaseFailed),
+            _ => None,
+        }
+    }
+}
+
+/// Structured Block Reason surfaced on the Issue Assignment API response
+/// (ADR-0038). `kind` is the typed taxonomy that drives Dashboard
+/// affordances; `detail` carries cause-specific freeform text (push stderr,
+/// conflict file list, verification log tail) that has no fixed schema.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct BlockReasonResponse {
+    pub kind: BlockReason,
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 // --- Plan Run contracts (ADR-0034) ---
@@ -432,6 +482,66 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: ProjectResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, resp);
+    }
+
+    #[test]
+    fn block_reason_round_trip_review_retry_limit_exhausted() {
+        let reason = BlockReason::ReviewRetryLimitExhausted;
+        assert_eq!(reason.as_wire(), "review_retry_limit_exhausted");
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, "\"review_retry_limit_exhausted\"");
+        let back: BlockReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, reason);
+        assert_eq!(
+            BlockReason::from_wire("review_retry_limit_exhausted"),
+            Some(BlockReason::ReviewRetryLimitExhausted)
+        );
+    }
+
+    #[test]
+    fn block_reason_round_trip_merge_phase_failed() {
+        let reason = BlockReason::MergePhaseFailed;
+        assert_eq!(reason.as_wire(), "merge_phase_failed");
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, "\"merge_phase_failed\"");
+        let back: BlockReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, reason);
+        assert_eq!(
+            BlockReason::from_wire("merge_phase_failed"),
+            Some(BlockReason::MergePhaseFailed)
+        );
+    }
+
+    #[test]
+    fn block_reason_from_wire_rejects_unknown() {
+        assert_eq!(BlockReason::from_wire("nope"), None);
+    }
+
+    #[test]
+    fn block_reason_response_serializes_as_kind_and_detail() {
+        let response = BlockReasonResponse {
+            kind: BlockReason::ReviewRetryLimitExhausted,
+            detail: Some("Review Loop exhausted: 2 rejection(s)".to_string()),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(
+            json.contains("\"kind\":\"review_retry_limit_exhausted\""),
+            "{json}"
+        );
+        assert!(json.contains("\"detail\":\"Review Loop"), "{json}");
+        let back: BlockReasonResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, response);
+    }
+
+    #[test]
+    fn block_reason_response_round_trips_without_detail() {
+        let response = BlockReasonResponse {
+            kind: BlockReason::MergePhaseFailed,
+            detail: None,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let back: BlockReasonResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, response);
     }
 
     #[test]
