@@ -289,6 +289,11 @@ pub enum BlockReason {
     /// **Issue Assignment** (ADR-0037 / issue #54). No push was attempted;
     /// the staged work will not land in the **Integration Branch**.
     AbandonedStaged,
+    /// The orchestrator was killed (SIGTERM/SIGINT/crash) while a Codex
+    /// phase was running for this assignment; on next boot the recovery
+    /// scanner marked the assignment blocked because the in-flight Codex
+    /// child was killed and the lost work cannot be resumed (ADR-0042).
+    OrchestratorRestart,
 }
 
 impl BlockReason {
@@ -300,6 +305,7 @@ impl BlockReason {
             Self::MergePhaseFailed => "merge_phase_failed",
             Self::PushNonFastForward => "push_non_fast_forward",
             Self::AbandonedStaged => "abandoned_staged",
+            Self::OrchestratorRestart => "orchestrator_restart",
         }
     }
 
@@ -312,6 +318,7 @@ impl BlockReason {
             "merge_phase_failed" => Some(Self::MergePhaseFailed),
             "push_non_fast_forward" => Some(Self::PushNonFastForward),
             "abandoned_staged" => Some(Self::AbandonedStaged),
+            "orchestrator_restart" => Some(Self::OrchestratorRestart),
             _ => None,
         }
     }
@@ -914,6 +921,20 @@ mod tests {
         assert_eq!(
             BlockReason::from_wire("abandoned_staged"),
             Some(BlockReason::AbandonedStaged)
+        );
+    }
+
+    #[test]
+    fn block_reason_round_trip_orchestrator_restart() {
+        let reason = BlockReason::OrchestratorRestart;
+        assert_eq!(reason.as_wire(), "orchestrator_restart");
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, "\"orchestrator_restart\"");
+        let back: BlockReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, reason);
+        assert_eq!(
+            BlockReason::from_wire("orchestrator_restart"),
+            Some(BlockReason::OrchestratorRestart)
         );
     }
 
