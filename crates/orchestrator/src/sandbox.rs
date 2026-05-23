@@ -1,0 +1,408 @@
+//! Codex Sandbox primitives — runtime image build, launch spec, and the
+//! `SandboxLauncher` trait. Wired into Plan Run phases in later slices
+//! (issue #74).
+//!
+//! The Dockerfile and entrypoint are embedded into the binary at compile
+//! time so the build is hermetic and the image content hash is a pure
+//! function of those two files.
+//!
+//! See ADR-0041.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+use sha2::{Digest, Sha256};
+
+pub const RUNTIME_DOCKERFILE: &str = include_str!("../runtime/Dockerfile");
+pub const RUNTIME_ENTRYPOINT: &str = include_str!("../runtime/entrypoint.sh");
+
+pub const RUNTIME_IMAGE_REPO: &str = "agentic-afk-runtime";
+pub const MISE_CACHE_VOLUME: &str = "agentic-afk-mise-cache";
+
+/// Content-addressed tag for the runtime image. Hash covers the embedded
+/// Dockerfile and entrypoint so any change to either produces a fresh
+/// tag and a fresh build.
+pub fn runtime_image_tag() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(RUNTIME_DOCKERFILE.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(RUNTIME_ENTRYPOINT.as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    format!("{RUNTIME_IMAGE_REPO}:{hex}")
+}
+
+/// Codex phase this sandbox is hosting. Drives label values and mount
+/// semantics (Planning bind-mounts the Project read-only; the others
+/// bind-mount the Assignment Worktree read-write).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxPhase {
+    Planning,
+    Implementation,
+    Review,
+    Merge,
+}
+
+impl SandboxPhase {
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            SandboxPhase::Planning => "planning",
+            SandboxPhase::Implementation => "implementation",
+            SandboxPhase::Review => "review",
+            SandboxPhase::Merge => "merge",
+        }
+    }
+}
+
+/// One bind mount or named-volume mount in a Codex Sandbox.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SandboxMount {
+    /// Host bind mount.
+    Bind {
+        host_path: PathBuf,
+        container_path: PathBuf,
+        read_only: bool,
+    },
+    /// Named Docker volume (e.g. the shared mise cache).
+    Volume {
+        name: String,
+        container_path: PathBuf,
+        read_only: bool,
+    },
+}
+
+/// Everything `DockerSandboxLauncher` needs to translate into a single
+/// `docker run --rm` invocation.
+#[derive(Clone, Debug)]
+pub struct SandboxLaunchSpec {
+    pub image_tag: String,
+    pub container_name: String,
+    pub phase: SandboxPhase,
+    pub labels: Vec<(String, String)>,
+    pub mounts: Vec<SandboxMount>,
+    pub workdir: PathBuf,
+    pub env: Vec<(String, String)>,
+    /// The full agent invocation argv (e.g. `["codex", "exec", "--...",
+    /// prompt]`). Appended after the image tag in `docker run`.
+    pub command: Vec<String>,
+    pub memory: String,
+    pub cpus: String,
+    pub pids_limit: u32,
+    /// `Some((uid, gid))` runs the container under that identity; `None`
+    /// uses the image default (only useful in smoke tests).
+    pub user: Option<(u32, u32)>,
+}
+
+impl SandboxLaunchSpec {
+    /// Standard 8 GiB / 2 vCPU / 512 pid caps from ADR-0041.
+    pub fn default_caps() -> (String, String, u32) {
+        ("8g".to_string(), "2.0".to_string(), 512)
+    }
+}
+
+/// Typed failure modes from a launcher invocation. Mapped to the
+/// per-phase `PlanRunPhaseError` variant by the caller.
+#[derive(Debug, thiserror::Error)]
+pub enum SandboxError {
+    #[error("failed to spawn docker: {0}")]
+    Spawn(String),
+    #[error("docker run exited with status {status}: {stderr}")]
+    NonZero { status: i32, stderr: String },
+    #[error("failed to build runtime image: {0}")]
+    Build(String),
+    #[error("invalid sandbox launch spec: {0}")]
+    InvalidSpec(String),
+}
+
+/// Translates a `SandboxLaunchSpec` into the argv passed to `docker`.
+/// Public for unit-testability — the production launcher just calls
+/// `Command::new("docker")` with the result.
+pub fn docker_run_args(spec: &SandboxLaunchSpec) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "--name".to_string(),
+        spec.container_name.clone(),
+        "--memory".to_string(),
+        spec.memory.clone(),
+        "--cpus".to_string(),
+        spec.cpus.clone(),
+        "--pids-limit".to_string(),
+        spec.pids_limit.to_string(),
+        "--restart".to_string(),
+        "no".to_string(),
+        "--workdir".to_string(),
+        spec.workdir.to_string_lossy().into_owned(),
+    ];
+    if let Some((uid, gid)) = spec.user {
+        args.push("--user".to_string());
+        args.push(format!("{uid}:{gid}"));
+    }
+    for (k, v) in &spec.labels {
+        args.push("--label".to_string());
+        args.push(format!("{k}={v}"));
+    }
+    for (k, v) in &spec.env {
+        args.push("--env".to_string());
+        args.push(format!("{k}={v}"));
+    }
+    for mount in &spec.mounts {
+        args.push("--mount".to_string());
+        args.push(render_mount(mount));
+    }
+    args.push(spec.image_tag.clone());
+    for piece in &spec.command {
+        args.push(piece.clone());
+    }
+    args
+}
+
+fn render_mount(mount: &SandboxMount) -> String {
+    match mount {
+        SandboxMount::Bind {
+            host_path,
+            container_path,
+            read_only,
+        } => format!(
+            "type=bind,source={},target={}{}",
+            host_path.to_string_lossy(),
+            container_path.to_string_lossy(),
+            if *read_only { ",readonly" } else { "" }
+        ),
+        SandboxMount::Volume {
+            name,
+            container_path,
+            read_only,
+        } => format!(
+            "type=volume,source={name},target={}{}",
+            container_path.to_string_lossy(),
+            if *read_only { ",readonly" } else { "" }
+        ),
+    }
+}
+
+/// Launches a Codex Sandbox container per spec and returns captured
+/// stdout on success.
+pub trait SandboxLauncher: Send + Sync {
+    fn launch(&self, spec: SandboxLaunchSpec) -> Result<String, SandboxError>;
+}
+
+/// Builds the runtime image on demand and returns the content-hash tag.
+/// The builder is idempotent: a second call with the same embedded
+/// inputs short-circuits via `docker image inspect`.
+pub struct RuntimeImageBuilder {
+    docker_binary: PathBuf,
+}
+
+impl RuntimeImageBuilder {
+    pub fn new(docker_binary: impl Into<PathBuf>) -> Self {
+        Self {
+            docker_binary: docker_binary.into(),
+        }
+    }
+
+    /// Returns the content-hash image tag, building the image if it is
+    /// not already present in the local daemon.
+    pub fn ensure(&self) -> Result<String, SandboxError> {
+        let tag = runtime_image_tag();
+        if self.image_present(&tag)? {
+            return Ok(tag);
+        }
+        self.build(&tag)?;
+        Ok(tag)
+    }
+
+    fn image_present(&self, tag: &str) -> Result<bool, SandboxError> {
+        let output = Command::new(&self.docker_binary)
+            .args(["image", "inspect", tag])
+            .output()
+            .map_err(|e| SandboxError::Spawn(format!("docker image inspect: {e}")))?;
+        Ok(output.status.success())
+    }
+
+    fn build(&self, tag: &str) -> Result<(), SandboxError> {
+        // Materialise the embedded build context into a temp dir so the
+        // image build is hermetic — the on-disk runtime/ dir is not
+        // required at runtime.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let ctx_dir = std::env::temp_dir().join(format!(
+            "agentic-afk-runtime-build-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&ctx_dir)
+            .map_err(|e| SandboxError::Build(format!("create build context: {e}")))?;
+        std::fs::write(ctx_dir.join("Dockerfile"), RUNTIME_DOCKERFILE)
+            .map_err(|e| SandboxError::Build(format!("write Dockerfile: {e}")))?;
+        std::fs::write(ctx_dir.join("entrypoint.sh"), RUNTIME_ENTRYPOINT)
+            .map_err(|e| SandboxError::Build(format!("write entrypoint: {e}")))?;
+
+        let output = Command::new(&self.docker_binary)
+            .args(["build", "--tag", tag, "."])
+            .current_dir(&ctx_dir)
+            .output()
+            .map_err(|e| SandboxError::Spawn(format!("docker build spawn: {e}")))?;
+        let _ = std::fs::remove_dir_all(&ctx_dir);
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            return Err(SandboxError::Build(stderr));
+        }
+        Ok(())
+    }
+}
+
+/// Production launcher: shells out to `docker run` with the argv from
+/// `docker_run_args` and returns stdout.
+pub struct DockerSandboxLauncher {
+    docker_binary: PathBuf,
+}
+
+impl DockerSandboxLauncher {
+    pub fn new(docker_binary: impl Into<PathBuf>) -> Self {
+        Self {
+            docker_binary: docker_binary.into(),
+        }
+    }
+}
+
+impl SandboxLauncher for DockerSandboxLauncher {
+    fn launch(&self, spec: SandboxLaunchSpec) -> Result<String, SandboxError> {
+        let args = docker_run_args(&spec);
+        let output = Command::new(&self.docker_binary)
+            .args(&args)
+            .output()
+            .map_err(|e| SandboxError::Spawn(format!("docker run: {e}")))?;
+        if !output.status.success() {
+            return Err(SandboxError::NonZero {
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_image_tag_uses_repo_and_short_hex() {
+        let tag = runtime_image_tag();
+        let (repo, hex) = tag.split_once(':').expect("tag has colon");
+        assert_eq!(repo, RUNTIME_IMAGE_REPO);
+        assert_eq!(hex.len(), 12, "12 hex chars from 6 bytes");
+        assert!(
+            hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "tag suffix is hex"
+        );
+    }
+
+    #[test]
+    fn runtime_image_tag_is_deterministic_across_calls() {
+        assert_eq!(runtime_image_tag(), runtime_image_tag());
+    }
+
+    #[test]
+    fn docker_run_args_includes_rm_caps_workdir_and_image_last() {
+        let spec = SandboxLaunchSpec {
+            image_tag: "agentic-afk-runtime:abc123".to_string(),
+            container_name: "agentic-afk-assignment-aaa".to_string(),
+            phase: SandboxPhase::Planning,
+            labels: vec![("agentic-afk.phase".to_string(), "planning".to_string())],
+            mounts: vec![SandboxMount::Bind {
+                host_path: "/host/proj".into(),
+                container_path: "/work".into(),
+                read_only: true,
+            }],
+            workdir: "/work".into(),
+            env: vec![("HOME".to_string(), "/tmp/codex-home".to_string())],
+            command: vec!["codex".to_string(), "exec".to_string(), "go".to_string()],
+            memory: "8g".to_string(),
+            cpus: "2.0".to_string(),
+            pids_limit: 512,
+            user: Some((1000, 1000)),
+        };
+        let args = docker_run_args(&spec);
+        assert_eq!(args.first().map(String::as_str), Some("run"));
+        assert!(args.iter().any(|a| a == "--rm"));
+        assert!(args.windows(2).any(|w| w[0] == "--memory" && w[1] == "8g"));
+        assert!(args.windows(2).any(|w| w[0] == "--cpus" && w[1] == "2.0"));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--pids-limit" && w[1] == "512")
+        );
+        assert!(args.windows(2).any(|w| w[0] == "--user" && w[1] == "1000:1000"));
+        assert!(args.windows(2).any(|w| w[0] == "--workdir" && w[1] == "/work"));
+        assert!(args.windows(2).any(
+            |w| w[0] == "--label" && w[1] == "agentic-afk.phase=planning"
+        ));
+        assert!(args.windows(2).any(
+            |w| w[0] == "--env" && w[1] == "HOME=/tmp/codex-home"
+        ));
+        let image_idx = args
+            .iter()
+            .position(|a| a == "agentic-afk-runtime:abc123")
+            .expect("image tag present");
+        assert_eq!(
+            args[image_idx + 1..],
+            ["codex", "exec", "go"],
+            "command follows image tag"
+        );
+    }
+
+    #[test]
+    fn docker_run_args_renders_bind_mount_readonly() {
+        let spec = sample_spec(vec![SandboxMount::Bind {
+            host_path: "/h/x".into(),
+            container_path: "/c/x".into(),
+            read_only: true,
+        }]);
+        let args = docker_run_args(&spec);
+        let mount = args
+            .windows(2)
+            .find(|w| w[0] == "--mount")
+            .map(|w| w[1].clone())
+            .expect("bind mount rendered");
+        assert_eq!(mount, "type=bind,source=/h/x,target=/c/x,readonly");
+    }
+
+    #[test]
+    fn docker_run_args_renders_named_volume_mount_rw() {
+        let spec = sample_spec(vec![SandboxMount::Volume {
+            name: MISE_CACHE_VOLUME.to_string(),
+            container_path: "/cache/mise".into(),
+            read_only: false,
+        }]);
+        let args = docker_run_args(&spec);
+        let mount = args
+            .windows(2)
+            .find(|w| w[0] == "--mount")
+            .map(|w| w[1].clone())
+            .expect("volume mount rendered");
+        assert_eq!(
+            mount,
+            "type=volume,source=agentic-afk-mise-cache,target=/cache/mise"
+        );
+    }
+
+    fn sample_spec(mounts: Vec<SandboxMount>) -> SandboxLaunchSpec {
+        SandboxLaunchSpec {
+            image_tag: "agentic-afk-runtime:000000000000".to_string(),
+            container_name: "agentic-afk-assignment-test".to_string(),
+            phase: SandboxPhase::Implementation,
+            labels: vec![],
+            mounts,
+            workdir: "/work".into(),
+            env: vec![],
+            command: vec!["true".to_string()],
+            memory: "8g".to_string(),
+            cpus: "2.0".to_string(),
+            pids_limit: 512,
+            user: None,
+        }
+    }
+}

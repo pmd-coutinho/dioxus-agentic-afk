@@ -19,6 +19,7 @@ pub mod production;
 pub mod push_attempt;
 pub mod re_enable_source_issue;
 pub mod review_loop;
+pub mod sandbox;
 
 pub use coordinator::{
     CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs, abandon_staged,

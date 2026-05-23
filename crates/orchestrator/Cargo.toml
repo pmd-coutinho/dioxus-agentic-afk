@@ -12,3 +12,12 @@ agentic-afk-planning-snapshot.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+sha2 = "0.10"
+
+[features]
+default = []
+# Real-Docker smoke test for the runtime image + mise install path
+# (issue #72). Excluded from the default test set; CI does not run it.
+# Invoke with:
+#   cargo test -p agentic-afk-orchestrator --features docker-smoke --test docker_smoke
+docker-smoke = []

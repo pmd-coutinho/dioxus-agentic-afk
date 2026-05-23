@@ -4,3 +4,4 @@ node_modules/
 test-results/
 playwright-report/
 apps/dashboard/assets/tailwind.css
+.claude/
