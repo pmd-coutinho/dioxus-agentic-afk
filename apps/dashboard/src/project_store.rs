@@ -175,7 +175,11 @@ pub enum MutationKey {
     EnableIssueSource(ProjectId, String, String),
     SetExecutionConfig(ProjectId),
     StartPlanRun(ProjectId),
-    ReEnableAssignment(ProjectId, IssueAssignmentId),
+    /// Source-Issue-keyed re-enable (issue #55 / ADR-0038). Replaces
+    /// the legacy Assignment-keyed re-enable because the durable
+    /// authority is the **Source Issue**; the Issue Assignment row may
+    /// already be cleaned up by the time the operator re-enables.
+    ReEnableSourceIssue(ProjectId, SourceIssueId),
     /// Operator-initiated Retry Push for a `merge_staged` Issue
     /// Assignment (issue #53 / ADR-0037).
     RetryPushAssignment(ProjectId, IssueAssignmentId),
@@ -190,6 +194,11 @@ pub enum MutationKey {
 /// Issue inside a Plan Run).
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct IssueAssignmentId(pub String);
+
+/// Identifier for a Source Issue (issue id in the configured Issue
+/// Source: GitHub issue number, local markdown filename, etc.).
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SourceIssueId(pub String);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MutationCategory {
@@ -884,14 +893,14 @@ mod tests {
     }
 
     #[test]
-    fn assignment_keys_are_distinct_by_variant_and_id() {
+    fn source_issue_re_enable_keys_are_distinct_by_id() {
         let project = ProjectId("p1".to_string());
-        let assignment_a = IssueAssignmentId("assn-A".to_string());
-        let assignment_b = IssueAssignmentId("assn-B".to_string());
+        let source_a = SourceIssueId("42".to_string());
+        let source_b = SourceIssueId("43".to_string());
 
         let mut table = MutationsTable::new();
-        let re_enable_a = MutationKey::ReEnableAssignment(project.clone(), assignment_a.clone());
-        let re_enable_b = MutationKey::ReEnableAssignment(project, assignment_b);
+        let re_enable_a = MutationKey::ReEnableSourceIssue(project.clone(), source_a.clone());
+        let re_enable_b = MutationKey::ReEnableSourceIssue(project, source_b);
 
         table.set_pending(re_enable_a.clone());
         assert!(table.is_pending(&re_enable_a));

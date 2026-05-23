@@ -787,6 +787,60 @@ pub async fn record_blocked_with_kind(
     get_issue_assignment(db, assignment_id).await
 }
 
+/// Look up the most recently created blocked **Issue Assignment** for
+/// one `(project, source_id)` pair, if any. Returns `None` when no
+/// blocked row remains (Plan Run cleanup may have deleted the dead
+/// Issue Assignment row, or the operator may be re-enabling a Source
+/// Issue that never blocked). Used by the Source-Issue-keyed re-enable
+/// use case (ADR-0038) which must locate the latest blocked row, not
+/// the operator-supplied Assignment id.
+pub async fn latest_blocked_assignment_for_source(
+    db: &Db,
+    project_id: &str,
+    source_id: &str,
+) -> Result<Option<IssueAssignmentResponse>, PersistenceError> {
+    let row = sqlx::query_as::<_, (String,)>(
+        r#"
+        SELECT id
+        FROM issue_assignments
+        WHERE project_id = ? AND source_id = ? AND status = 'blocked'
+        ORDER BY rowid DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(project_id)
+    .bind(source_id)
+    .fetch_optional(db)
+    .await?;
+    match row {
+        Some((id,)) => Ok(Some(get_issue_assignment(db, &id).await?)),
+        None => Ok(None),
+    }
+}
+
+/// Update the Lifecycle Status of one Source Issue row inside the local
+/// **Planning Snapshot** mirror. Used by the Source-Issue-keyed
+/// re-enable use case (ADR-0038) to flip a `blocked` mirror row to
+/// `ready` so the next **Plan Run** Planning Snapshot buckets the
+/// Source Issue as `eligible` rather than `active` without waiting for
+/// a fresh sync. A no-op when no snapshot row exists.
+pub async fn set_planning_snapshot_lifecycle(
+    db: &Db,
+    project_id: &str,
+    source_id: &str,
+    lifecycle_status: &str,
+) -> Result<(), PersistenceError> {
+    sqlx::query(
+        "UPDATE planning_snapshot_issues SET lifecycle_status = ? WHERE project_id = ? AND source_id = ?",
+    )
+    .bind(lifecycle_status)
+    .bind(project_id)
+    .bind(source_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Clear the blocked lifecycle of an Issue Assignment without redefining
 /// `ready-for-agent` readiness. Resets the review rejection counter so a
 /// later Plan Run may pick up the Source Issue again. Returns the updated

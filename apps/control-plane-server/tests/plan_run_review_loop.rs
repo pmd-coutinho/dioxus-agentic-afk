@@ -365,8 +365,10 @@ async fn re_enable_blocked_assignment_clears_blocked_lifecycle_and_resets_counte
         .await
         .unwrap();
     let assignment_id = runs[0].assignments[0].id.clone();
+    let source_id = runs[0].assignments[0].source_id.clone();
 
-    // POST the re-enable endpoint.
+    // POST the Source-Issue-keyed re-enable endpoint (issue #55 /
+    // ADR-0038). The legacy Assignment-keyed endpoint was dropped.
     let resp = fixture
         .router
         .clone()
@@ -374,7 +376,7 @@ async fn re_enable_blocked_assignment_clears_blocked_lifecycle_and_resets_counte
             Request::builder()
                 .method("POST")
                 .uri(format!(
-                    "/api/projects/{pid}/assignments/{assignment_id}/re-enable"
+                    "/api/projects/{pid}/source-issues/{source_id}/re-enable"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -408,9 +410,13 @@ async fn re_enable_blocked_assignment_clears_blocked_lifecycle_and_resets_counte
 }
 
 #[tokio::test]
-async fn re_enable_rejects_non_blocked_assignment() {
-    // Fixture that ends with a merged (not blocked) assignment after the
-    // accepting Merge Phase runs through the default fakes.
+async fn re_enable_with_no_blocked_assignment_is_a_local_no_op_with_writeback() {
+    // ADR-0038: Source-Issue-keyed re-enable acts on the latest blocked
+    // Issue Assignment for the Source Issue if one still exists; else
+    // it is a local no-op while the upstream Lifecycle `Ready`
+    // write-back still happens. The legacy Assignment-keyed 422
+    // behaviour is gone because the endpoint no longer pivots on a
+    // dead Assignment row.
     let fixture = build_fixture(vec![IMPL_OK], vec![REVIEW_APPROVED], 1).await;
     let pid = fixture.project.id.0.clone();
     let _ = start(&fixture.router, &pid).await;
@@ -418,7 +424,7 @@ async fn re_enable_rejects_non_blocked_assignment() {
     let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 5)
         .await
         .unwrap();
-    let assignment_id = runs[0].assignments[0].id.clone();
+    let source_id = runs[0].assignments[0].source_id.clone();
 
     let resp = fixture
         .router
@@ -427,14 +433,22 @@ async fn re_enable_rejects_non_blocked_assignment() {
             Request::builder()
                 .method("POST")
                 .uri(format!(
-                    "/api/projects/{pid}/assignments/{assignment_id}/re-enable"
+                    "/api/projects/{pid}/source-issues/{source_id}/re-enable"
                 ))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_text(resp).await;
+    let outcome: agentic_afk_contracts::ReEnableSourceIssueResponse =
+        serde_json::from_str(&body).unwrap();
+    assert!(
+        !outcome.local_cleared,
+        "no blocked assignment to clear: local_cleared = false: {outcome:?}"
+    );
+    assert!(outcome.writeback.ok, "writeback still ran: {outcome:?}");
     drop(fixture.project_dir);
 }
 

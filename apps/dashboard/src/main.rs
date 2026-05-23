@@ -3,7 +3,7 @@ mod sse_client;
 mod ui;
 
 use project_store::{
-    IssueAssignmentId, MutationCategory, MutationKey, MutationState, ProjectStore,
+    IssueAssignmentId, MutationCategory, MutationKey, MutationState, ProjectStore, SourceIssueId,
 };
 use ui::{
     ActionButton, ButtonVariant, Card, CardBody, CardFoot, CardHead, EmptyState, EmptyStateAccent,
@@ -722,9 +722,9 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
                 }
             }
             if is_blocked {
-                ReEnableAssignmentButton {
+                ReEnableSourceIssueButton {
                     project_id: project_id.clone(),
-                    assignment_id: assignment_id.clone(),
+                    source_id: assignment.source_id.clone(),
                 }
             }
             if is_merge_staged {
@@ -838,43 +838,60 @@ fn AbandonStagedAssignmentButton(project_id: String, assignment_id: String) -> E
 }
 
 #[component]
-fn ReEnableAssignmentButton(project_id: String, assignment_id: String) -> Element {
+fn ReEnableSourceIssueButton(project_id: String, source_id: String) -> Element {
     let store = use_context::<ProjectStore>();
-    let key = MutationKey::ReEnableAssignment(
+    let key = MutationKey::ReEnableSourceIssue(
         ProjectId(project_id.clone()),
-        IssueAssignmentId(assignment_id.clone()),
+        SourceIssueId(source_id.clone()),
     );
     rsx! {
         ActionButton {
             mutation_key: key.clone(),
             variant: ButtonVariant::Primary,
-            testid: "re-enable-assignment-button".to_string(),
-            error_marker: "re-enable-assignment".to_string(),
+            testid: "re-enable-source-issue-button".to_string(),
+            error_marker: "re-enable-source-issue".to_string(),
             on_press: {
                 let key = key.clone();
                 let project_id = project_id.clone();
-                let assignment_id = assignment_id.clone();
+                let source_id = source_id.clone();
                 move |_| {
                     let key = key.clone();
                     let project_id = project_id.clone();
-                    let assignment_id = assignment_id.clone();
+                    let source_id = source_id.clone();
                     wasm_bindgen_futures::spawn_local(async move {
                         let result = store
                             .mutate(
                                 key,
-                                re_enable_assignment_api(project_id, assignment_id),
+                                re_enable_source_issue_api(project_id, source_id),
                             )
                             .await;
-                        if result.is_ok() {
-                            store.push_success(
-                                "Issue Assignment re-enabled",
-                                "A later Plan Run may pick this Source Issue again",
-                            );
+                        if let Ok(outcome) = result {
+                            if outcome.writeback.ok {
+                                store.push_success(
+                                    "Source Issue re-enabled",
+                                    "A later Plan Run may pick this Source Issue again",
+                                );
+                            } else {
+                                let detail = outcome
+                                    .writeback
+                                    .error
+                                    .clone()
+                                    .unwrap_or_else(|| "Issue Source write-back failed".to_string());
+                                // Partial success per ADR-0035: local clear
+                                // succeeded but upstream Lifecycle write-back
+                                // failed. Surface as a success entry with the
+                                // failure detail so the operator sees both
+                                // halves without an additional fetch.
+                                store.push_success(
+                                    "Source Issue re-enabled (upstream write-back failed)",
+                                    &detail,
+                                );
+                            }
                         }
                     });
                 }
             },
-            "Re-enable Issue Assignment"
+            "Re-enable Source Issue"
         }
     }
 }
@@ -1677,12 +1694,12 @@ async fn set_execution_config_api(
         .map_err(|error| project_store::MutationFailure::network(error.to_string()))
 }
 
-async fn re_enable_assignment_api(
+async fn re_enable_source_issue_api(
     project_id: String,
-    assignment_id: String,
-) -> Result<IssueAssignmentResponse, project_store::MutationFailure> {
+    source_id: String,
+) -> Result<agentic_afk_contracts::ReEnableSourceIssueResponse, project_store::MutationFailure> {
     let response = gloo_net::http::Request::post(&format!(
-        "/api/projects/{project_id}/assignments/{assignment_id}/re-enable"
+        "/api/projects/{project_id}/source-issues/{source_id}/re-enable"
     ))
     .send()
     .await

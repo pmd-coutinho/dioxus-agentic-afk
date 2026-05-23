@@ -17,9 +17,10 @@ pub use agentic_afk_orchestrator::{
     FakeLifecycleWriter, FakeMergePhaseRunner, FakePlanningPhaseRunner, FakeReviewPhaseRunner,
     FakeWorktreeProvisioner, GitAssignmentWorktreeCleaner, GitIntegrationBranchPusher,
     GitIntegrationBranchRefresher, ImplementationPhaseRunner, IntegrationBranchPusher,
-    IntegrationBranchRefresher, IssueLifecycleWriter, MergePhaseRunner,
+    IntegrationBranchRefresher, IssueLifecycleWriter, LifecycleStatus, MergePhaseRunner,
     PerSourceImplementationPhaseRunner, PerSourceMergePhaseRunner, PerSourceReviewPhaseRunner,
-    PlanRunDeps, PlanRunPhaseError, PlannerSelection, PlanningPhaseRunner, RefreshedBaseline,
+    PlanRunDeps, PlanRunPhaseError, PlannerSelection,
+    PlanningPhaseRunner, RefreshedBaseline,
     ReviewPhaseRunner, StaticIntegrationBranchRefresher, UnimplementedAssignmentWorktreeCleaner,
     UnimplementedImplementationPhaseRunner, UnimplementedIntegrationBranchPusher,
     UnimplementedIntegrationBranchRefresher, UnimplementedLifecycleWriter,
@@ -449,8 +450,8 @@ fn router_with_full_deps(
             post(start_plan_run).get(list_plan_runs),
         )
         .route(
-            "/api/projects/{id}/assignments/{assignment_id}/re-enable",
-            post(re_enable_assignment),
+            "/api/projects/{id}/source-issues/{source_id}/re-enable",
+            post(re_enable_source_issue),
         )
         .route(
             "/api/projects/{id}/assignments/{assignment_id}/retry-push",
@@ -1643,62 +1644,62 @@ async fn set_execution_config(
     }
 }
 
-/// Human re-enable for a blocked Issue Assignment (issue #44). Clears the
-/// blocked Lifecycle Status both on the assignment row and on the upstream
-/// Issue Source, and resets the review rejection counter so a later Plan
-/// Run may pick up the Source Issue again. Does NOT redefine
-/// `ready-for-agent` readiness — that remains a separate Source Issue
-/// concern.
-async fn re_enable_assignment(
+/// Source-Issue-keyed human re-enable (issue #55 / ADR-0038). Clears
+/// the latest blocked Issue Assignment for the Source Issue (if one
+/// still exists) and writes Lifecycle `Ready` back to the **Issue
+/// Source** so the next Plan Run's Planning Snapshot buckets the
+/// Source Issue as `eligible` instead of `active`. Write-back is
+/// best-effort per ADR-0035: a failed upstream write does not abort
+/// the local clear, surfaces as `writeback.ok == false`, and emits a
+/// `lifecycle_writeback_failed` Project Activity entry. HTTP 200 even
+/// when `writeback.ok == false`.
+async fn re_enable_source_issue(
     State(state): State<Arc<AppState>>,
-    Path((id, assignment_id)): Path<(String, String)>,
+    Path((id, source_id)): Path<(String, String)>,
 ) -> Response {
-    let assignment = match persistence::get_project_assignment(&state.db, &id, &assignment_id).await
-    {
-        Ok(assignment) => assignment,
-        Err(error) => return persistence_error_to_response(error),
-    };
-    if assignment.status != "blocked" {
-        return sync_problem_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "urn:agentic-afk:assignment-not-blocked",
-            "Unprocessable Entity",
-            format!(
-                "Issue Assignment {assignment_id} is not blocked (status={})",
-                assignment.status
-            ),
-        );
-    }
     let project = match persistence::get_project(&state.db, &id).await {
-        Ok(project) => project,
-        Err(error) => return persistence_error_to_response(error),
-    };
-    let project = with_git_summary(project);
-
-    let updated = match persistence::re_enable_blocked_assignment(&state.db, &assignment_id).await {
-        Ok(updated) => updated,
+        Ok(project) => with_git_summary(project),
         Err(error) => return persistence_error_to_response(error),
     };
 
-    // PRD #38: human re-enable clears blocked lifecycle state without
-    // redefining `ready-for-agent` readiness. The Source Issue's
-    // `ready-for-agent` label (GitHub) / `ready` frontmatter status
-    // (local markdown) still governs readiness, so re-enable does NOT
-    // write the `ready` lifecycle back. The assignment row + cleared
-    // block reason are the authoritative re-enable signal; a subsequent
-    // Issue Source sync repopulates the eligible bucket from upstream
-    // readiness state. We intentionally avoid overloading the lifecycle
-    // value here.
-    let _ = &project.enabled_issue_source;
-    let _ = &assignment.source_id;
-
-    crate::control_plane_events::publish_assignment_status_changed(
-        &state.event_bus,
-        &id,
-        updated.clone(),
+    let resolved_deps = agentic_afk_orchestrator::coordinator::resolve_deps_for_project(
+        &state.plan_run_deps,
+        &project,
     );
+    let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> =
+        Arc::new(EventBusPublisher::new(
+            state.event_bus.clone(),
+            id.clone(),
+            state.db.clone(),
+        ));
 
-    Json(updated).into_response()
+    match agentic_afk_orchestrator::re_enable_source_issue(
+        &state.db,
+        &events,
+        &resolved_deps.lifecycle,
+        &project,
+        &source_id,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            let body = agentic_afk_contracts::ReEnableSourceIssueResponse {
+                local_cleared: outcome.local_cleared,
+                writeback: match outcome.writeback {
+                    Ok(()) => agentic_afk_contracts::WritebackOutcomeResponse {
+                        ok: true,
+                        error: None,
+                    },
+                    Err(error) => agentic_afk_contracts::WritebackOutcomeResponse {
+                        ok: false,
+                        error: Some(error.0),
+                    },
+                },
+            };
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(error) => coordinator_error_to_response(error),
+    }
 }
 
 /// Operator-initiated Retry Push for a `merge_staged` Issue Assignment

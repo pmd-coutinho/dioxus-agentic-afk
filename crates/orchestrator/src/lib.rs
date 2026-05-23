@@ -14,12 +14,14 @@ pub mod plan_run_status;
 pub mod planning_phase;
 pub mod production;
 pub mod push_attempt;
+pub mod re_enable_source_issue;
 pub mod review_loop;
 
 pub use coordinator::{
     CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs, abandon_staged,
     retry_push, run_plan_run, update_markdown_lifecycle_status,
 };
+pub use re_enable_source_issue::{ReEnableOutcome, WritebackError, re_enable_source_issue};
 pub use push_attempt::{PushOutcome, classify_push_result};
 pub use planning_phase::{PlannedClaim, PlanningRejection, render_planning_prompt};
 

@@ -292,6 +292,31 @@ pub struct AbandonStagedResponse {
     pub block_reason: Option<BlockReasonResponse>,
 }
 
+/// Wire shape of the upstream Lifecycle `Ready` write-back arm of
+/// the Source-Issue-keyed re-enable response (issue #55, ADR-0038).
+/// `ok == true` means the upstream **Issue Source** acknowledged the
+/// write; `ok == false` carries the failure message so the Dashboard
+/// can render a partial-success warning. The local clear is reported
+/// separately in [`ReEnableSourceIssueResponse::local_cleared`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct WritebackOutcomeResponse {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Result body of
+/// `POST /api/projects/{id}/source-issues/{sid}/re-enable`
+/// (issue #55, ADR-0038). Surfaces both halves of the use case so the
+/// Dashboard can render partial-success warnings without an additional
+/// fetch. HTTP status is `200 OK` even when `writeback.ok == false`
+/// because the local clear succeeded per ADR-0035.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct ReEnableSourceIssueResponse {
+    pub local_cleared: bool,
+    pub writeback: WritebackOutcomeResponse,
+}
+
 // --- Plan Run contracts (ADR-0034) ---
 
 /// Per-Project execution configuration consumed by Plan Runs.
