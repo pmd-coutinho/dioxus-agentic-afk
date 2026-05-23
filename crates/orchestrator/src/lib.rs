@@ -13,12 +13,14 @@ pub mod plan_run_finalize;
 pub mod plan_run_status;
 pub mod planning_phase;
 pub mod production;
+pub mod push_attempt;
 pub mod review_loop;
 
 pub use coordinator::{
-    CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs, run_plan_run,
-    update_markdown_lifecycle_status,
+    CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs, retry_push,
+    run_plan_run, update_markdown_lifecycle_status,
 };
+pub use push_attempt::{PushOutcome, classify_push_result};
 pub use planning_phase::{PlannedClaim, PlanningRejection, render_planning_prompt};
 
 pub use plan_run_status::{AssignmentStatus, transition_assignment};

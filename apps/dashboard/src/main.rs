@@ -675,6 +675,7 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
     let review_rejection_count = assignment.review_rejection_count;
     let block_reason = assignment.block_reason.clone();
     let is_blocked = assignment.status == "blocked";
+    let is_merge_staged = assignment.status == "merge_staged";
     let project_id = assignment.project_id.0.clone();
     let assignment_id = assignment.id.clone();
     rsx! {
@@ -722,10 +723,68 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
             }
             if is_blocked {
                 ReEnableAssignmentButton {
+                    project_id: project_id.clone(),
+                    assignment_id: assignment_id.clone(),
+                }
+            }
+            if is_merge_staged {
+                RetryPushAssignmentButton {
                     project_id,
                     assignment_id,
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn RetryPushAssignmentButton(project_id: String, assignment_id: String) -> Element {
+    let store = use_context::<ProjectStore>();
+    let key = MutationKey::RetryPushAssignment(
+        ProjectId(project_id.clone()),
+        IssueAssignmentId(assignment_id.clone()),
+    );
+    rsx! {
+        ActionButton {
+            mutation_key: key.clone(),
+            variant: ButtonVariant::Primary,
+            testid: "retry-push-assignment-button".to_string(),
+            error_marker: "retry-push-assignment".to_string(),
+            on_press: {
+                let key = key.clone();
+                let project_id = project_id.clone();
+                let assignment_id = assignment_id.clone();
+                move |_| {
+                    let key = key.clone();
+                    let project_id = project_id.clone();
+                    let assignment_id = assignment_id.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let result = store
+                            .mutate(
+                                key,
+                                retry_push_assignment_api(project_id, assignment_id),
+                            )
+                            .await;
+                        if let Ok(response) = result {
+                            match response.status.as_str() {
+                                "merged" => store.push_success(
+                                    "Retry Push succeeded",
+                                    "Assignment merged; Plan Run history preserves the original failure",
+                                ),
+                                "blocked" => store.push_success(
+                                    "Retry Push rejected as non-fast-forward",
+                                    "Integration Branch has diverged; recovery belongs in a new Plan Run",
+                                ),
+                                _ => store.push_success(
+                                    "Retry Push failed",
+                                    "Assignment remains staged; you may retry or abandon",
+                                ),
+                            }
+                        }
+                    });
+                }
+            },
+            "Retry Push"
         }
     }
 }
@@ -1576,6 +1635,27 @@ async fn re_enable_assignment_api(
 ) -> Result<IssueAssignmentResponse, project_store::MutationFailure> {
     let response = gloo_net::http::Request::post(&format!(
         "/api/projects/{project_id}/assignments/{assignment_id}/re-enable"
+    ))
+    .send()
+    .await
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
+}
+
+async fn retry_push_assignment_api(
+    project_id: String,
+    assignment_id: String,
+) -> Result<agentic_afk_contracts::RetryPushResponse, project_store::MutationFailure> {
+    let response = gloo_net::http::Request::post(&format!(
+        "/api/projects/{project_id}/assignments/{assignment_id}/retry-push"
     ))
     .send()
     .await

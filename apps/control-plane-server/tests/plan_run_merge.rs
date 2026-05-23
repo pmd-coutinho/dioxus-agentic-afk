@@ -16,13 +16,14 @@ use agentic_afk_control_plane_server::{
     IssueLifecycleWriter, MergePhaseRunner, RefreshedBaseline, ReviewPhaseRunner,
     StaticIntegrationBranchRefresher, router_with_plan_run_merge_deps,
 };
+use agentic_afk_orchestrator::PlanRunPhaseError;
 use agentic_afk_persistence as persistence;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path as StdPath, PathBuf};
+use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -254,12 +255,25 @@ async fn successful_merge_completes_source_issue_and_finishes_plan_run() {
     let assignment = &run.assignments[0];
     assert_eq!(assignment.status, "merged");
 
-    // Phase Outputs ordered: planning, implementation, review, merge.
+    // Phase Outputs ordered: planning, implementation, review, merge, push.
+    // ADR-0038 / issue #53: the Integration Branch push records its own
+    // `push`-typed Phase Output on the Plan Run (assignment_id = None).
     let phases: Vec<&str> = run.phase_outputs.iter().map(|p| p.phase.as_str()).collect();
     assert_eq!(
         phases,
-        vec!["planning", "implementation", "review", "merge"],
-        "phase order should be planning -> implementation -> review -> merge"
+        vec!["planning", "implementation", "review", "merge", "push"],
+        "phase order should be planning -> implementation -> review -> merge -> push"
+    );
+    let push_output = run
+        .phase_outputs
+        .iter()
+        .find(|p| p.phase == "push")
+        .expect("push Phase Output recorded on Plan Run");
+    assert_eq!(push_output.outcome, "succeeded");
+    assert!(push_output.assignment_id.is_none());
+    assert_eq!(
+        push_output.body_json["fast_forward"].as_bool(),
+        Some(true)
     );
 
     // Durable merge Phase Output attributed to the assignment with
@@ -775,18 +789,23 @@ async fn integration_push_failure_stages_assignment_and_fails_plan_run() {
         "staged assignment must keep its worktree until it reaches a terminal status"
     );
 
-    // The merge Phase Output for this assignment captures the
-    // integration-push failure so the developer can see WHY the run
-    // failed even after the merged set was locally integrated.
-    let merge_outputs: Vec<_> = assignment
+    // ADR-0038 / issue #53: the push failure is recorded as a single
+    // Plan-Run-scoped `push` Phase Output (not duplicated as per-
+    // assignment merge/failed rows). The developer can still see WHY
+    // the run failed via the push Phase Output on the Plan Run.
+    let push_outputs: Vec<_> = run
         .phase_outputs
         .iter()
-        .filter(|p| p.phase == "merge")
+        .filter(|p| p.phase == "push")
         .collect();
     assert!(
-        merge_outputs.iter().any(|p| p.outcome == "failed"),
-        "push failure must surface as a failed merge Phase Output: {:?}",
-        merge_outputs
+        push_outputs.iter().any(|p| p.outcome == "failed"),
+        "push failure must surface as a failed push Phase Output on the Plan Run: {:?}",
+        push_outputs
+    );
+    assert!(
+        push_outputs[0].assignment_id.is_none(),
+        "push Phase Output is Plan-Run-scoped, not per-assignment"
     );
 
     // Source Issue Lifecycle MUST NOT advance to `Completed` because the
@@ -982,4 +1001,472 @@ async fn happy_path_push_passes_assignment_through_merge_staged_to_merged() {
     );
 
     drop(dir);
+}
+
+// --- Issue #53 / ADR-0037: Retry Push integration tests ---
+
+/// Pusher that returns canned `Result<(), PlanRunPhaseError>` values in
+/// order. Used by the Retry Push tests to stage an assignment with a
+/// failing first push, then drive a second push with a different
+/// outcome (success / non-fast-forward / transient again). Falls back
+/// to repeating the last response after the queue drains so cleanup
+/// pushes (none in these tests) cannot panic.
+struct ProgrammablePusher {
+    responses: Mutex<Vec<Result<(), PlanRunPhaseError>>>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl ProgrammablePusher {
+    fn new(responses: Vec<Result<(), PlanRunPhaseError>>) -> Self {
+        assert!(!responses.is_empty());
+        Self {
+            responses: Mutex::new(responses),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+}
+
+impl IntegrationBranchPusher for ProgrammablePusher {
+    fn push(
+        &self,
+        _project_path: &StdPath,
+        integration_branch: &str,
+    ) -> Result<(), PlanRunPhaseError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(integration_branch.to_string());
+        let mut queue = self.responses.lock().unwrap();
+        if queue.len() == 1 {
+            queue[0].clone()
+        } else {
+            queue.remove(0)
+        }
+    }
+}
+
+struct StagedFixture {
+    router: axum::Router,
+    db: persistence::Db,
+    project_id: String,
+    assignment_id: String,
+    pusher: Arc<ProgrammablePusher>,
+    cleaner: Arc<FakeAssignmentWorktreeCleaner>,
+    lifecycle: Arc<FakeLifecycleWriter>,
+    project_dir: PathBuf,
+}
+
+/// Build a fixture that has already started one Plan Run whose first
+/// push failed with `first_push_err`, leaving the assignment at
+/// `merge_staged`. The `subsequent_responses` are returned on later push
+/// calls (e.g. by Retry Push).
+async fn build_staged_fixture(
+    first_push_err: PlanRunPhaseError,
+    subsequent_responses: Vec<Result<(), PlanRunPhaseError>>,
+) -> StagedFixture {
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+
+    let mut responses: Vec<Result<(), PlanRunPhaseError>> = vec![Err(first_push_err)];
+    responses.extend(subsequent_responses);
+    let pusher = Arc::new(ProgrammablePusher::new(responses));
+    let cleaner = Arc::new(FakeAssignmentWorktreeCleaner::new());
+    let lifecycle = Arc::new(FakeLifecycleWriter::new());
+
+    let router = router_with_plan_run_merge_deps(
+        config(),
+        db.clone(),
+        Arc::new(StaticIntegrationBranchRefresher::new(RefreshedBaseline {
+            commit_sha: "baseline-sha".into(),
+        })),
+        Arc::new(FakePlanningPhaseRunner::with_stdout(
+            r#"<plan>{"issues":[{"source_issue_id":"42","title":"t","branch":"agent/issue-42","selection_summary":"ok"}],"summary":"s"}</plan>"#,
+        )),
+        Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir())),
+        lifecycle.clone() as Arc<dyn IssueLifecycleWriter>,
+        Arc::new(FakeImplementationPhaseRunner::with_stdout(IMPL_OK)),
+        Arc::new(FakeReviewPhaseRunner::with_stdout(REVIEW_APPROVED)),
+        Arc::new(FakeMergePhaseRunner::with_stdout(MERGE_OK)),
+        pusher.clone() as Arc<dyn IntegrationBranchPusher>,
+        cleaner.clone() as Arc<dyn AssignmentWorktreeCleaner>,
+    );
+
+    let dir = temp_dir("retry-push");
+    std::fs::create_dir_all(&dir).unwrap();
+    let project: ProjectResponse = read_json(
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&CreateProjectRequest {
+                            path: dir.to_string_lossy().into_owned(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let pid = project.id.0.clone();
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{pid}/trust"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    persistence::enable_issue_source(
+        &db,
+        &pid,
+        &EnableIssueSourceRequest {
+            kind: "github".into(),
+            locator: "owner/repo".into(),
+        },
+    )
+    .await
+    .unwrap();
+    persistence::replace_planning_snapshot(
+        &db,
+        &pid,
+        &IssueSource {
+            kind: "github".into(),
+            locator: "owner/repo".into(),
+        },
+        &[issue("42")],
+        "unix:1",
+    )
+    .await
+    .unwrap();
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{pid}/execution-config"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&SetProjectExecutionConfigRequest {
+                        integration_branch: "main".into(),
+                        max_parallel_tasks: 1,
+                        review_retry_limit: 1,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let resp = start(&router, &pid).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "first plan run should stage the assignment: {}",
+        read_text(resp).await
+    );
+    let runs = persistence::list_recent_plan_runs(&db, &pid, 10)
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 1, "fixture should have exactly one plan run");
+    assert_eq!(runs[0].state, "failed", "fixture push must have failed");
+    let assignment = runs[0]
+        .assignments
+        .first()
+        .expect("fixture plan run has one assignment")
+        .clone();
+    assert_eq!(
+        assignment.status, "merge_staged",
+        "fixture must leave assignment merge_staged"
+    );
+    let assignment_id = assignment.id.clone();
+
+    StagedFixture {
+        router,
+        db,
+        project_id: pid,
+        assignment_id,
+        pusher,
+        cleaner,
+        lifecycle,
+        project_dir: dir,
+    }
+}
+
+async fn call_retry_push(
+    router: &axum::Router,
+    project_id: &str,
+    assignment_id: &str,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/{project_id}/assignments/{assignment_id}/retry-push"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn retry_push_success_advances_staged_to_merged_and_plan_run_stays_failed() {
+    // Issue #53 / ADR-0037: a staged assignment whose retry push succeeds
+    // transitions `merge_staged` → `merged`, writes Lifecycle `Completed`
+    // best-effort to the Issue Source, cleans up the worktree, and leaves
+    // the originating Plan Run terminal status at `failed` (the original
+    // Merge Phase outcome is preserved per ADR-0037).
+    let fixture = build_staged_fixture(
+        PlanRunPhaseError::IntegrationPush("ssh: temporary failure".into()),
+        vec![Ok(())],
+    )
+    .await;
+
+    let resp = call_retry_push(&fixture.router, &fixture.project_id, &fixture.assignment_id).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let response: agentic_afk_contracts::RetryPushResponse = read_json(resp).await;
+    assert_eq!(response.status, "merged");
+    assert!(response.block_reason.is_none());
+
+    assert_eq!(fixture.pusher.call_count(), 2, "first push + retry");
+
+    // Assignment is now merged.
+    let assignment = persistence::get_assignment(&fixture.db, &fixture.assignment_id)
+        .await
+        .unwrap();
+    assert_eq!(assignment.status, "merged");
+    assert!(assignment.block_reason.is_none());
+
+    // Lifecycle write-back: `Completed` recorded after the verified push.
+    let completed_writes: Vec<_> = fixture
+        .lifecycle
+        .calls()
+        .into_iter()
+        .filter(|(_, status)| {
+            matches!(
+                status,
+                agentic_afk_orchestrator::LifecycleStatus::Completed
+            )
+        })
+        .collect();
+    assert_eq!(
+        completed_writes.len(),
+        1,
+        "successful retry push must write Lifecycle Completed"
+    );
+
+    // Worktree cleanup ran because the assignment reached a terminal status.
+    assert_eq!(fixture.cleaner.call_count(), 1);
+
+    // Plan Run terminal status remains `failed` (ADR-0037).
+    let runs = persistence::list_recent_plan_runs(&fixture.db, &fixture.project_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].state, "failed",
+        "Plan Run stays failed even after a successful Retry Push"
+    );
+
+    // Two push Phase Outputs recorded (first failure + retry success).
+    let push_outputs: Vec<_> = runs[0]
+        .phase_outputs
+        .iter()
+        .filter(|p| p.phase == "push")
+        .collect();
+    assert_eq!(push_outputs.len(), 2);
+    assert_eq!(push_outputs[0].outcome, "failed");
+    assert_eq!(push_outputs[1].outcome, "succeeded");
+    assert_eq!(
+        push_outputs[1].body_json["fast_forward"].as_bool(),
+        Some(true)
+    );
+
+    drop(fixture.project_dir);
+}
+
+#[tokio::test]
+async fn retry_push_non_fast_forward_blocks_assignment_with_push_non_fast_forward_kind() {
+    // Issue #53 / ADR-0037: a staged assignment whose retry push is
+    // rejected with a non-fast-forward error transitions
+    // `merge_staged` → `blocked` with `BlockReason::PushNonFastForward`.
+    // The Integration Branch has diverged; recovery belongs in a new
+    // Plan Run with a refreshed baseline.
+    let fixture = build_staged_fixture(
+        PlanRunPhaseError::IntegrationPush("ssh: temporary failure".into()),
+        vec![Err(PlanRunPhaseError::IntegrationPush(
+            "! [rejected] main -> main (non-fast-forward)\nhint: Updates were rejected".into(),
+        ))],
+    )
+    .await;
+
+    let resp = call_retry_push(&fixture.router, &fixture.project_id, &fixture.assignment_id).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let response: agentic_afk_contracts::RetryPushResponse = read_json(resp).await;
+    assert_eq!(response.status, "blocked");
+    let reason = response
+        .block_reason
+        .expect("non-fast-forward retry must carry a block_reason");
+    assert_eq!(
+        reason.kind,
+        agentic_afk_contracts::BlockReason::PushNonFastForward
+    );
+    assert!(
+        reason
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("non-fast-forward")),
+        "block_reason.detail should carry push stderr: {:?}",
+        reason.detail
+    );
+
+    // Assignment is durably blocked with the typed kind.
+    let assignment = persistence::get_assignment(&fixture.db, &fixture.assignment_id)
+        .await
+        .unwrap();
+    assert_eq!(assignment.status, "blocked");
+    let reason = assignment
+        .block_reason
+        .expect("blocked assignment carries block_reason");
+    assert_eq!(
+        reason.kind,
+        agentic_afk_contracts::BlockReason::PushNonFastForward
+    );
+
+    // Plan Run remains `failed`.
+    let runs = persistence::list_recent_plan_runs(&fixture.db, &fixture.project_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(runs[0].state, "failed");
+
+    // Push Phase Outputs: two failures (initial + non-fast-forward retry).
+    let push_outputs: Vec<_> = runs[0]
+        .phase_outputs
+        .iter()
+        .filter(|p| p.phase == "push")
+        .collect();
+    assert_eq!(push_outputs.len(), 2);
+    assert!(push_outputs.iter().all(|p| p.outcome == "failed"));
+    assert_eq!(
+        push_outputs[1].body_json["kind"].as_str(),
+        Some("non_fast_forward")
+    );
+
+    // No Lifecycle `Completed` write-back because the push never landed.
+    let completed: Vec<_> = fixture
+        .lifecycle
+        .calls()
+        .into_iter()
+        .filter(|(_, status)| {
+            matches!(
+                status,
+                agentic_afk_orchestrator::LifecycleStatus::Completed
+            )
+        })
+        .collect();
+    assert!(completed.is_empty());
+
+    drop(fixture.project_dir);
+}
+
+#[tokio::test]
+async fn retry_push_transient_other_failure_leaves_assignment_merge_staged() {
+    // Issue #53 / ADR-0037: a staged assignment whose retry push fails
+    // with a non-fast-forward-unrelated error (network, auth) stays at
+    // `merge_staged` so the operator can retry again or abandon.
+    let fixture = build_staged_fixture(
+        PlanRunPhaseError::IntegrationPush("ssh: temporary failure".into()),
+        vec![Err(PlanRunPhaseError::IntegrationPush(
+            "ssh: connect to host github.com port 22: Connection timed out".into(),
+        ))],
+    )
+    .await;
+
+    let resp = call_retry_push(&fixture.router, &fixture.project_id, &fixture.assignment_id).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let response: agentic_afk_contracts::RetryPushResponse = read_json(resp).await;
+    assert_eq!(response.status, "merge_staged");
+    assert!(response.block_reason.is_none());
+
+    // Assignment stays at `merge_staged` — dormant, awaiting another
+    // operator action.
+    let assignment = persistence::get_assignment(&fixture.db, &fixture.assignment_id)
+        .await
+        .unwrap();
+    assert_eq!(assignment.status, "merge_staged");
+    assert!(assignment.block_reason.is_none());
+
+    // Worktree NOT cleaned up: cleanup gates on terminal status only.
+    assert_eq!(
+        fixture.cleaner.call_count(),
+        0,
+        "transient retry failure must keep worktree for further retries"
+    );
+
+    // No Lifecycle `Completed` write-back.
+    let completed: Vec<_> = fixture
+        .lifecycle
+        .calls()
+        .into_iter()
+        .filter(|(_, status)| {
+            matches!(
+                status,
+                agentic_afk_orchestrator::LifecycleStatus::Completed
+            )
+        })
+        .collect();
+    assert!(completed.is_empty());
+
+    // Both push attempts surfaced as failed `push` Phase Outputs with
+    // `kind=other` for the transient cause.
+    let runs = persistence::list_recent_plan_runs(&fixture.db, &fixture.project_id, 10)
+        .await
+        .unwrap();
+    let push_outputs: Vec<_> = runs[0]
+        .phase_outputs
+        .iter()
+        .filter(|p| p.phase == "push")
+        .collect();
+    assert_eq!(push_outputs.len(), 2);
+    assert!(push_outputs.iter().all(|p| p.outcome == "failed"));
+    assert_eq!(push_outputs[1].body_json["kind"].as_str(), Some("other"));
+
+    // Operator may still retry — confirm the route still accepts another
+    // call (and would 422 if the assignment weren't merge_staged).
+    drop(fixture.project_dir);
+}
+
+#[tokio::test]
+async fn retry_push_rejects_assignments_not_in_merge_staged() {
+    // Defensive: the route refuses to act on an assignment that is not
+    // currently `merge_staged`. The Dashboard hides the button outside
+    // that state but the API contract must be safe regardless.
+    let fixture = build_fixture(IMPL_OK, REVIEW_APPROVED, MERGE_OK, None).await;
+    let pid = fixture.project.id.0.clone();
+    let _ = start(&fixture.router, &pid).await;
+    let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 10)
+        .await
+        .unwrap();
+    let assignment_id = runs[0].assignments[0].id.clone();
+    // This assignment is now `merged`, not `merge_staged`.
+    let resp = call_retry_push(&fixture.router, &pid, &assignment_id).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    drop(fixture.project_dir);
 }

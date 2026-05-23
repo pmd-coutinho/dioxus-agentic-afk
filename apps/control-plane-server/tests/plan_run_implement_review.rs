@@ -251,9 +251,14 @@ async fn approving_review_takes_assignment_to_reviewed() {
     assert_eq!(assignment.phase_outputs[2].phase, "merge");
     assert_eq!(assignment.phase_outputs[2].outcome, "merged");
 
-    // Plan Run's phase_outputs list includes planning + impl + review + merge.
+    // Plan Run's phase_outputs list includes planning + impl + review + merge + push.
+    // ADR-0038 / issue #53: the Integration Branch push records its own
+    // `push`-typed Phase Output scoped to the Plan Run.
     let phases: Vec<&str> = run.phase_outputs.iter().map(|p| p.phase.as_str()).collect();
-    assert_eq!(phases, vec!["planning", "implementation", "review", "merge"]);
+    assert_eq!(
+        phases,
+        vec!["planning", "implementation", "review", "merge", "push"]
+    );
 }
 
 #[tokio::test]

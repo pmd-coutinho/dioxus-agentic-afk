@@ -176,6 +176,9 @@ pub enum MutationKey {
     SetExecutionConfig(ProjectId),
     StartPlanRun(ProjectId),
     ReEnableAssignment(ProjectId, IssueAssignmentId),
+    /// Operator-initiated Retry Push for a `merge_staged` Issue
+    /// Assignment (issue #53 / ADR-0037).
+    RetryPushAssignment(ProjectId, IssueAssignmentId),
 }
 
 /// Identifier for an Issue Assignment (a single attempt to land a Source

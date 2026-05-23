@@ -452,6 +452,10 @@ fn router_with_full_deps(
             "/api/projects/{id}/assignments/{assignment_id}/re-enable",
             post(re_enable_assignment),
         )
+        .route(
+            "/api/projects/{id}/assignments/{assignment_id}/retry-push",
+            post(retry_push_assignment),
+        )
         .route("/api/{*path}", get(api_not_found).post(api_not_found))
         .fallback_service(ServeDir::new(asset_dir).fallback(ServeFile::new(index)))
         .with_state(state)
@@ -1691,6 +1695,55 @@ async fn re_enable_assignment(
     );
 
     Json(updated).into_response()
+}
+
+/// Operator-initiated Retry Push for a `merge_staged` Issue Assignment
+/// (issue #53 / ADR-0037). Re-runs `git push` only — no fetch, no rebase,
+/// no re-verify. Returns the typed Retry Push outcome plus the post-retry
+/// Assignment shape so the Dashboard can update without an additional
+/// fetch.
+async fn retry_push_assignment(
+    State(state): State<Arc<AppState>>,
+    Path((id, assignment_id)): Path<(String, String)>,
+) -> Response {
+    let assignment = match persistence::get_project_assignment(&state.db, &id, &assignment_id).await
+    {
+        Ok(assignment) => assignment,
+        Err(error) => return persistence_error_to_response(error),
+    };
+    let project = match persistence::get_project(&state.db, &id).await {
+        Ok(project) => with_git_summary(project),
+        Err(error) => return persistence_error_to_response(error),
+    };
+
+    let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> =
+        Arc::new(EventBusPublisher::new(
+            state.event_bus.clone(),
+            id.clone(),
+            state.db.clone(),
+        ));
+    let resolved_deps = agentic_afk_orchestrator::coordinator::resolve_deps_for_project(
+        &state.plan_run_deps,
+        &project,
+    );
+    match agentic_afk_orchestrator::retry_push(
+        &state.db,
+        &events,
+        &resolved_deps,
+        &project,
+        &assignment,
+    )
+    .await
+    {
+        Ok(result) => {
+            let body = agentic_afk_contracts::RetryPushResponse {
+                status: result.status.clone(),
+                block_reason: result.block_reason.clone(),
+            };
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(error) => coordinator_error_to_response(error),
+    }
 }
 
 async fn list_plan_runs(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {

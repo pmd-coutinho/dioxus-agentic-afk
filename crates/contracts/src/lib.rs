@@ -207,6 +207,11 @@ pub enum BlockReason {
     /// agent could not resolve, integration verification failure it could
     /// not fix, runner failure, or unparseable output).
     MergePhaseFailed,
+    /// A push attempt for a `merge_staged` **Issue Assignment** was
+    /// rejected because the **Integration Branch** has diverged
+    /// (non-fast-forward). Recovery belongs in a new **Plan Run** with a
+    /// refreshed baseline rather than another **Retry Push** (ADR-0037).
+    PushNonFastForward,
 }
 
 impl BlockReason {
@@ -216,6 +221,7 @@ impl BlockReason {
         match self {
             Self::ReviewRetryLimitExhausted => "review_retry_limit_exhausted",
             Self::MergePhaseFailed => "merge_phase_failed",
+            Self::PushNonFastForward => "push_non_fast_forward",
         }
     }
 
@@ -226,6 +232,7 @@ impl BlockReason {
         match value {
             "review_retry_limit_exhausted" => Some(Self::ReviewRetryLimitExhausted),
             "merge_phase_failed" => Some(Self::MergePhaseFailed),
+            "push_non_fast_forward" => Some(Self::PushNonFastForward),
             _ => None,
         }
     }
@@ -240,6 +247,19 @@ pub struct BlockReasonResponse {
     pub kind: BlockReason,
     #[serde(default)]
     pub detail: Option<String>,
+}
+
+/// Result body of `POST /api/projects/{id}/assignments/{aid}/retry-push`
+/// (issue #53, ADR-0037). `status` is the post-retry Assignment Status:
+/// `merged` (push succeeded, Lifecycle `Completed` write-back done best-
+/// effort), `merge_staged` (transient `Other` failure — retry remains
+/// possible), or `blocked` (non-fast-forward divergence; recovery belongs
+/// in a new Plan Run). `block_reason` is present iff `status == "blocked"`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct RetryPushResponse {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_reason: Option<BlockReasonResponse>,
 }
 
 // --- Plan Run contracts (ADR-0034) ---
@@ -510,6 +530,41 @@ mod tests {
             BlockReason::from_wire("merge_phase_failed"),
             Some(BlockReason::MergePhaseFailed)
         );
+    }
+
+    #[test]
+    fn block_reason_round_trip_push_non_fast_forward() {
+        let reason = BlockReason::PushNonFastForward;
+        assert_eq!(reason.as_wire(), "push_non_fast_forward");
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, "\"push_non_fast_forward\"");
+        let back: BlockReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, reason);
+        assert_eq!(
+            BlockReason::from_wire("push_non_fast_forward"),
+            Some(BlockReason::PushNonFastForward)
+        );
+    }
+
+    #[test]
+    fn retry_push_response_serializes_status_and_optional_reason() {
+        let success = RetryPushResponse {
+            status: "merged".to_string(),
+            block_reason: None,
+        };
+        let json = serde_json::to_string(&success).unwrap();
+        assert!(json.contains("\"status\":\"merged\""));
+        assert!(!json.contains("block_reason"));
+        let blocked = RetryPushResponse {
+            status: "blocked".to_string(),
+            block_reason: Some(BlockReasonResponse {
+                kind: BlockReason::PushNonFastForward,
+                detail: Some("stderr: rejected".to_string()),
+            }),
+        };
+        let json = serde_json::to_string(&blocked).unwrap();
+        assert!(json.contains("\"block_reason\""));
+        assert!(json.contains("\"kind\":\"push_non_fast_forward\""));
     }
 
     #[test]

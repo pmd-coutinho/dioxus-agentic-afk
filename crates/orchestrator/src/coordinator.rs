@@ -23,6 +23,7 @@ use crate::merge_phase::{
 use crate::plan_run_finalize::{PlanRunFinalize, decide_plan_run_terminal};
 use crate::plan_run_status::{AssignmentStatus, transition_assignment};
 use crate::planning_phase::{PlannedClaim, render_planning_prompt, validate_planner_selection};
+use crate::push_attempt::{PushOutcome, classify_push_result};
 use crate::review_loop::{ReviewLoopStep, decide_review_loop_step, render_review_prompt};
 use crate::plan_run::{
     AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, FakeAssignmentWorktreeCleaner,
@@ -1206,60 +1207,68 @@ async fn finalize_parallel_plan_run(
     let mut staged_assignments: Vec<IssueAssignmentResponse> = Vec::new();
     let mut push_failed = false;
     if any_merged {
-        if let Err(error) = deps
+        // ADR-0037 / #53: route the first Merge Phase push through the
+        // shared `PushAttempt` classifier so the Retry Push handler sees
+        // the same outcome taxonomy. The attempt is durably recorded as a
+        // `push` Phase Output scoped to the Plan Run (ADR-0038), one row
+        // per attempt, regardless of how many staged assignments share
+        // the push.
+        let push_result = deps
             .pusher
-            .push(project_path, &exec_config.integration_branch)
-        {
-            // Push failure (ADR-0037): record the push failure as a
-            // failed merge Phase Output for each staged assignment, leave
-            // each assignment at `merge_staged` (no transition), defer
-            // worktree cleanup, and finish the Plan Run as `failed`.
-            for assignment in &merged_assignments {
-                let _ = persistence::record_assignment_phase_output(
-                    db,
-                    &plan_run.id,
-                    &assignment.id,
-                    "merge",
-                    "failed",
-                    &serde_json::json!({ "error": error.to_string() }),
-                )
-                .await;
-            }
-            staged_assignments.extend(merged_assignments.iter().cloned());
-            push_failed = true;
-        } else {
-            // Push succeeded: advance every staged assignment to `merged`
-            // and write the Source Issue Lifecycle `Completed` back. The
-            // lifecycle write-back happens only after the verified push so
-            // upstream state never claims work the developer did not
-            // actually receive.
-            for staged in &merged_assignments {
-                let merged = transition_assignment(
-                    db,
-                    events,
-                    project_id,
-                    &staged.id,
-                    AssignmentStatus::Merged,
-                )
-                .await?;
-                pushed_assignments.push(merged);
-            }
-            if project.enabled_issue_source.is_some() {
-                for assignment in &pushed_assignments {
-                    if let Err(error) = deps
-                        .lifecycle
-                        .write(&assignment.source_id, crate::LifecycleStatus::Completed)
-                    {
-                        events.record_activity(
-                            project_id,
-                            Some(&assignment.id),
-                            "lifecycle_writeback_failed",
-                            Some(&format!(
-                                "completed Lifecycle Status write-back after push failed: {error}"
-                            )),
-                        );
+            .push(project_path, &exec_config.integration_branch);
+        let outcome = classify_push_result(push_result);
+        record_push_phase_output(db, &plan_run.id, &outcome, 1).await;
+        match &outcome {
+            PushOutcome::Success => {
+                // Push succeeded: advance every staged assignment to `merged`
+                // and write the Source Issue Lifecycle `Completed` back. The
+                // lifecycle write-back happens only after the verified push so
+                // upstream state never claims work the developer did not
+                // actually receive.
+                for staged in &merged_assignments {
+                    let merged = transition_assignment(
+                        db,
+                        events,
+                        project_id,
+                        &staged.id,
+                        AssignmentStatus::Merged,
+                    )
+                    .await?;
+                    pushed_assignments.push(merged);
+                }
+                if project.enabled_issue_source.is_some() {
+                    for assignment in &pushed_assignments {
+                        if let Err(error) = deps
+                            .lifecycle
+                            .write(&assignment.source_id, crate::LifecycleStatus::Completed)
+                        {
+                            events.record_activity(
+                                project_id,
+                                Some(&assignment.id),
+                                "lifecycle_writeback_failed",
+                                Some(&format!(
+                                    "completed Lifecycle Status write-back after push failed: {error}"
+                                )),
+                            );
+                        }
                     }
                 }
+            }
+            PushOutcome::NonFastForward { detail: _ }
+            | PushOutcome::Other { detail: _ } => {
+                // Push failure (ADR-0037): leave each staged assignment
+                // at `merge_staged` (no transition), defer worktree
+                // cleanup, and finish the Plan Run as `failed`. The
+                // operator may invoke Retry Push (transient) or Abandon
+                // Staged (permanent) from the Dashboard.
+                staged_assignments.extend(merged_assignments.iter().cloned());
+                push_failed = true;
+                events.record_activity(
+                    project_id,
+                    None,
+                    "integration_push_failed",
+                    Some(&push_activity_detail(&outcome)),
+                );
             }
         }
     }
@@ -1532,6 +1541,275 @@ fn parse_local_markdown_issue_minimal(
 /// Reusable absolute path for the gh CLI. Avoids unused-import warnings
 /// at top-level when callers do not want PathBuf.
 pub type GhBinaryPath = PathBuf;
+
+/// Record one Integration Branch push attempt as a Plan-Run-scoped
+/// `push` Phase Output (ADR-0038). Used by both the Merge Phase first
+/// push and the operator-initiated Retry Push action so the audit log
+/// has one append-only history of pushes for the Plan Run.
+async fn record_push_phase_output(
+    db: &Db,
+    plan_run_id: &str,
+    outcome: &PushOutcome,
+    attempt: u32,
+) {
+    let (stderr, kind_field) = match outcome {
+        PushOutcome::Success => (String::new(), "success"),
+        PushOutcome::NonFastForward { detail } => (detail.clone(), "non_fast_forward"),
+        PushOutcome::Other { detail } => (detail.clone(), "other"),
+    };
+    let body = serde_json::json!({
+        "kind": kind_field,
+        "stderr": stderr,
+        "fast_forward": outcome.fast_forward(),
+        "attempt": attempt,
+    });
+    let _ = persistence::record_plan_run_phase_output(
+        db,
+        plan_run_id,
+        "push",
+        outcome.outcome_str(),
+        &body,
+    )
+    .await;
+}
+
+fn push_activity_detail(outcome: &PushOutcome) -> String {
+    match outcome {
+        PushOutcome::Success => "push succeeded".to_string(),
+        PushOutcome::NonFastForward { detail } => {
+            format!("non-fast-forward: {}", truncate_detail(detail))
+        }
+        PushOutcome::Other { detail } => {
+            format!("push failed: {}", truncate_detail(detail))
+        }
+    }
+}
+
+fn truncate_detail(detail: &str) -> String {
+    const MAX: usize = 240;
+    if detail.len() <= MAX {
+        detail.to_string()
+    } else {
+        let mut s = detail[..MAX].to_string();
+        s.push_str("…");
+        s
+    }
+}
+
+/// Operator-initiated Retry Push for a staged Issue Assignment
+/// (issue #53 / ADR-0037). Re-runs `git push` only — no fetch, no
+/// rebase, no re-verify. Routes to one of three terminal Assignment
+/// Status outcomes:
+///
+/// - [`PushOutcome::Success`] transitions `merge_staged` → `merged`,
+///   writes Lifecycle `Completed` back to the Issue Source (best-effort
+///   per ADR-0035), cleans up the worktree, and records the push
+///   activity entry.
+/// - [`PushOutcome::NonFastForward`] transitions `merge_staged` →
+///   `blocked` with [`agentic_afk_contracts::BlockReason::PushNonFastForward`]
+///   because the Integration Branch has diverged; cleanup runs because
+///   the assignment is now terminal.
+/// - [`PushOutcome::Other`] leaves the Issue Assignment at
+///   `merge_staged` so the operator may retry again or abandon.
+///
+/// The function refuses to act on assignments that are not currently
+/// `merge_staged`.
+pub async fn retry_push(
+    db: &Db,
+    events: &Arc<dyn EventPublisher>,
+    deps: &PlanRunDeps,
+    project: &ProjectResponse,
+    assignment: &IssueAssignmentResponse,
+) -> Result<RetryPushResult, CoordinatorError> {
+    if assignment.status != "merge_staged" {
+        return Err(CoordinatorError::new(
+            422,
+            "urn:agentic-afk:assignment-not-merge-staged",
+            format!(
+                "Retry Push requires Assignment Status=merge_staged, got {}",
+                assignment.status
+            ),
+        ));
+    }
+    let project_id = project.id.0.as_str();
+    let exec_config = match persistence::get_project_execution_config(db, project_id)
+        .await
+        .map_err(CoordinatorError::from_persistence)?
+    {
+        Some(config) => config,
+        None => {
+            return Err(CoordinatorError::new(
+                422,
+                "urn:agentic-afk:execution-config-missing",
+                "Project Execution Config required for Retry Push".to_string(),
+            ));
+        }
+    };
+    let plan_run_id = assignment
+        .plan_run_id
+        .clone()
+        .ok_or_else(|| CoordinatorError::new(
+            422,
+            "urn:agentic-afk:assignment-missing-plan-run",
+            "Issue Assignment is not nested under a Plan Run".to_string(),
+        ))?;
+
+    // Determine the attempt count for the body's `attempt` field by
+    // counting prior `push` Phase Outputs for the Plan Run. Persistence
+    // does not surface a dedicated counter so we read what we already
+    // wrote. Failure to count defaults to `1` — the body is best-effort
+    // metadata and we never want to fail Retry Push for it.
+    let attempt = count_push_attempts(db, &plan_run_id).await.saturating_add(1);
+
+    let project_path = std::path::Path::new(&project.path);
+    let push_result = deps
+        .pusher
+        .push(project_path, &exec_config.integration_branch);
+    let outcome = classify_push_result(push_result);
+    record_push_phase_output(db, &plan_run_id, &outcome, attempt).await;
+
+    let result = match &outcome {
+        PushOutcome::Success => {
+            let merged = transition_assignment(
+                db,
+                events,
+                project_id,
+                &assignment.id,
+                AssignmentStatus::Merged,
+            )
+            .await?;
+            if project.enabled_issue_source.is_some() {
+                if let Err(error) = deps
+                    .lifecycle
+                    .write(&assignment.source_id, crate::LifecycleStatus::Completed)
+                {
+                    events.record_activity(
+                        project_id,
+                        Some(&assignment.id),
+                        "lifecycle_writeback_failed",
+                        Some(&format!(
+                            "completed Lifecycle Status write-back after retry push failed: {error}"
+                        )),
+                    );
+                }
+            }
+            if !merged.worktree_path.is_empty() {
+                let worktree_path = std::path::Path::new(&merged.worktree_path);
+                if let Err(error) =
+                    deps.cleaner
+                        .cleanup(project_path, worktree_path, &merged.branch)
+                {
+                    eprintln!(
+                        "warning: failed to clean Assignment Worktree after Retry Push for {}: {error}",
+                        merged.source_id
+                    );
+                }
+            }
+            events.record_activity(
+                project_id,
+                Some(&assignment.id),
+                "retry_push_succeeded",
+                Some("push succeeded; assignment merged"),
+            );
+            RetryPushResult {
+                status: "merged".to_string(),
+                block_reason: None,
+                assignment: merged,
+            }
+        }
+        PushOutcome::NonFastForward { detail } => {
+            let blocked = transition_assignment(
+                db,
+                events,
+                project_id,
+                &assignment.id,
+                AssignmentStatus::Blocked {
+                    kind: agentic_afk_contracts::BlockReason::PushNonFastForward,
+                    detail: detail.clone(),
+                },
+            )
+            .await?;
+            if project.enabled_issue_source.is_some() {
+                if let Err(error) = deps
+                    .lifecycle
+                    .write(&assignment.source_id, crate::LifecycleStatus::Blocked)
+                {
+                    events.record_activity(
+                        project_id,
+                        Some(&assignment.id),
+                        "lifecycle_writeback_failed",
+                        Some(&format!(
+                            "blocked Lifecycle Status write-back after retry push non-fast-forward failed: {error}"
+                        )),
+                    );
+                }
+            }
+            if !blocked.worktree_path.is_empty() {
+                let worktree_path = std::path::Path::new(&blocked.worktree_path);
+                if let Err(error) =
+                    deps.cleaner
+                        .cleanup(project_path, worktree_path, &blocked.branch)
+                {
+                    eprintln!(
+                        "warning: failed to clean Assignment Worktree after Retry Push (non-fast-forward) for {}: {error}",
+                        blocked.source_id
+                    );
+                }
+            }
+            events.record_activity(
+                project_id,
+                Some(&assignment.id),
+                "retry_push_non_fast_forward",
+                Some(&push_activity_detail(&outcome)),
+            );
+            RetryPushResult {
+                status: "blocked".to_string(),
+                block_reason: Some(agentic_afk_contracts::BlockReasonResponse {
+                    kind: agentic_afk_contracts::BlockReason::PushNonFastForward,
+                    detail: Some(detail.clone()),
+                }),
+                assignment: blocked,
+            }
+        }
+        PushOutcome::Other { .. } => {
+            events.record_activity(
+                project_id,
+                Some(&assignment.id),
+                "retry_push_failed",
+                Some(&push_activity_detail(&outcome)),
+            );
+            let refreshed = persistence::get_assignment(db, &assignment.id)
+                .await
+                .map_err(CoordinatorError::from_persistence)?;
+            RetryPushResult {
+                status: "merge_staged".to_string(),
+                block_reason: None,
+                assignment: refreshed,
+            }
+        }
+    };
+    Ok(result)
+}
+
+/// Typed result of a [`retry_push`] call. The HTTP handler maps this
+/// directly into [`agentic_afk_contracts::RetryPushResponse`].
+#[derive(Clone, Debug)]
+pub struct RetryPushResult {
+    pub status: String,
+    pub block_reason: Option<agentic_afk_contracts::BlockReasonResponse>,
+    pub assignment: IssueAssignmentResponse,
+}
+
+async fn count_push_attempts(db: &Db, plan_run_id: &str) -> u32 {
+    match persistence::get_plan_run(db, plan_run_id).await {
+        Ok(run) => run
+            .phase_outputs
+            .iter()
+            .filter(|p| p.phase == "push")
+            .count() as u32,
+        Err(_) => 0,
+    }
+}
 
 #[cfg(test)]
 mod tests {
