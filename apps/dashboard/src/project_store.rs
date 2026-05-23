@@ -179,6 +179,11 @@ pub enum MutationKey {
     /// Operator-initiated Retry Push for a `merge_staged` Issue
     /// Assignment (issue #53 / ADR-0037).
     RetryPushAssignment(ProjectId, IssueAssignmentId),
+    /// Operator-initiated Abandon Staged for a `merge_staged` Issue
+    /// Assignment (issue #54 / ADR-0037). Transitions the assignment
+    /// to `blocked` with `BlockReason::AbandonedStaged` without any
+    /// push.
+    AbandonStagedAssignment(ProjectId, IssueAssignmentId),
 }
 
 /// Identifier for an Issue Assignment (a single attempt to land a Source

@@ -1800,6 +1800,95 @@ pub struct RetryPushResult {
     pub assignment: IssueAssignmentResponse,
 }
 
+/// Operator-initiated Abandon Staged for a `merge_staged`
+/// **Issue Assignment** (issue #54 / ADR-0037). Transitions
+/// `merge_staged` → `blocked` with
+/// [`agentic_afk_contracts::BlockReason::AbandonedStaged`] without
+/// attempting any push. The optional `note` becomes the freeform
+/// `detail` on the persisted Block Reason. Worktree + issue-branch
+/// cleanup runs because the assignment is now terminal; Lifecycle
+/// write-back is skipped (the source row already reflects the failed
+/// Plan Run via the original `Blocked` Lifecycle write, and abandoning
+/// staged work should not introduce a fresh write).
+///
+/// Refuses to act on assignments that are not currently `merge_staged`.
+pub async fn abandon_staged(
+    db: &Db,
+    events: &Arc<dyn EventPublisher>,
+    deps: &PlanRunDeps,
+    project: &ProjectResponse,
+    assignment: &IssueAssignmentResponse,
+    note: Option<String>,
+) -> Result<AbandonStagedResult, CoordinatorError> {
+    if assignment.status != "merge_staged" {
+        return Err(CoordinatorError::new(
+            422,
+            "urn:agentic-afk:assignment-not-merge-staged",
+            format!(
+                "Abandon Staged requires Assignment Status=merge_staged, got {}",
+                assignment.status
+            ),
+        ));
+    }
+    let project_id = project.id.0.as_str();
+    let detail = note.unwrap_or_default();
+    let blocked = transition_assignment(
+        db,
+        events,
+        project_id,
+        &assignment.id,
+        AssignmentStatus::Blocked {
+            kind: agentic_afk_contracts::BlockReason::AbandonedStaged,
+            detail: detail.clone(),
+        },
+    )
+    .await?;
+    let project_path = std::path::Path::new(&project.path);
+    if !blocked.worktree_path.is_empty() {
+        let worktree_path = std::path::Path::new(&blocked.worktree_path);
+        if let Err(error) =
+            deps.cleaner
+                .cleanup(project_path, worktree_path, &blocked.branch)
+        {
+            eprintln!(
+                "warning: failed to clean Assignment Worktree after Abandon Staged for {}: {error}",
+                blocked.source_id
+            );
+        }
+    }
+    events.record_activity(
+        project_id,
+        Some(&assignment.id),
+        "assignment_abandoned_staged",
+        if detail.is_empty() {
+            None
+        } else {
+            Some(detail.as_str())
+        },
+    );
+    Ok(AbandonStagedResult {
+        status: "blocked".to_string(),
+        block_reason: Some(agentic_afk_contracts::BlockReasonResponse {
+            kind: agentic_afk_contracts::BlockReason::AbandonedStaged,
+            detail: if detail.is_empty() {
+                None
+            } else {
+                Some(detail)
+            },
+        }),
+        assignment: blocked,
+    })
+}
+
+/// Typed result of an [`abandon_staged`] call. The HTTP handler maps
+/// this directly into [`agentic_afk_contracts::AbandonStagedResponse`].
+#[derive(Clone, Debug)]
+pub struct AbandonStagedResult {
+    pub status: String,
+    pub block_reason: Option<agentic_afk_contracts::BlockReasonResponse>,
+    pub assignment: IssueAssignmentResponse,
+}
+
 async fn count_push_attempts(db: &Db, plan_run_id: &str) -> u32 {
     match persistence::get_plan_run(db, plan_run_id).await {
         Ok(run) => run

@@ -68,7 +68,17 @@ pub async fn transition_assignment(
 ) -> Result<IssueAssignmentResponse, CoordinatorError> {
     let updated = match &status {
         AssignmentStatus::Blocked { kind, detail } => {
-            persistence::record_blocked_with_kind(db, assignment_id, *kind, Some(detail))
+            // An empty `detail` is persisted as `NULL` so the round-tripped
+            // `BlockReasonResponse.detail` is `None` rather than
+            // `Some("")`. Callers that supply meaningful text always reach
+            // this branch with a non-empty string (push stderr, conflict
+            // summary, operator note).
+            let persisted_detail = if detail.is_empty() {
+                None
+            } else {
+                Some(detail.as_str())
+            };
+            persistence::record_blocked_with_kind(db, assignment_id, *kind, persisted_detail)
                 .await
                 .map_err(CoordinatorError::from_persistence)?
         }

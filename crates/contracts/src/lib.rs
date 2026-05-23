@@ -194,9 +194,7 @@ pub struct IssueAssignmentResponse {
 
 /// Typed cause of a blocked **Issue Assignment** (CONTEXT.md → Block Reason,
 /// ADR-0038). The wire encoding is the lowercase snake-case discriminator
-/// emitted by [`BlockReason::as_wire`]. This slice introduces the two
-/// variants needed by current code; follow-up slices add `PushNonFastForward`
-/// and `AbandonedStaged`.
+/// emitted by [`BlockReason::as_wire`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockReason {
@@ -212,6 +210,10 @@ pub enum BlockReason {
     /// (non-fast-forward). Recovery belongs in a new **Plan Run** with a
     /// refreshed baseline rather than another **Retry Push** (ADR-0037).
     PushNonFastForward,
+    /// The operator chose **Abandon Staged** on a `merge_staged`
+    /// **Issue Assignment** (ADR-0037 / issue #54). No push was attempted;
+    /// the staged work will not land in the **Integration Branch**.
+    AbandonedStaged,
 }
 
 impl BlockReason {
@@ -222,6 +224,7 @@ impl BlockReason {
             Self::ReviewRetryLimitExhausted => "review_retry_limit_exhausted",
             Self::MergePhaseFailed => "merge_phase_failed",
             Self::PushNonFastForward => "push_non_fast_forward",
+            Self::AbandonedStaged => "abandoned_staged",
         }
     }
 
@@ -233,6 +236,7 @@ impl BlockReason {
             "review_retry_limit_exhausted" => Some(Self::ReviewRetryLimitExhausted),
             "merge_phase_failed" => Some(Self::MergePhaseFailed),
             "push_non_fast_forward" => Some(Self::PushNonFastForward),
+            "abandoned_staged" => Some(Self::AbandonedStaged),
             _ => None,
         }
     }
@@ -257,6 +261,32 @@ pub struct BlockReasonResponse {
 /// in a new Plan Run). `block_reason` is present iff `status == "blocked"`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct RetryPushResponse {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_reason: Option<BlockReasonResponse>,
+}
+
+/// Request body for
+/// `POST /api/projects/{id}/assignments/{aid}/abandon-staged`
+/// (issue #54, ADR-0037). The body is optional; an empty payload is
+/// accepted and leaves `block_reason.detail = None`. When supplied,
+/// `note` becomes the freeform `detail` on the resulting
+/// `BlockReason::AbandonedStaged`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct AbandonStagedRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Result body of
+/// `POST /api/projects/{id}/assignments/{aid}/abandon-staged`
+/// (issue #54, ADR-0037). The operator action always terminates the
+/// **Issue Assignment** at `blocked` with
+/// [`BlockReason::AbandonedStaged`]; the response shape mirrors the
+/// `blocked` arm of [`RetryPushResponse`] so the Dashboard can update
+/// without an additional fetch.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct AbandonStagedResponse {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_reason: Option<BlockReasonResponse>,
@@ -543,6 +573,20 @@ mod tests {
         assert_eq!(
             BlockReason::from_wire("push_non_fast_forward"),
             Some(BlockReason::PushNonFastForward)
+        );
+    }
+
+    #[test]
+    fn block_reason_round_trip_abandoned_staged() {
+        let reason = BlockReason::AbandonedStaged;
+        assert_eq!(reason.as_wire(), "abandoned_staged");
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, "\"abandoned_staged\"");
+        let back: BlockReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, reason);
+        assert_eq!(
+            BlockReason::from_wire("abandoned_staged"),
+            Some(BlockReason::AbandonedStaged)
         );
     }
 

@@ -1453,6 +1453,164 @@ async fn retry_push_transient_other_failure_leaves_assignment_merge_staged() {
     drop(fixture.project_dir);
 }
 
+async fn call_abandon_staged(
+    router: &axum::Router,
+    project_id: &str,
+    assignment_id: &str,
+    body: Option<&serde_json::Value>,
+) -> axum::response::Response {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/projects/{project_id}/assignments/{assignment_id}/abandon-staged"
+        ));
+    let body = if let Some(value) = body {
+        builder = builder.header("content-type", "application/json");
+        Body::from(serde_json::to_string(value).unwrap())
+    } else {
+        Body::empty()
+    };
+    router.clone().oneshot(builder.body(body).unwrap()).await.unwrap()
+}
+
+#[tokio::test]
+async fn abandon_staged_transitions_to_blocked_abandoned_staged_with_note() {
+    // Issue #54 / ADR-0037: Abandon Staged routes a `merge_staged`
+    // assignment to `blocked` with `BlockReason::AbandonedStaged`. No
+    // push is attempted; the optional `{ note }` becomes the block
+    // reason `detail`. Worktree cleanup runs (terminal status reached).
+    // The originating Plan Run stays `failed` (ADR-0037).
+    let fixture = build_staged_fixture(
+        PlanRunPhaseError::IntegrationPush("ssh: temporary failure".into()),
+        vec![Err(PlanRunPhaseError::IntegrationPush(
+            "should not be called".into(),
+        ))],
+    )
+    .await;
+
+    let pushes_before = fixture.pusher.call_count();
+    let note = "operator decided staged work should not land";
+    let resp = call_abandon_staged(
+        &fixture.router,
+        &fixture.project_id,
+        &fixture.assignment_id,
+        Some(&serde_json::json!({ "note": note })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let response: agentic_afk_contracts::AbandonStagedResponse = read_json(resp).await;
+    assert_eq!(response.status, "blocked");
+    let reason = response
+        .block_reason
+        .expect("abandon-staged must carry a block_reason");
+    assert_eq!(
+        reason.kind,
+        agentic_afk_contracts::BlockReason::AbandonedStaged
+    );
+    assert_eq!(reason.detail.as_deref(), Some(note));
+
+    // Assignment durably blocked with the typed kind and freeform detail.
+    let assignment = persistence::get_assignment(&fixture.db, &fixture.assignment_id)
+        .await
+        .unwrap();
+    assert_eq!(assignment.status, "blocked");
+    let persisted = assignment
+        .block_reason
+        .expect("blocked assignment carries block_reason");
+    assert_eq!(
+        persisted.kind,
+        agentic_afk_contracts::BlockReason::AbandonedStaged
+    );
+    assert_eq!(persisted.detail.as_deref(), Some(note));
+
+    // No new push attempts.
+    assert_eq!(
+        fixture.pusher.call_count(),
+        pushes_before,
+        "abandon-staged must not invoke the pusher"
+    );
+
+    // Worktree cleanup ran because the assignment reached a terminal status.
+    assert_eq!(fixture.cleaner.call_count(), 1);
+
+    // Plan Run terminal status remains `failed`.
+    let runs = persistence::list_recent_plan_runs(&fixture.db, &fixture.project_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, "failed");
+
+    // No new push Phase Outputs were appended (only the original failure).
+    let push_outputs: Vec<_> = runs[0]
+        .phase_outputs
+        .iter()
+        .filter(|p| p.phase == "push")
+        .collect();
+    assert_eq!(push_outputs.len(), 1);
+
+    // Activity entry was emitted.
+    let activity = persistence::list_project_activity(&fixture.db, &fixture.project_id, 50)
+        .await
+        .unwrap();
+    assert!(
+        activity
+            .iter()
+            .any(|entry| entry.kind == "assignment_abandoned_staged"),
+        "abandon-staged must emit an activity entry"
+    );
+
+    drop(fixture.project_dir);
+}
+
+#[tokio::test]
+async fn abandon_staged_without_note_omits_detail() {
+    // Issue #54: the request body is optional. Absent `note` leaves the
+    // typed block reason in place with `detail = None`.
+    let fixture = build_staged_fixture(
+        PlanRunPhaseError::IntegrationPush("ssh: temporary failure".into()),
+        vec![Err(PlanRunPhaseError::IntegrationPush(
+            "should not be called".into(),
+        ))],
+    )
+    .await;
+
+    let resp = call_abandon_staged(
+        &fixture.router,
+        &fixture.project_id,
+        &fixture.assignment_id,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let response: agentic_afk_contracts::AbandonStagedResponse = read_json(resp).await;
+    assert_eq!(response.status, "blocked");
+    let reason = response.block_reason.expect("block_reason present");
+    assert_eq!(
+        reason.kind,
+        agentic_afk_contracts::BlockReason::AbandonedStaged
+    );
+    assert!(reason.detail.is_none());
+
+    drop(fixture.project_dir);
+}
+
+#[tokio::test]
+async fn abandon_staged_rejects_assignments_not_in_merge_staged() {
+    // Defensive: the route refuses to act on an assignment that is not
+    // currently `merge_staged`.
+    let fixture = build_fixture(IMPL_OK, REVIEW_APPROVED, MERGE_OK, None).await;
+    let pid = fixture.project.id.0.clone();
+    let _ = start(&fixture.router, &pid).await;
+    let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 10)
+        .await
+        .unwrap();
+    let assignment_id = runs[0].assignments[0].id.clone();
+    let resp = call_abandon_staged(&fixture.router, &pid, &assignment_id, None).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    drop(fixture.project_dir);
+}
+
 #[tokio::test]
 async fn retry_push_rejects_assignments_not_in_merge_staged() {
     // Defensive: the route refuses to act on an assignment that is not

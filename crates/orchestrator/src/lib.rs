@@ -17,8 +17,8 @@ pub mod push_attempt;
 pub mod review_loop;
 
 pub use coordinator::{
-    CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs, retry_push,
-    run_plan_run, update_markdown_lifecycle_status,
+    CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs, abandon_staged,
+    retry_push, run_plan_run, update_markdown_lifecycle_status,
 };
 pub use push_attempt::{PushOutcome, classify_push_result};
 pub use planning_phase::{PlannedClaim, PlanningRejection, render_planning_prompt};

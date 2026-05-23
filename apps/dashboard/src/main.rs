@@ -728,9 +728,15 @@ fn PlanRunAssignmentRow(assignment: IssueAssignmentResponse) -> Element {
                 }
             }
             if is_merge_staged {
-                RetryPushAssignmentButton {
-                    project_id,
-                    assignment_id,
+                div { class: "flex gap-2",
+                    RetryPushAssignmentButton {
+                        project_id: project_id.clone(),
+                        assignment_id: assignment_id.clone(),
+                    }
+                    AbandonStagedAssignmentButton {
+                        project_id,
+                        assignment_id,
+                    }
                 }
             }
         }
@@ -785,6 +791,48 @@ fn RetryPushAssignmentButton(project_id: String, assignment_id: String) -> Eleme
                 }
             },
             "Retry Push"
+        }
+    }
+}
+
+#[component]
+fn AbandonStagedAssignmentButton(project_id: String, assignment_id: String) -> Element {
+    let store = use_context::<ProjectStore>();
+    let key = MutationKey::AbandonStagedAssignment(
+        ProjectId(project_id.clone()),
+        IssueAssignmentId(assignment_id.clone()),
+    );
+    rsx! {
+        ActionButton {
+            mutation_key: key.clone(),
+            variant: ButtonVariant::Destructive,
+            testid: "abandon-staged-assignment-button".to_string(),
+            error_marker: "abandon-staged-assignment".to_string(),
+            on_press: {
+                let key = key.clone();
+                let project_id = project_id.clone();
+                let assignment_id = assignment_id.clone();
+                move |_| {
+                    let key = key.clone();
+                    let project_id = project_id.clone();
+                    let assignment_id = assignment_id.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let result = store
+                            .mutate(
+                                key,
+                                abandon_staged_assignment_api(project_id, assignment_id, None),
+                            )
+                            .await;
+                        if result.is_ok() {
+                            store.push_success(
+                                "Abandon Staged",
+                                "Assignment blocked; staged work will not land",
+                            );
+                        }
+                    });
+                }
+            },
+            "Abandon Staged"
         }
     }
 }
@@ -1657,6 +1705,34 @@ async fn retry_push_assignment_api(
     let response = gloo_net::http::Request::post(&format!(
         "/api/projects/{project_id}/assignments/{assignment_id}/retry-push"
     ))
+    .send()
+    .await
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let body = response.text().await.unwrap_or_default();
+        return Err(project_store::MutationFailure::http(status, body));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))
+}
+
+async fn abandon_staged_assignment_api(
+    project_id: String,
+    assignment_id: String,
+    note: Option<String>,
+) -> Result<agentic_afk_contracts::AbandonStagedResponse, project_store::MutationFailure> {
+    let request_body = agentic_afk_contracts::AbandonStagedRequest { note };
+    let body = serde_json::to_string(&request_body)
+        .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
+    let response = gloo_net::http::Request::post(&format!(
+        "/api/projects/{project_id}/assignments/{assignment_id}/abandon-staged"
+    ))
+    .header("content-type", "application/json")
+    .body(body)
+    .map_err(|error| project_store::MutationFailure::network(error.to_string()))?
     .send()
     .await
     .map_err(|error| project_store::MutationFailure::network(error.to_string()))?;
