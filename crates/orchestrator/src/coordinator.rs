@@ -17,6 +17,7 @@ use agentic_afk_contracts::{
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 
 use crate::implementation_phase::{check_implementation_outcome, render_implementation_prompt};
+use crate::in_flight_phase_tracker::{self as tracker, PhaseLocator, TrackedPhase};
 use crate::merge_phase::{
     AssignmentMergeOutcome, MergeRejection, decide_merge_outcome, render_merge_prompt,
 };
@@ -372,17 +373,30 @@ pub async fn run_plan_run(
         baseline,
         &eligible,
     );
+    // ADR-0042 S1: persist an in-flight `plan_run_phase_outputs` row
+    // *before* the Codex Sandbox spawns. The handle is consumed by
+    // finalize_empty_planning / finalize_selection_planning (the typed
+    // body depends on the validated **Planned Claims**, computed only
+    // after the planner's stdout is parsed), or sunk into `fail` on the
+    // failure paths below.
+    let phase_handle = match tracker::start(
+        db,
+        PhaseLocator {
+            plan_run_id: plan_run.id.clone(),
+            assignment_id: None,
+            phase: "planning",
+        },
+    )
+    .await
+    {
+        Ok(handle) => handle,
+        Err(error) => return Err(CoordinatorError::from_persistence(error)),
+    };
+
     let planner_stdout = match deps.planner.run(&prompt) {
         Ok(stdout) => stdout,
         Err(error) => {
-            let _ = persistence::record_plan_run_phase_output(
-                db,
-                &plan_run.id,
-                "planning",
-                "failed",
-                &serde_json::json!({ "error": error.to_string() }),
-            )
-            .await;
+            let _ = phase_handle.fail(&error).await;
             if let Ok(run) = persistence::finish_plan_run(db, &plan_run.id, "failed").await {
                 events.plan_run_completed(project_id, run);
             }
@@ -397,14 +411,7 @@ pub async fn run_plan_run(
     let parsed = match crate::parse_planning_output(&planner_stdout) {
         Ok(parsed) => parsed,
         Err(error) => {
-            let _ = persistence::record_plan_run_phase_output(
-                db,
-                &plan_run.id,
-                "planning",
-                "failed",
-                &serde_json::json!({ "error": error }),
-            )
-            .await;
+            let _ = phase_handle.fail(&error).await;
             if let Ok(run) = persistence::finish_plan_run(db, &plan_run.id, "failed").await {
                 events.plan_run_completed(project_id, run);
             }
@@ -417,7 +424,15 @@ pub async fn run_plan_run(
     };
 
     if parsed.is_empty {
-        return finalize_empty_planning(db, events, project_id, &plan_run.id, &parsed.body).await;
+        return finalize_empty_planning(
+            events,
+            project_id,
+            &plan_run.id,
+            db,
+            &parsed.body,
+            phase_handle,
+        )
+        .await;
     }
 
     finalize_selection_planning(
@@ -429,27 +444,24 @@ pub async fn run_plan_run(
         plan_run,
         baseline,
         &parsed,
+        phase_handle,
     )
     .await
 }
 
 async fn finalize_empty_planning(
-    db: &Db,
     events: &Arc<dyn EventPublisher>,
     project_id: &str,
     plan_run_id: &str,
+    db: &Db,
     body: &serde_json::Value,
+    phase_handle: TrackedPhase,
 ) -> Result<PlanRunResponse, CoordinatorError> {
     let typed_body = planning_body_from_parsed(&[], body);
-    let phase_output = persistence::record_plan_run_phase_output_typed(
-        db,
-        plan_run_id,
-        "planning",
-        "succeeded_empty",
-        &typed_body,
-    )
-    .await
-    .map_err(CoordinatorError::from_persistence)?;
+    let phase_output = phase_handle
+        .complete("succeeded_empty", typed_body)
+        .await
+        .map_err(CoordinatorError::from_persistence)?;
     events.plan_run_phase_completed(project_id, plan_run_id, phase_output);
     let finished = persistence::finish_plan_run(db, plan_run_id, "succeeded_empty")
         .await
@@ -468,7 +480,13 @@ async fn finalize_selection_planning(
     plan_run: &PlanRunResponse,
     baseline: &RefreshedBaseline,
     parsed: &crate::ParsedPlanningOutput,
+    phase_handle: TrackedPhase,
 ) -> Result<PlanRunResponse, CoordinatorError> {
+    // Wrap in Option so each fail-then-return arm can `take()` the handle
+    // exactly once and the loop's per-iteration fail sites can do the
+    // same. The success path at the end of the function takes the still-
+    // Some handle and `.complete()`s it.
+    let mut phase_handle = Some(phase_handle);
     let snapshot = match persistence::get_planning_snapshot(db, project_id).await {
         Ok(raw) => agentic_afk_planning_snapshot::normalize(raw),
         Err(error) => {
@@ -479,6 +497,7 @@ async fn finalize_selection_planning(
                 &plan_run.id,
                 &error.to_string(),
                 "urn:agentic-afk:planning-snapshot-missing",
+                phase_handle.take().expect("planning row not yet finalized"),
             )
             .await);
         }
@@ -495,6 +514,7 @@ async fn finalize_selection_planning(
                     &plan_run.id,
                     "Project Execution Config disappeared during Planning Phase",
                     "urn:agentic-afk:execution-config-missing",
+                    phase_handle.take().expect("planning row not yet finalized"),
                 )
                 .await);
             }
@@ -523,6 +543,7 @@ async fn finalize_selection_planning(
                 &plan_run.id,
                 &err.detail,
                 &err.problem_type,
+                phase_handle.take().expect("planning row not yet finalized"),
             )
             .await);
         }
@@ -575,6 +596,7 @@ async fn finalize_selection_planning(
                     &plan_run.id,
                     &error.to_string(),
                     "urn:agentic-afk:assignment-worktree-failed",
+                    phase_handle.take().expect("planning row not yet finalized"),
                 )
                 .await);
             }
@@ -596,6 +618,7 @@ async fn finalize_selection_planning(
                 &plan_run.id,
                 &error.to_string(),
                 "urn:agentic-afk:issue-source-lifecycle-failed",
+                phase_handle.take().expect("planning row not yet finalized"),
             )
             .await);
         }
@@ -605,15 +628,12 @@ async fn finalize_selection_planning(
     }
 
     let typed_body = planning_body_from_parsed(&claims, &parsed.body);
-    let phase_output = persistence::record_plan_run_phase_output_typed(
-        db,
-        &plan_run.id,
-        "planning",
-        "succeeded",
-        &typed_body,
-    )
-    .await
-    .map_err(CoordinatorError::from_persistence)?;
+    let phase_output = phase_handle
+        .take()
+        .expect("planning row not yet finalized")
+        .complete("succeeded", typed_body)
+        .await
+        .map_err(CoordinatorError::from_persistence)?;
     events.plan_run_phase_completed(project_id, &plan_run.id, phase_output);
 
     // Drive implementation+review for every claimed assignment concurrently
@@ -802,6 +822,19 @@ async fn run_assignment_implement_review(
             &raw_text,
             &review_findings,
         );
+        // ADR-0042 S1: pre-spawn `in_flight` row.
+        let mut impl_handle = Some(
+            tracker::start(
+                db,
+                PhaseLocator {
+                    plan_run_id: plan_run.id.clone(),
+                    assignment_id: Some(assignment.id.clone()),
+                    phase: "implementation",
+                },
+            )
+            .await
+            .map_err(CoordinatorError::from_persistence)?,
+        );
         let impl_stdout = match deps.implementation.run(&impl_prompt) {
             Ok(stdout) => stdout,
             Err(error) => {
@@ -810,9 +843,9 @@ async fn run_assignment_implement_review(
                     events,
                     project_id,
                     assignment,
-                    "implementation",
                     &error.to_string(),
                     "urn:agentic-afk:implementation-phase-failed",
+                    impl_handle.take().expect("implementation row not finalized"),
                 )
                 .await);
             }
@@ -825,9 +858,9 @@ async fn run_assignment_implement_review(
                     events,
                     project_id,
                     assignment,
-                    "implementation",
                     &error,
                     "urn:agentic-afk:implementation-output-unparseable",
+                    impl_handle.take().expect("implementation row not finalized"),
                 )
                 .await);
             }
@@ -839,23 +872,19 @@ async fn run_assignment_implement_review(
                 events,
                 project_id,
                 assignment,
-                "implementation",
                 &err.detail,
                 &err.problem_type,
+                impl_handle.take().expect("implementation row not finalized"),
             )
             .await);
         }
         let impl_body = parse_implementation_phase_body(&impl_parsed.body);
-        let impl_output = persistence::record_assignment_phase_output_typed(
-            db,
-            &plan_run.id,
-            &assignment.id,
-            "implementation",
-            &impl_parsed.outcome,
-            &impl_body,
-        )
-        .await
-        .map_err(CoordinatorError::from_persistence)?;
+        let impl_output = impl_handle
+            .take()
+            .expect("implementation row not finalized")
+            .complete(&impl_parsed.outcome, impl_body)
+            .await
+            .map_err(CoordinatorError::from_persistence)?;
         events.plan_run_phase_completed(project_id, &plan_run.id, impl_output);
 
         transition_assignment(
@@ -877,6 +906,18 @@ async fn run_assignment_implement_review(
             &raw_text,
             &impl_parsed.body,
         );
+        let mut review_handle = Some(
+            tracker::start(
+                db,
+                PhaseLocator {
+                    plan_run_id: plan_run.id.clone(),
+                    assignment_id: Some(assignment.id.clone()),
+                    phase: "review",
+                },
+            )
+            .await
+            .map_err(CoordinatorError::from_persistence)?,
+        );
         let review_stdout = match deps.review.run(&review_prompt) {
             Ok(stdout) => stdout,
             Err(error) => {
@@ -885,9 +926,9 @@ async fn run_assignment_implement_review(
                     events,
                     project_id,
                     assignment,
-                    "review",
                     &error.to_string(),
                     "urn:agentic-afk:review-phase-failed",
+                    review_handle.take().expect("review row not finalized"),
                 )
                 .await);
             }
@@ -900,24 +941,20 @@ async fn run_assignment_implement_review(
                     events,
                     project_id,
                     assignment,
-                    "review",
                     &error,
                     "urn:agentic-afk:review-output-unparseable",
+                    review_handle.take().expect("review row not finalized"),
                 )
                 .await);
             }
         };
         let review_body = parse_review_phase_body(&review_parsed.body);
-        let review_output = persistence::record_assignment_phase_output_typed(
-            db,
-            &plan_run.id,
-            &assignment.id,
-            "review",
-            &review_parsed.outcome,
-            &review_body,
-        )
-        .await
-        .map_err(CoordinatorError::from_persistence)?;
+        let review_output = review_handle
+            .take()
+            .expect("review row not finalized")
+            .complete(&review_parsed.outcome, review_body)
+            .await
+            .map_err(CoordinatorError::from_persistence)?;
         events.plan_run_phase_completed(project_id, &plan_run.id, review_output);
 
         // Increment the persisted rejection counter *before* asking
@@ -1020,23 +1057,19 @@ async fn fail_assignment_phase(
     events: &Arc<dyn EventPublisher>,
     project_id: &str,
     assignment: &IssueAssignmentResponse,
-    phase: &str,
     error: &str,
     problem_type: &str,
+    phase_handle: TrackedPhase,
 ) -> CoordinatorError {
+    // Consume the in-flight handle so the row lands as `failed` (ADR-0042
+    // S1). The typed Failed body carries the problem-type URN so the
+    // Dashboard can render the same RFC-7807 reason it surfaces in the
+    // HTTP response.
     let body = agentic_afk_contracts::PhaseOutputBody::Failed {
         error: error.to_string(),
         problem_type: Some(problem_type.to_string()),
     };
-    let _ = persistence::record_assignment_phase_output_typed(
-        db,
-        assignment.plan_run_id.as_deref().unwrap_or_default(),
-        &assignment.id,
-        phase,
-        "failed",
-        &body,
-    )
-    .await;
+    let _ = phase_handle.complete("failed", body).await;
     if let Ok(updated) =
         persistence::set_assignment_status(db, &assignment.id, "blocked", Some(error)).await
     {
@@ -1189,6 +1222,21 @@ async fn finalize_parallel_plan_run(
             review_body,
         );
 
+        // ADR-0042 S1: pre-spawn merge `in_flight` row. The handle is
+        // consumed on every branch below — runner failure, parse failure,
+        // and success — so the audit log carries exactly one row per
+        // merge invocation regardless of outcome.
+        let merge_handle = tracker::start(
+            db,
+            PhaseLocator {
+                plan_run_id: plan_run.id.clone(),
+                assignment_id: Some(merge_assignment.id.clone()),
+                phase: "merge",
+            },
+        )
+        .await
+        .map_err(CoordinatorError::from_persistence)?;
+
         // Classify the merge attempt as one of Merged / Blocked. Runner
         // failures and unparseable outputs collapse to Blocked with the
         // surfaced error; a parsed merge body flows through the pure
@@ -1200,15 +1248,7 @@ async fn finalize_parallel_plan_run(
                     error: reason.clone(),
                     problem_type: Some("urn:agentic-afk:merge-phase-runner-failed".to_string()),
                 };
-                let _ = persistence::record_assignment_phase_output_typed(
-                    db,
-                    &plan_run.id,
-                    &merge_assignment.id,
-                    "merge",
-                    "failed",
-                    &failed_body,
-                )
-                .await;
+                let _ = merge_handle.complete("failed", failed_body).await;
                 AssignmentMergeOutcome::Blocked { reason }
             }
             Ok(merge_stdout) => match crate::parse_merge_output(&merge_stdout) {
@@ -1219,30 +1259,16 @@ async fn finalize_parallel_plan_run(
                             "urn:agentic-afk:merge-output-unparseable".to_string(),
                         ),
                     };
-                    let _ = persistence::record_assignment_phase_output_typed(
-                        db,
-                        &plan_run.id,
-                        &merge_assignment.id,
-                        "merge",
-                        "failed",
-                        &failed_body,
-                    )
-                    .await;
+                    let _ = merge_handle.complete("failed", failed_body).await;
                     let err = CoordinatorError::from(MergeRejection::Unparseable(error));
                     AssignmentMergeOutcome::Blocked { reason: err.detail }
                 }
                 Ok(parsed) => {
                     let merge_body = parse_merge_phase_body(&parsed.body);
-                    let merge_output = persistence::record_assignment_phase_output_typed(
-                        db,
-                        &plan_run.id,
-                        &merge_assignment.id,
-                        "merge",
-                        &parsed.outcome,
-                        &merge_body,
-                    )
-                    .await
-                    .map_err(CoordinatorError::from_persistence)?;
+                    let merge_output = merge_handle
+                        .complete(&parsed.outcome, merge_body)
+                        .await
+                        .map_err(CoordinatorError::from_persistence)?;
                     events.plan_run_phase_completed(project_id, &plan_run.id, merge_output);
                     decide_merge_outcome(&parsed)
                 }
@@ -1510,15 +1536,13 @@ async fn fail_planning_phase(
     plan_run_id: &str,
     error: &str,
     problem_type: &str,
+    phase_handle: TrackedPhase,
 ) -> CoordinatorError {
-    let _ = persistence::record_plan_run_phase_output(
-        db,
-        plan_run_id,
-        "planning",
-        "failed",
-        &serde_json::json!({ "error": error }),
-    )
-    .await;
+    // Consume the in-flight handle so the planning row lands as `failed`
+    // (ADR-0042 S1) — no second row, no `record_plan_run_phase_output`
+    // bypass, and the audit log carries the typed Failed body with the
+    // error string the operator sees in the RFC-7807 response.
+    let _ = phase_handle.fail(error).await;
     if let Ok(run) = persistence::finish_plan_run(db, plan_run_id, "failed").await {
         events.plan_run_completed(project_id, run);
     }

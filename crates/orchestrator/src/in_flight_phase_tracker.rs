@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use agentic_afk_contracts::PhaseOutputBody;
+use agentic_afk_contracts::{PhaseOutputBody, PhaseOutputResponse};
 use agentic_afk_persistence::{
     Db, PersistenceError, complete_in_flight_phase_output, insert_in_flight_phase_output,
     record_in_flight_phase_process,
@@ -93,6 +93,97 @@ pub enum TrackerError<E> {
     Persistence(#[from] PersistenceError),
 }
 
+/// Handle to a started but not-yet-completed in-flight phase row, returned
+/// by [`start`]. Use when the row's terminal write happens further down a
+/// flow than a single closure can express (e.g. the planning row, whose
+/// typed body is populated *after* the planner result is validated into
+/// **Planned Claims**). Dropping this handle without calling
+/// [`TrackedPhase::complete`] or [`TrackedPhase::fail`] leaves the row at
+/// `in_flight` so the [`crate::shutdown_coordinator::ShutdownCoordinator`]
+/// or the **BootRecoveryScanner** can sweep it — preferable to a silently-
+/// failed write, which would lose the audit trail.
+pub struct TrackedPhase {
+    db: Db,
+    row_id: String,
+    phase: &'static str,
+    assignment_id: Option<String>,
+    pub recorder: PhaseProcessRecorder,
+}
+
+impl TrackedPhase {
+    pub fn row_id(&self) -> &str {
+        &self.row_id
+    }
+
+    /// Replace the in-flight row's `outcome` + `body_json` with the
+    /// terminal result. Consumes the handle so a row cannot be completed
+    /// twice. Returns a [`PhaseOutputResponse`] mirroring what the
+    /// pre-tracker `record_*_phase_output_typed` helpers returned, so
+    /// callers can keep feeding the existing event publishers unchanged.
+    pub async fn complete(
+        self,
+        outcome: &str,
+        body: PhaseOutputBody,
+    ) -> Result<PhaseOutputResponse, PersistenceError> {
+        complete_in_flight_phase_output(&self.db, &self.row_id, outcome, &body).await?;
+        // PhaseOutputBody is a typed enum derived with serde — `to_value`
+        // cannot fail. Unwrapping here is safer than introducing a sqlx
+        // dep on the orchestrator crate solely to wrap the error.
+        let body_json = serde_json::to_value(&body)
+            .expect("PhaseOutputBody serialization is infallible");
+        Ok(PhaseOutputResponse {
+            phase: self.phase.to_string(),
+            outcome: outcome.to_string(),
+            body_json,
+            recorded_at: String::new(),
+            assignment_id: self.assignment_id,
+        })
+    }
+
+    /// Replace the in-flight row with a `failed` outcome carrying the
+    /// supplied error string. Consumes the handle.
+    pub async fn fail(
+        self,
+        error: impl std::fmt::Display,
+    ) -> Result<PhaseOutputResponse, PersistenceError> {
+        let body = PhaseOutputBody::Failed {
+            error: error.to_string(),
+            problem_type: None,
+        };
+        self.complete("failed", body).await
+    }
+}
+
+/// Insert an in-flight `plan_run_phase_outputs` row and return a handle the
+/// caller drives to terminal via [`TrackedPhase::complete`] or
+/// [`TrackedPhase::fail`]. Prefer [`run`] when the terminal write can
+/// happen inside a single closure; use `start` when the row body depends
+/// on validation steps that happen after the Codex Sandbox returns.
+pub async fn start(
+    db: &Db,
+    locator: PhaseLocator,
+) -> Result<TrackedPhase, PersistenceError> {
+    let row_id = insert_in_flight_phase_output(
+        db,
+        &locator.plan_run_id,
+        locator.assignment_id.as_deref(),
+        locator.phase,
+    )
+    .await?;
+    let recorder = PhaseProcessRecorder {
+        db: db.clone(),
+        row_id: row_id.clone(),
+        recorded: Arc::new(Mutex::new(false)),
+    };
+    Ok(TrackedPhase {
+        db: db.clone(),
+        row_id,
+        phase: locator.phase,
+        assignment_id: locator.assignment_id,
+        recorder,
+    })
+}
+
 /// Run a Codex phase under the tracker. Order of operations (ADR-0042 S1):
 ///   1. INSERT in_flight row before `spawn_and_wait` runs.
 ///   2. Invoke `spawn_and_wait` with a [`PhaseProcessRecorder`] so the
@@ -113,33 +204,27 @@ where
     Fut: std::future::Future<Output = Result<PhaseRunResult<T>, E>>,
     E: std::fmt::Display,
 {
-    let row_id = insert_in_flight_phase_output(
-        db,
-        &locator.plan_run_id,
-        locator.assignment_id.as_deref(),
-        locator.phase,
-    )
-    .await?;
-    let recorder = PhaseProcessRecorder {
-        db: db.clone(),
-        row_id: row_id.clone(),
-        recorded: Arc::new(Mutex::new(false)),
-    };
+    let handle = start(db, locator).await?;
+    let recorder = handle.recorder.clone();
+    let row_id = handle.row_id.clone();
     match spawn_and_wait(recorder).await {
         Ok(PhaseRunResult {
             value,
             outcome,
             body,
         }) => {
+            // Re-use the lower-level helper directly to avoid double-
+            // serialising the body just to return a discarded
+            // PhaseOutputResponse.
             complete_in_flight_phase_output(db, &row_id, &outcome, &body).await?;
+            // The handle's destructor is a no-op; explicitly drop here
+            // so the row id is not accidentally reused later in this
+            // function.
+            drop(handle);
             Ok(value)
         }
         Err(err) => {
-            let body = PhaseOutputBody::Failed {
-                error: err.to_string(),
-                problem_type: None,
-            };
-            complete_in_flight_phase_output(db, &row_id, "failed", &body).await?;
+            handle.fail(&err).await?;
             Err(TrackerError::Phase(err))
         }
     }
