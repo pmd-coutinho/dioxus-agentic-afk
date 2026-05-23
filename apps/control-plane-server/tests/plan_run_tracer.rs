@@ -138,7 +138,11 @@ async fn empty_plan_run_succeeds_and_appears_in_snapshot() {
         planning.body_json["summary"].as_str().unwrap(),
         "no eligible work"
     );
-    assert_eq!(planning.body_json["issues"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        planning.body_json["selections"].as_array().unwrap().len(),
+        0
+    );
+    assert_eq!(planning.body_json["phase"].as_str().unwrap(), "planning");
 
     // Snapshot reflects the finished Plan Run in history.
     let snapshot: ProjectSnapshotResponse = read_json(

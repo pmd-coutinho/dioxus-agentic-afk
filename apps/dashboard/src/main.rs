@@ -1143,10 +1143,71 @@ fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element 
                 }
             }
         },
-        PhaseOutputBody::Planning(body) => {
-            let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
+        PhaseOutputBody::Planning { selections, summary, rejected_candidates } => {
+            let is_empty = selections.is_empty() && rejected_candidates.is_empty();
             rsx! {
-                pre { class: "whitespace-pre-wrap font-mono text-[11px] text-ink-2", "{pretty}" }
+                div { class: "flex flex-col gap-2",
+                    "data-testid": "phase-output-planning",
+                    if !summary.is_empty() {
+                        p { class: "text-[12px] text-ink",
+                            "data-testid": "phase-output-planning-rationale",
+                            "{summary}"
+                        }
+                    }
+                    if !selections.is_empty() {
+                        ul { class: "list-disc pl-4 text-[11px] text-ink",
+                            "data-testid": "phase-output-planning-selections",
+                            for selection in selections.iter() {
+                                li { class: "flex flex-col",
+                                    "data-testid": "phase-output-planning-selection",
+                                    span {
+                                        "data-testid": "phase-output-planning-selection-source",
+                                        "{selection.source_issue_id} — {selection.title}"
+                                    }
+                                    span { class: "font-mono text-[10px] text-ink-2",
+                                        "data-testid": "phase-output-planning-selection-branch",
+                                        "{selection.branch}"
+                                    }
+                                    if !selection.selection_summary.is_empty() {
+                                        span { class: "text-[11px] text-ink-2",
+                                            "data-testid": "phase-output-planning-selection-summary",
+                                            "{selection.selection_summary}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !rejected_candidates.is_empty() {
+                        ul { class: "list-disc pl-4 text-[11px] text-coral",
+                            "data-testid": "phase-output-planning-rejected-list",
+                            for candidate in rejected_candidates.iter() {
+                                li { class: "flex flex-col",
+                                    "data-testid": "phase-output-planning-rejected",
+                                    span {
+                                        "data-testid": "phase-output-planning-rejected-source",
+                                        "{candidate.source_issue_id}"
+                                    }
+                                    span { class: "text-[11px] text-ink-2",
+                                        "data-testid": "phase-output-planning-rejected-reason",
+                                        "{candidate.reason}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if is_empty && summary.is_empty() {
+                        p { class: "text-[12px] text-ink-2",
+                            "data-testid": "phase-output-planning-empty",
+                            "No eligible Source Issues selected for this Plan Run."
+                        }
+                    } else if is_empty {
+                        p { class: "text-[12px] text-ink-2",
+                            "data-testid": "phase-output-planning-empty",
+                            "No selections."
+                        }
+                    }
+                }
             }
         }
     }

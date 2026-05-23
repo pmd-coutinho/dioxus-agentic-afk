@@ -435,12 +435,13 @@ async fn finalize_empty_planning(
     plan_run_id: &str,
     body: &serde_json::Value,
 ) -> Result<PlanRunResponse, CoordinatorError> {
-    let phase_output = persistence::record_plan_run_phase_output(
+    let typed_body = planning_body_from_parsed(&[], body);
+    let phase_output = persistence::record_plan_run_phase_output_typed(
         db,
         plan_run_id,
         "planning",
         "succeeded_empty",
-        body,
+        &typed_body,
     )
     .await
     .map_err(CoordinatorError::from_persistence)?;
@@ -598,12 +599,13 @@ async fn finalize_selection_planning(
         claimed.push(assignment);
     }
 
-    let phase_output = persistence::record_plan_run_phase_output(
+    let typed_body = planning_body_from_parsed(&claims, &parsed.body);
+    let phase_output = persistence::record_plan_run_phase_output_typed(
         db,
         &plan_run.id,
         "planning",
         "succeeded",
-        &parsed.body,
+        &typed_body,
     )
     .await
     .map_err(CoordinatorError::from_persistence)?;
@@ -1438,6 +1440,62 @@ async fn finalize_parallel_plan_run(
         .await
         .map_err(CoordinatorError::from_persistence)?;
     Ok(refreshed)
+}
+
+/// Build the typed [`PhaseOutputBody::Planning`] body from validated
+/// claims plus the parsed planner output. Selections come from the
+/// validated claims so the persisted body reflects only Planned Claims
+/// the coordinator actually provisioned; `summary` is pulled from the
+/// planner's top-level `summary` field; `rejected_candidates` is sourced
+/// from the planner's optional `rejected_candidates` array (each entry
+/// `{source_issue_id, reason}`) — empty when the planner did not emit it.
+fn planning_body_from_parsed(
+    claims: &[PlannedClaim],
+    parsed_body: &serde_json::Value,
+) -> agentic_afk_contracts::PhaseOutputBody {
+    use agentic_afk_contracts::{
+        PhaseOutputBody, PlanningSelection, RejectedPlanningCandidate,
+    };
+    let selections = claims
+        .iter()
+        .map(|claim| PlanningSelection {
+            source_issue_id: claim.selection.source_issue_id.clone(),
+            title: claim.selection.title.clone(),
+            branch: claim.selection.branch.clone(),
+            selection_summary: claim.selection.selection_summary.clone(),
+        })
+        .collect();
+    let summary = parsed_body
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let rejected_candidates = parsed_body
+        .get("rejected_candidates")
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(RejectedPlanningCandidate {
+                        source_issue_id: row
+                            .get("source_issue_id")?
+                            .as_str()?
+                            .to_string(),
+                        reason: row
+                            .get("reason")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    PhaseOutputBody::Planning {
+        selections,
+        summary,
+        rejected_candidates,
+    }
 }
 
 async fn fail_planning_phase(

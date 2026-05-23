@@ -1842,6 +1842,160 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn write_seam_accepts_planning_succeeded_with_non_empty_selections() {
+        use agentic_afk_contracts::{
+            PhaseOutputBody, PlanningSelection, RejectedPlanningCandidate,
+        };
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Planning {
+            selections: vec![PlanningSelection {
+                source_issue_id: "62".into(),
+                title: "Typed Planning".into(),
+                branch: "agent/issue-62".into(),
+                selection_summary: "baseline ready".into(),
+            }],
+            summary: "one ready".into(),
+            rejected_candidates: vec![RejectedPlanningCandidate {
+                source_issue_id: "63".into(),
+                reason: "depends on #62".into(),
+            }],
+        };
+        let stored = record_plan_run_phase_output_typed(
+            &db,
+            &plan_run.id,
+            "planning",
+            "succeeded",
+            &body,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.phase, "planning");
+        assert_eq!(stored.outcome, "succeeded");
+        assert_eq!(
+            stored.body_json.get("phase").and_then(|v| v.as_str()),
+            Some("planning")
+        );
+    }
+
+    #[tokio::test]
+    async fn write_seam_accepts_planning_succeeded_empty_with_no_selections() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Planning {
+            selections: vec![],
+            summary: "no eligible work".into(),
+            rejected_candidates: vec![],
+        };
+        let stored = record_plan_run_phase_output_typed(
+            &db,
+            &plan_run.id,
+            "planning",
+            "succeeded_empty",
+            &body,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.outcome, "succeeded_empty");
+    }
+
+    #[tokio::test]
+    async fn write_seam_rejects_planning_succeeded_when_selections_empty() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Planning {
+            selections: vec![],
+            summary: String::new(),
+            rejected_candidates: vec![],
+        };
+        // Empty selections must pair with `succeeded_empty`, never with
+        // plain `succeeded`.
+        let result = record_plan_run_phase_output_typed(
+            &db,
+            &plan_run.id,
+            "planning",
+            "succeeded",
+            &body,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
+            "expected PhaseOutputMismatch, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_seam_rejects_planning_succeeded_empty_when_selections_present() {
+        use agentic_afk_contracts::{PhaseOutputBody, PlanningSelection};
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Planning {
+            selections: vec![PlanningSelection {
+                source_issue_id: "1".into(),
+                title: "t".into(),
+                branch: "b".into(),
+                selection_summary: String::new(),
+            }],
+            summary: String::new(),
+            rejected_candidates: vec![],
+        };
+        let result = record_plan_run_phase_output_typed(
+            &db,
+            &plan_run.id,
+            "planning",
+            "succeeded_empty",
+            &body,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
+            "expected PhaseOutputMismatch, got {result:?}"
+        );
+    }
+
     fn make_issue(source_id: &str, readiness: &str, lifecycle_status: &str) -> SourceIssueSnapshot {
         SourceIssueSnapshot {
             source_id: source_id.to_string(),

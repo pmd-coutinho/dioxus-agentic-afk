@@ -366,8 +366,25 @@ pub struct PlanRunResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum PhaseOutputBody {
-    /// Planning Phase body (stub — see ADR-0038, future slice).
-    Planning(serde_json::Value),
+    /// Planning Phase body — the structured product of one Planning Phase
+    /// run. `selections` carries one entry per Planned Claim the planner
+    /// chose (Source Issue identity + derived issue branch + selection
+    /// summary); `summary` is the planner's high-level rationale text
+    /// surfaced on the collapsed Dashboard row; `rejected_candidates`
+    /// captures Source Issues the planner explicitly considered and
+    /// declined (each with a reason). Validated against
+    /// `outcome = "succeeded"` (non-empty `selections`) or
+    /// `outcome = "succeeded_empty"` (empty `selections`) at the
+    /// persistence write seam — runner/parse failures land as `Failed`
+    /// with `outcome = "failed"`.
+    Planning {
+        #[serde(default)]
+        selections: Vec<PlanningSelection>,
+        #[serde(default)]
+        summary: String,
+        #[serde(default)]
+        rejected_candidates: Vec<RejectedPlanningCandidate>,
+    },
     /// Implementation Phase body — the structured product of one
     /// Implementation pass on an Issue Assignment. `commits` is the list
     /// of commit SHAs touched on the Issue Branch; `verification` carries
@@ -455,6 +472,29 @@ pub enum PhaseOutputBody {
     },
 }
 
+/// One Planned Claim recorded inside a [`PhaseOutputBody::Planning`].
+/// Pairs the planner's chosen Source Issue identity with the derived
+/// **issue branch** name and the selection rationale shown on the
+/// expanded Dashboard row.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct PlanningSelection {
+    pub source_issue_id: String,
+    pub title: String,
+    pub branch: String,
+    #[serde(default)]
+    pub selection_summary: String,
+}
+
+/// One Source Issue the planner explicitly considered and rejected inside
+/// a [`PhaseOutputBody::Planning`]. Pairs the candidate's identity with
+/// the planner's rejection reason so the Dashboard can surface why a
+/// nominally-eligible Source Issue did not make this Plan Run's batch.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+pub struct RejectedPlanningCandidate {
+    pub source_issue_id: String,
+    pub reason: String,
+}
+
 /// One reviewer finding inside a [`PhaseOutputBody::Review`]. `location`
 /// names the source location (file path, function, or commit ref) the
 /// finding is anchored to; `message` is the freeform reviewer text. Both
@@ -502,7 +542,7 @@ impl PhaseOutputBody {
     /// seam so legacy rows keep their column value.
     pub fn phase_tag(&self) -> &'static str {
         match self {
-            Self::Planning(_) => "planning",
+            Self::Planning { .. } => "planning",
             Self::Implementation { .. } => "implementation",
             Self::Review { .. } => "review",
             Self::Merge { .. } => "merge",
@@ -998,10 +1038,40 @@ mod tests {
     }
 
     #[test]
-    fn phase_output_body_planning_stub_round_trips() {
-        let body = PhaseOutputBody::Planning(serde_json::json!({ "summary": "ok" }));
+    fn phase_output_body_planning_typed_round_trips_with_selection() {
+        let body = PhaseOutputBody::Planning {
+            selections: vec![PlanningSelection {
+                source_issue_id: "62".to_string(),
+                title: "Typed Planning variant".to_string(),
+                branch: "agent/issue-62".to_string(),
+                selection_summary: "baseline ready".to_string(),
+            }],
+            summary: "one ready issue".to_string(),
+            rejected_candidates: vec![RejectedPlanningCandidate {
+                source_issue_id: "63".to_string(),
+                reason: "depends on #62".to_string(),
+            }],
+        };
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains("\"phase\":\"planning\""), "{json}");
+        assert!(json.contains("\"source_issue_id\":\"62\""), "{json}");
+        assert!(json.contains("\"branch\":\"agent/issue-62\""), "{json}");
+        assert!(json.contains("\"selection_summary\":\"baseline ready\""), "{json}");
+        assert!(json.contains("\"reason\":\"depends on #62\""), "{json}");
+        let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, body);
+    }
+
+    #[test]
+    fn phase_output_body_planning_typed_round_trips_empty_selection() {
+        let body = PhaseOutputBody::Planning {
+            selections: vec![],
+            summary: "no eligible work".to_string(),
+            rejected_candidates: vec![],
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"phase\":\"planning\""), "{json}");
+        assert!(json.contains("\"selections\":[]"), "{json}");
         let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
         assert_eq!(back, body);
     }

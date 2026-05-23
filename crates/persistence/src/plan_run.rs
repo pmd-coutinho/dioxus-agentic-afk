@@ -180,7 +180,7 @@ fn wrap_legacy_body(
         };
     }
     match phase {
-        "planning" => PhaseOutputBody::Planning(body_json.clone()),
+        "planning" => parse_planning_body(body_json),
         "implementation" => parse_implementation_body(body_json),
         "review" => parse_review_body(body_json),
         "merge" => parse_merge_body(body_json),
@@ -190,6 +190,95 @@ fn wrap_legacy_body(
             error: body_json.to_string(),
             problem_type: None,
         },
+    }
+}
+
+/// Deserialize a free-form planning body into the typed
+/// [`PhaseOutputBody::Planning`] variant. Tolerates legacy in-the-wild
+/// planner-output rows that recorded `issues: [...]` (the raw planner
+/// stdout shape) by mapping each issue into a [`PlanningSelection`].
+/// Falls back to an empty Planning body when neither shape applies so
+/// the row still lands.
+fn parse_planning_body(body_json: &serde_json::Value) -> PhaseOutputBody {
+    use agentic_afk_contracts::{PlanningSelection, RejectedPlanningCandidate};
+
+    // Strict path: the body is already a typed Planning body.
+    let mut value = body_json.clone();
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "phase".to_string(),
+            serde_json::Value::String("planning".to_string()),
+        );
+    }
+    if let Ok(typed @ PhaseOutputBody::Planning { .. }) =
+        serde_json::from_value::<PhaseOutputBody>(value)
+    {
+        return typed;
+    }
+
+    // Legacy path: raw planner stdout body with `issues: [...]`.
+    let selections = body_json
+        .get("issues")
+        .and_then(serde_json::Value::as_array)
+        .map(|issues| {
+            issues
+                .iter()
+                .filter_map(|issue| {
+                    Some(PlanningSelection {
+                        source_issue_id: issue
+                            .get("source_issue_id")?
+                            .as_str()?
+                            .to_string(),
+                        title: issue
+                            .get("title")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        branch: issue
+                            .get("branch")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        selection_summary: issue
+                            .get("selection_summary")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let summary = body_json
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let rejected_candidates = body_json
+        .get("rejected_candidates")
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(RejectedPlanningCandidate {
+                        source_issue_id: row
+                            .get("source_issue_id")?
+                            .as_str()?
+                            .to_string(),
+                        reason: row
+                            .get("reason")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    PhaseOutputBody::Planning {
+        selections,
+        summary,
+        rejected_candidates,
     }
 }
 
@@ -352,6 +441,21 @@ fn validate_outcome_body(outcome: &str, body: &PhaseOutputBody) -> Result<(), Pe
             body_phase: body.phase_tag(),
             outcome: outcome.to_string(),
         });
+    }
+    // Planning body pairs with `succeeded` (non-empty selections) or
+    // `succeeded_empty` (empty selections). Runner/parse failures land
+    // as `Failed` with `outcome = "failed"` via the failure path above.
+    if let PhaseOutputBody::Planning { selections, .. } = body {
+        match outcome {
+            "succeeded" if !selections.is_empty() => {}
+            "succeeded_empty" if selections.is_empty() => {}
+            _ => {
+                return Err(PersistenceError::PhaseOutputMismatch {
+                    body_phase: body.phase_tag(),
+                    outcome: outcome.to_string(),
+                });
+            }
+        }
     }
     // Merge body pairs with `merged` (clean local integration) or
     // `blocked` (merge could not finish safely; `block_reason` carries
