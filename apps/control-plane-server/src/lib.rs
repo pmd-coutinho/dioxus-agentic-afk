@@ -486,8 +486,26 @@ pub async fn serve(config: ControlPlaneConfig) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.bind_address).await?;
     let local_addr = listener.local_addr()?;
     eprintln!("agentic-afk Local Control Plane listening on http://{local_addr}");
+    // ADR-0042 S1: install the ShutdownCoordinator as axum's graceful-
+    // shutdown future. On SIGTERM/SIGINT it flips every `in_flight`
+    // phase row to `interrupted`, SIGTERMs the captured child PIDs, and
+    // sleeps the configured grace window before axum tears down the
+    // listener — leaving a clean recovery surface for the next boot.
+    let shutdown_db = db.clone();
     axum::serve(listener, router(config, db))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            let report = agentic_afk_orchestrator::shutdown_coordinator::await_shutdown(
+                shutdown_db,
+            )
+            .await;
+            if report.rows_marked_interrupted > 0 {
+                eprintln!(
+                    "shutdown: marked {} in-flight phase row(s) interrupted; signalled {} PID(s)",
+                    report.rows_marked_interrupted,
+                    report.pids_signalled.len()
+                );
+            }
+        })
         .await?;
     Ok(())
 }
@@ -2315,30 +2333,6 @@ async fn api_not_found() -> Response {
         }),
     )
         .into_response()
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
 }
 
 #[cfg(test)]
