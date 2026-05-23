@@ -128,6 +128,22 @@ _Avoid_: Epic, milestone, project
 A chronological record of noteworthy control-plane events for a **Project**, including **Issue Assignment** and **Assignment Attempt** lifecycle changes.
 _Avoid_: Fake metrics, agent output
 
+**Auto-Replan**:
+The per-**Project** cadence that triggers consecutive **Plan Runs** without human input while it is **Armed**. **Auto-Replan** preserves the single-active **Plan Run** invariant and pauses (not stops) on any condition that needs human attention.
+_Avoid_: Cron, queue drain, autonomous agent
+
+**Auto-Replan State**:
+A tri-state per-**Project** value of `Off`, `Armed`, or `Paused`. `Off` and `Armed` are human-set; `Paused` is system-set and carries a typed **Pause Reason**. Transition `Paused` → `Armed` requires an explicit human Resume; backlog change or block resolution does not auto-resume.
+_Avoid_: Auto-replan on/off boolean, planner status, scheduler queue
+
+**Auto-Replan Cycle**:
+One iteration driven by **Auto-Replan**: sync the **Issue Source**, then start a **Planning Phase**, then run its **Plan Run** to a terminal state. A cycle is skipped when the **Project** already has an active **Plan Run**.
+_Avoid_: Plan run retry, planning attempt, scheduler tick
+
+**Pause Reason**:
+The typed cause of an **Auto-Replan** transition from `Armed` to `Paused`. Values are `EmptyBacklog`, `AssignmentBlocked`, `PushNonFastForward`, `MergeStagedLeft`, `PlanningFailed`, and `SyncFailed`. The detail string (push stderr, sync error) belongs on the matching **Activity** entry, not duplicated on the **Project** row.
+_Avoid_: Freeform pause string, block reason, planner error
+
 **Local Control Plane**:
 A **Control Plane** intended to run on the developer's own machine for that developer's Projects.
 _Avoid_: Hosted service, team workspace
@@ -191,6 +207,15 @@ _Avoid_: afk, dioxus-agentic-afk
 - A **Project** may have zero or more **Activity** entries
 - A **Local Control Plane** is operated by one developer on their own machine
 - **agentic-afk** operates the **Local Control Plane**
+- A **Project** has one **Auto-Replan State**
+- An `Armed` **Auto-Replan State** drives **Auto-Replan Cycles** for that **Project**
+- An **Auto-Replan Cycle** syncs the **Issue Source** before its **Planning Phase**
+- An **Auto-Replan Cycle** preserves the single-active **Plan Run** invariant; if a **Plan Run** is already active the cycle is skipped
+- A **Plan Run** that finishes with at least one merged **Issue Assignment** and no blocked **Issue Assignments** and no `merge_staged` **Issue Assignments** allows the next **Auto-Replan Cycle** to continue
+- A **Plan Run** that finishes empty-successful, with any blocked **Issue Assignment**, with any `merge_staged` **Issue Assignment**, or with a failed **Planning Phase** transitions **Auto-Replan State** from `Armed` to `Paused`
+- A failed **Issue Source** sync inside an **Auto-Replan Cycle** transitions **Auto-Replan State** from `Armed` to `Paused`
+- A `Paused` **Auto-Replan State** requires explicit human Resume; backlog change or block resolution does not auto-resume
+- **Auto-Replan State** is per-**Project** scalar persistence; `Paused` survives server restart
 
 ## Example dialogue
 
@@ -348,4 +373,8 @@ _Avoid_: afk, dioxus-agentic-afk
 - "blocker" was resolved as an explicit **Issue Dependency** recorded in the **Source Issue** description, not a GitHub blocked-by relationship or inferred file-level independence.
 - "next issue" was resolved by the **Planning Phase** among eligible **Ready Issues**, not by **Source Order** alone.
 - "parent issue" was resolved as grouping metadata, not execution order.
+- "AFK cadence" was resolved as **Auto-Replan**, a per-**Project** tri-state (`Off`/`Armed`/`Paused`) driver that runs consecutive **Auto-Replan Cycles** while `Armed` and pauses (not stops) on any condition that needs human attention. Continuous spinning on identical backlogs is avoided by pausing on empty-successful **Plan Runs** rather than backing off, on the rationale that a drained backlog is a human-attention signal, not a transient state.
+- "auto-replan resume" was rejected as automatic on backlog or block resolution; resume is an explicit human action that flips `Paused` → `Armed`, recorded as an **Activity** entry. Auto-resume was rejected because coupling two state machines (`Auto-Replan State` and `Lifecycle Status`) hides intent and surprises a developer who walked away expecting the loop stopped.
+- "auto-replan cadence" was resolved as a single tick driver in the control-plane server scanning all `Armed` **Projects** on a fixed cooldown (60s default, no per-**Project** knob yet). Per-project tokio tasks were rejected as N task lifetimes to manage with no felt-need yet.
+- "auto-replan issue source freshness" was resolved as bundled: each **Auto-Replan Cycle** runs `sync_issue_source` immediately before its **Planning Phase**. An independent refresh timer was rejected to avoid two-loop interaction; the cost is at most one **Plan Run** of staleness, which is bounded by the existing single-active **Plan Run** invariant.
 - "push failure after local merge" is resolved by the `merge_staged` **Assignment Status**: the **Merge Phase** integrates locally and verifies, records `merge_staged`, then pushes; only on push success does it transition to `merged` and write Lifecycle `Completed`. If the push fails, the **Issue Assignment** stays `merge_staged` and the **Plan Run** finishes `failed`. Recovery is an operator-initiated **Retry Push** (push only — no re-verify, non-fast-forward auto-routes the **Issue Assignment** to `blocked`) or **Abandon Staged** (routes to `blocked`). `merge_staged` is dormant for **Max Parallel Tasks**. Worktree and issue-branch cleanup gate on the **Issue Assignment** reaching a terminal status (`merged` or `blocked`), not on the **Plan Run** finishing; a `failed` **Plan Run** stays `failed` even when a later retry advances the staged **Issue Assignment** to `merged`.
