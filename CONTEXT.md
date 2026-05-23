@@ -101,7 +101,7 @@ The task brief for one Sandcastle-style phase in a **Plan Run**. The initial **P
 _Avoid_: Generic agent prompt, issue template, project instructions
 
 **Phase Output**:
-The durable result recorded for a **Plan Run** phase or **Assignment Attempt**, including planning selection, review findings, merge verification, and block reasons.
+The durable result recorded for a **Plan Run** phase or **Assignment Attempt**, including planning selection, review findings, merge verification, **Integration Branch** push attempts (one row per attempt), and block reasons. Bodies are typed per recording slice (planning / implementation / review / merge / push / failed).
 _Avoid_: Ephemeral terminal text, worktree artifact, source issue body
 
 **Merge Phase**:
