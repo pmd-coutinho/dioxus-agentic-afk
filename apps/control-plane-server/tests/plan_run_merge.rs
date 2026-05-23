@@ -467,7 +467,11 @@ async fn merge_phase_failure_blocks_assignment_and_fails_plan_run() {
     use agentic_afk_orchestrator::PlanRunPhaseError;
     struct FailingMerger;
     impl MergePhaseRunner for FailingMerger {
-        fn run(&self, _prompt: &str) -> Result<String, PlanRunPhaseError> {
+        fn run(
+            &self,
+            _prompt: &str,
+            _context: &agentic_afk_orchestrator::plan_run::AssignmentContext<'_>,
+        ) -> Result<String, PlanRunPhaseError> {
             Err(PlanRunPhaseError::Merge("codex merge crashed".into()))
         }
     }

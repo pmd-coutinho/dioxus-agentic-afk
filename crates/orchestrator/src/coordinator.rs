@@ -76,6 +76,24 @@ pub struct PlanRunDeps {
     /// enabled Issue Source. `None` means tests own the lifecycle writer
     /// directly.
     pub production_gh_binary: Option<PathBuf>,
+    /// Production Codex Sandbox wiring (issue #74). When set the Plan
+    /// Run coordinator wires `DockerCodexRunner` instances for all four
+    /// phases backed by a `DockerSandboxLauncher` on this docker binary.
+    /// `None` means tests own the runner wiring directly.
+    pub production_sandbox: Option<SandboxProductionConfig>,
+}
+
+/// Production wiring inputs for the Codex Sandbox runner (issue #74).
+/// Carries everything `DockerCodexRunner` needs that is host-wide and
+/// not per-Assignment: docker binary, runtime image tag, codex auth and
+/// config bind-mount paths, and the host user identity for `--user`.
+#[derive(Clone, Debug)]
+pub struct SandboxProductionConfig {
+    pub docker_binary: PathBuf,
+    pub image_tag: String,
+    pub codex_auth_path: PathBuf,
+    pub codex_config_path: PathBuf,
+    pub user: Option<(u32, u32)>,
 }
 
 impl PlanRunDeps {
@@ -92,6 +110,7 @@ impl PlanRunDeps {
             cleaner: Arc::new(UnimplementedAssignmentWorktreeCleaner),
             production_codex_binary: None,
             production_gh_binary: None,
+            production_sandbox: None,
         }
     }
 
@@ -123,6 +142,7 @@ impl PlanRunDeps {
             cleaner: Arc::new(GitAssignmentWorktreeCleaner),
             production_codex_binary: Some(codex_binary_path),
             production_gh_binary: Some(gh_binary_path),
+            production_sandbox: None,
         }
     }
 
@@ -155,6 +175,7 @@ impl PlanRunDeps {
             cleaner: Arc::new(FakeAssignmentWorktreeCleaner::new()),
             production_codex_binary: None,
             production_gh_binary: None,
+            production_sandbox: None,
         }
     }
 }
@@ -170,7 +191,31 @@ pub fn resolve_deps_for_project(
     project: &agentic_afk_contracts::ProjectResponse,
 ) -> PlanRunDeps {
     let mut resolved = deps.clone();
-    if let Some(codex_binary) = deps.production_codex_binary.clone() {
+    // Issue #74: prefer Codex Sandbox wiring when configured. The
+    // host-only Codex runners stay as a fallback until issue #76 deletes
+    // them entirely.
+    if let Some(sandbox) = deps.production_sandbox.clone() {
+        let project_path = std::path::PathBuf::from(&project.path);
+        let launcher: Arc<dyn crate::sandbox::SandboxLauncher> =
+            Arc::new(crate::sandbox::DockerSandboxLauncher::new(
+                sandbox.docker_binary.clone(),
+            ));
+        let make = |phase: crate::sandbox::SandboxPhase| {
+            Arc::new(crate::codex_runner::DockerCodexRunner::new(
+                Arc::clone(&launcher),
+                phase,
+                sandbox.image_tag.clone(),
+                project_path.clone(),
+                sandbox.codex_auth_path.clone(),
+                sandbox.codex_config_path.clone(),
+                sandbox.user,
+            ))
+        };
+        resolved.planner = make(crate::sandbox::SandboxPhase::Planning);
+        resolved.implementation = make(crate::sandbox::SandboxPhase::Implementation);
+        resolved.review = make(crate::sandbox::SandboxPhase::Review);
+        resolved.merger = make(crate::sandbox::SandboxPhase::Merge);
+    } else if let Some(codex_binary) = deps.production_codex_binary.clone() {
         let project_path = std::path::PathBuf::from(&project.path);
         resolved.planner = Arc::new(CodexPlanningPhaseRunner::new(
             codex_binary.clone(),
@@ -835,7 +880,12 @@ async fn run_assignment_implement_review(
             .await
             .map_err(CoordinatorError::from_persistence)?,
         );
-        let impl_stdout = match deps.implementation.run(&impl_prompt) {
+        let impl_ctx = crate::plan_run::AssignmentContext {
+            project,
+            plan_run,
+            assignment,
+        };
+        let impl_stdout = match deps.implementation.run(&impl_prompt, &impl_ctx) {
             Ok(stdout) => stdout,
             Err(error) => {
                 return Err(fail_assignment_phase(
@@ -918,7 +968,12 @@ async fn run_assignment_implement_review(
             .await
             .map_err(CoordinatorError::from_persistence)?,
         );
-        let review_stdout = match deps.review.run(&review_prompt) {
+        let review_ctx = crate::plan_run::AssignmentContext {
+            project,
+            plan_run,
+            assignment,
+        };
+        let review_stdout = match deps.review.run(&review_prompt, &review_ctx) {
             Ok(stdout) => stdout,
             Err(error) => {
                 return Err(fail_assignment_phase(
@@ -1241,7 +1296,12 @@ async fn finalize_parallel_plan_run(
         // failures and unparseable outputs collapse to Blocked with the
         // surfaced error; a parsed merge body flows through the pure
         // `decide_merge_outcome` for the Merged-vs-Blocked discriminator.
-        let merge_outcome: AssignmentMergeOutcome = match deps.merger.run(&prompt) {
+        let merge_ctx = crate::plan_run::AssignmentContext {
+            project,
+            plan_run,
+            assignment: &merge_assignment,
+        };
+        let merge_outcome: AssignmentMergeOutcome = match deps.merger.run(&prompt, &merge_ctx) {
             Err(error) => {
                 let reason = error.to_string();
                 let failed_body = agentic_afk_contracts::PhaseOutputBody::Failed {

@@ -374,8 +374,12 @@ async fn rejected_review_with_exhausted_retry_limit_blocks_assignment_and_fails_
 async fn implementation_runner_failure_blocks_assignment_and_skips_review() {
     struct FailingImpl;
     impl ImplementationPhaseRunner for FailingImpl {
-        fn run(&self, _prompt: &str) -> Result<String, PlanRunPhaseError> {
-            Err(PlanRunPhaseError::Planning("codex impl broke".into()))
+        fn run(
+            &self,
+            _prompt: &str,
+            _context: &agentic_afk_orchestrator::plan_run::AssignmentContext<'_>,
+        ) -> Result<String, PlanRunPhaseError> {
+            Err(PlanRunPhaseError::Implementation("codex impl broke".into()))
         }
     }
     let db = persistence::connect_in_memory().await.unwrap();

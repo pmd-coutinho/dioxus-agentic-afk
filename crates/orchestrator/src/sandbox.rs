@@ -268,6 +268,96 @@ impl DockerSandboxLauncher {
     }
 }
 
+/// Test launcher that records every launch into a queryable list and
+/// returns canned stdout. Used by the `DockerCodexRunner` per-phase
+/// launch-shape test (issue #74) and any future test that wants to
+/// assert what the orchestrator hands to Docker without spawning real
+/// containers.
+pub struct FakeSandboxLauncher {
+    stdouts: std::sync::Mutex<Vec<String>>,
+    launches: std::sync::Mutex<Vec<RecordedLaunch>>,
+    failure: std::sync::Mutex<Option<SandboxError>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordedLaunch {
+    pub phase: SandboxPhase,
+    pub container_name: String,
+    pub image_tag: String,
+    pub labels: Vec<(String, String)>,
+    pub mounts: Vec<SandboxMount>,
+    pub workdir: PathBuf,
+    pub env: Vec<(String, String)>,
+    pub command: Vec<String>,
+}
+
+impl FakeSandboxLauncher {
+    pub fn new() -> Self {
+        Self {
+            stdouts: std::sync::Mutex::new(vec!["".to_string()]),
+            launches: std::sync::Mutex::new(Vec::new()),
+            failure: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn with_stdout(stdout: impl Into<String>) -> Self {
+        let launcher = Self::new();
+        *launcher.stdouts.lock().unwrap() = vec![stdout.into()];
+        launcher
+    }
+
+    pub fn with_stdouts<S: Into<String>>(stdouts: impl IntoIterator<Item = S>) -> Self {
+        let launcher = Self::new();
+        let queued: Vec<String> = stdouts.into_iter().map(Into::into).collect();
+        assert!(
+            !queued.is_empty(),
+            "FakeSandboxLauncher needs at least one stdout"
+        );
+        *launcher.stdouts.lock().unwrap() = queued;
+        launcher
+    }
+
+    pub fn fail_with(self, error: SandboxError) -> Self {
+        *self.failure.lock().unwrap() = Some(error);
+        self
+    }
+
+    pub fn launches(&self) -> Vec<RecordedLaunch> {
+        self.launches.lock().unwrap().clone()
+    }
+}
+
+impl Default for FakeSandboxLauncher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SandboxLauncher for FakeSandboxLauncher {
+    fn launch(&self, spec: SandboxLaunchSpec) -> Result<String, SandboxError> {
+        self.launches.lock().unwrap().push(RecordedLaunch {
+            phase: spec.phase,
+            container_name: spec.container_name,
+            image_tag: spec.image_tag,
+            labels: spec.labels,
+            mounts: spec.mounts,
+            workdir: spec.workdir,
+            env: spec.env,
+            command: spec.command,
+        });
+        if let Some(err) = self.failure.lock().unwrap().take() {
+            return Err(err);
+        }
+        let mut queue = self.stdouts.lock().unwrap();
+        let stdout = if queue.len() == 1 {
+            queue[0].clone()
+        } else {
+            queue.remove(0)
+        };
+        Ok(stdout)
+    }
+}
+
 impl SandboxLauncher for DockerSandboxLauncher {
     fn launch(&self, spec: SandboxLaunchSpec) -> Result<String, SandboxError> {
         let args = docker_run_args(&spec);

@@ -19,19 +19,23 @@ pub mod production;
 pub mod push_attempt;
 pub mod re_enable_source_issue;
 pub mod review_loop;
+pub mod codex_runner;
 pub mod sandbox;
 
+pub use codex_runner::DockerCodexRunner;
 pub use sandbox::{
     AlwaysOkSandboxPreflight, BuilderImageEnsurer, CliDockerProbe, DockerProbe,
-    DockerSandboxLauncher, MISE_CACHE_VOLUME, RUNTIME_IMAGE_REPO, RejectingSandboxPreflight,
-    RuntimeImageBuilder, RuntimeImageEnsurer, SandboxError, SandboxFailureTemplate,
-    SandboxLaunchSpec, SandboxLauncher, SandboxMount, SandboxPhase, SandboxPreflight,
-    SandboxPreflightCheck, SandboxPreflightFailure, runtime_image_tag,
+    DockerSandboxLauncher, FakeSandboxLauncher, MISE_CACHE_VOLUME, RUNTIME_IMAGE_REPO,
+    RecordedLaunch, RejectingSandboxPreflight, RuntimeImageBuilder, RuntimeImageEnsurer,
+    SandboxError, SandboxFailureTemplate, SandboxLaunchSpec, SandboxLauncher, SandboxMount,
+    SandboxPhase, SandboxPreflight, SandboxPreflightCheck, SandboxPreflightFailure,
+    runtime_image_tag,
 };
 
 pub use coordinator::{
-    CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs, abandon_staged,
-    retry_push, run_plan_run, update_markdown_lifecycle_status,
+    CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs,
+    SandboxProductionConfig, abandon_staged, retry_push, run_plan_run,
+    update_markdown_lifecycle_status,
 };
 pub use re_enable_source_issue::{ReEnableOutcome, WritebackError, re_enable_source_issue};
 pub use push_attempt::{PushOutcome, classify_push_result};

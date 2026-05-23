@@ -330,9 +330,13 @@ impl CodexImplementationPhaseRunner {
 }
 
 impl ImplementationPhaseRunner for CodexImplementationPhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        _context: &crate::plan_run::AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         run_codex_capture_stdout(&self.codex_binary_path, &self.project_path, prompt)
-            .map_err(PlanRunPhaseError::Planning)
+            .map_err(PlanRunPhaseError::Implementation)
     }
 }
 
@@ -352,9 +356,13 @@ impl CodexReviewPhaseRunner {
 }
 
 impl ReviewPhaseRunner for CodexReviewPhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        _context: &crate::plan_run::AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         run_codex_capture_stdout(&self.codex_binary_path, &self.project_path, prompt)
-            .map_err(PlanRunPhaseError::Planning)
+            .map_err(PlanRunPhaseError::Review)
     }
 }
 
@@ -374,7 +382,11 @@ impl CodexMergePhaseRunner {
 }
 
 impl MergePhaseRunner for CodexMergePhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        _context: &crate::plan_run::AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         run_codex_capture_stdout(&self.codex_binary_path, &self.project_path, prompt)
             .map_err(PlanRunPhaseError::Merge)
     }

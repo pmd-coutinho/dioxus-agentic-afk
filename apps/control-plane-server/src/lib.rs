@@ -187,11 +187,24 @@ fn plan_run_deps_from_env(config: &ControlPlaneConfig) -> PlanRunDeps {
         // Worktrunk-backed provisioner, the four Codex phase runners
         // (resolved per Plan Run against the project path), and the GH /
         // local-markdown lifecycle writer.
-        return PlanRunDeps::production(
+        let mut deps = PlanRunDeps::production(
             config.worktrunk_binary_path.clone(),
             config.codex_binary_path.clone(),
             config.gh_binary_path.clone(),
         );
+        // Issue #74: wire Codex Sandbox runner as production default.
+        // The runtime image is built lazily on first Plan Run by
+        // `RuntimeImageBuilder`; here we record the content-hash tag
+        // alongside the bind-mount paths and host UID/GID.
+        deps.production_sandbox =
+            Some(agentic_afk_orchestrator::SandboxProductionConfig {
+                docker_binary: config.docker_binary_path.clone(),
+                image_tag: agentic_afk_orchestrator::runtime_image_tag(),
+                codex_auth_path: config.codex_auth_path.clone(),
+                codex_config_path: config.codex_auth_path.with_file_name("config.toml"),
+                user: current_uid_gid(),
+            });
+        return deps;
     };
     let stdout = match mode.as_str() {
         "1" => r#"<plan>{"issues":[],"summary":"test stub: no eligible work"}</plan>"#.to_string(),
@@ -232,6 +245,23 @@ pub fn router_with_bus(config: ControlPlaneConfig, db: Db, event_bus: event_bus:
     let deps = plan_run_deps_from_env(&config);
     let preflight = production_sandbox_preflight(&config);
     router_with_full_deps_and_preflight(config, db, event_bus, deps, preflight)
+}
+
+/// Best-effort current uid/gid lookup for the `--user` Codex Sandbox
+/// argument. Returns `None` on unsupported platforms.
+fn current_uid_gid() -> Option<(u32, u32)> {
+    use std::process::Command;
+    let uid = String::from_utf8(Command::new("id").arg("-u").output().ok()?.stdout)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let gid = String::from_utf8(Command::new("id").arg("-g").output().ok()?.stdout)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some((uid, gid))
 }
 
 /// Production Codex Sandbox preflight wiring (issue #73). Backed by the
@@ -388,6 +418,7 @@ pub fn router_with_plan_run_merge_deps_and_bus(
             cleaner,
             production_codex_binary: None,
             production_gh_binary: None,
+            production_sandbox: None,
         },
     )
 }
@@ -425,6 +456,7 @@ pub fn router_with_plan_run_merge_deps(
             cleaner,
             production_codex_binary: None,
             production_gh_binary: None,
+            production_sandbox: None,
         },
     )
 }

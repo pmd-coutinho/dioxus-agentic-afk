@@ -26,6 +26,10 @@ pub enum PlanRunPhaseError {
     WorktreeProvision(String),
     #[error("issue source lifecycle write-back failed: {0}")]
     LifecycleWrite(String),
+    #[error("implementation phase execution failed: {0}")]
+    Implementation(String),
+    #[error("review phase execution failed: {0}")]
+    Review(String),
     #[error("merge phase execution failed: {0}")]
     Merge(String),
     #[error("integration branch push failed: {0}")]
@@ -34,6 +38,17 @@ pub enum PlanRunPhaseError {
     NonFastForward { stderr: String },
     #[error("assignment worktree cleanup failed: {0}")]
     Cleanup(String),
+}
+
+/// Per-assignment context passed to Implementation, Review, and Merge
+/// phase runners. Production `DockerCodexRunner` reads
+/// `assignment.worktree_path` to bind-mount the worktree read-write into
+/// the Codex Sandbox, and uses the IDs to populate the
+/// `agentic-afk.*` Docker labels.
+pub struct AssignmentContext<'a> {
+    pub project: &'a agentic_afk_contracts::ProjectResponse,
+    pub plan_run: &'a agentic_afk_contracts::PlanRunResponse,
+    pub assignment: &'a agentic_afk_contracts::IssueAssignmentResponse,
 }
 
 /// Refresh the configured Integration Branch and report the baseline commit.
@@ -118,12 +133,20 @@ impl IntegrationBranchRefresher for UnimplementedIntegrationBranchRefresher {
 /// Execute an Implementation Phase prompt and return raw agent stdout for
 /// the Plan Run coordinator to parse.
 pub trait ImplementationPhaseRunner: Send + Sync {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError>;
+    fn run(
+        &self,
+        prompt: &str,
+        context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError>;
 }
 
 /// Execute a Review Phase prompt and return raw agent stdout.
 pub trait ReviewPhaseRunner: Send + Sync {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError>;
+    fn run(
+        &self,
+        prompt: &str,
+        context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError>;
 }
 
 /// Test runner that returns canned stdout. A single stdout repeats on each
@@ -166,7 +189,11 @@ impl FakeImplementationPhaseRunner {
 }
 
 impl ImplementationPhaseRunner for FakeImplementationPhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        _context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         let mut queue = self.stdouts.lock().unwrap();
         let stdout = if queue.len() == 1 {
@@ -214,7 +241,11 @@ impl FakeReviewPhaseRunner {
 }
 
 impl ReviewPhaseRunner for FakeReviewPhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        _context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         let mut queue = self.stdouts.lock().unwrap();
         let stdout = if queue.len() == 1 {
@@ -229,9 +260,13 @@ impl ReviewPhaseRunner for FakeReviewPhaseRunner {
 pub struct UnimplementedImplementationPhaseRunner;
 
 impl ImplementationPhaseRunner for UnimplementedImplementationPhaseRunner {
-    fn run(&self, _prompt: &str) -> Result<String, PlanRunPhaseError> {
-        Err(PlanRunPhaseError::Planning(
-            "real Codex implementation runner not implemented yet".to_string(),
+    fn run(
+        &self,
+        _prompt: &str,
+        _context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
+        Err(PlanRunPhaseError::Implementation(
+            "implementation runner not wired".to_string(),
         ))
     }
 }
@@ -239,9 +274,13 @@ impl ImplementationPhaseRunner for UnimplementedImplementationPhaseRunner {
 pub struct UnimplementedReviewPhaseRunner;
 
 impl ReviewPhaseRunner for UnimplementedReviewPhaseRunner {
-    fn run(&self, _prompt: &str) -> Result<String, PlanRunPhaseError> {
-        Err(PlanRunPhaseError::Planning(
-            "real Codex review runner not implemented yet".to_string(),
+    fn run(
+        &self,
+        _prompt: &str,
+        _context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
+        Err(PlanRunPhaseError::Review(
+            "review runner not wired".to_string(),
         ))
     }
 }
@@ -578,7 +617,11 @@ impl IssueLifecycleWriter for UnimplementedLifecycleWriter {
 /// Run coordinator to parse. The merger integrates one reviewed Issue
 /// Assignment's branch into the configured Integration Branch.
 pub trait MergePhaseRunner: Send + Sync {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError>;
+    fn run(
+        &self,
+        prompt: &str,
+        context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError>;
 }
 
 /// Push the verified Integration Branch upstream. Production drives
@@ -643,7 +686,11 @@ impl FakeMergePhaseRunner {
 }
 
 impl MergePhaseRunner for FakeMergePhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        _context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         let mut queue = self.stdouts.lock().unwrap();
         let stdout = if queue.len() == 1 {
@@ -658,9 +705,13 @@ impl MergePhaseRunner for FakeMergePhaseRunner {
 pub struct UnimplementedMergePhaseRunner;
 
 impl MergePhaseRunner for UnimplementedMergePhaseRunner {
-    fn run(&self, _prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        _prompt: &str,
+        _context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         Err(PlanRunPhaseError::Merge(
-            "real Codex merge runner not implemented yet".to_string(),
+            "merge runner not wired".to_string(),
         ))
     }
 }
@@ -1009,7 +1060,11 @@ impl Default for PerSourceImplementationPhaseRunner {
 }
 
 impl ImplementationPhaseRunner for PerSourceImplementationPhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        _context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         pick_stdout_for_source(&self.map, self.fallback.as_deref(), prompt, &self.counters)
     }
@@ -1078,7 +1133,11 @@ impl Default for PerSourceReviewPhaseRunner {
 }
 
 impl ReviewPhaseRunner for PerSourceReviewPhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        _context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         pick_stdout_for_source(&self.map, self.fallback.as_deref(), prompt, &self.counters)
     }
@@ -1135,7 +1194,11 @@ impl Default for PerSourceMergePhaseRunner {
 }
 
 impl MergePhaseRunner for PerSourceMergePhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        _context: &AssignmentContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         pick_stdout_for_source(&self.map, self.fallback.as_deref(), prompt, &self.counters)
     }
