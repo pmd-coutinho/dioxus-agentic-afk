@@ -40,10 +40,8 @@ use crate::plan_run::{
     UnimplementedWorktreeProvisioner,
 };
 use crate::production::{
-    CodexImplementationPhaseRunner, CodexMergePhaseRunner, CodexPlanningPhaseRunner,
-    CodexReviewPhaseRunner, GhLifecycleWriter, GitAssignmentWorktreeCleaner,
-    GitIntegrationBranchPusher, GitIntegrationBranchRefresher,
-    WorktrunkAssignmentWorktreeProvisioner,
+    GhLifecycleWriter, GitAssignmentWorktreeCleaner, GitIntegrationBranchPusher,
+    GitIntegrationBranchRefresher, WorktrunkAssignmentWorktreeProvisioner,
 };
 
 /// Plan Run phase dependencies wired into the router. Tests inject fakes;
@@ -191,9 +189,6 @@ pub fn resolve_deps_for_project(
     project: &agentic_afk_contracts::ProjectResponse,
 ) -> PlanRunDeps {
     let mut resolved = deps.clone();
-    // Issue #74: prefer Codex Sandbox wiring when configured. The
-    // host-only Codex runners stay as a fallback until issue #76 deletes
-    // them entirely.
     if let Some(sandbox) = deps.production_sandbox.clone() {
         let project_path = std::path::PathBuf::from(&project.path);
         let launcher: Arc<dyn crate::sandbox::SandboxLauncher> =
@@ -215,21 +210,6 @@ pub fn resolve_deps_for_project(
         resolved.implementation = make(crate::sandbox::SandboxPhase::Implementation);
         resolved.review = make(crate::sandbox::SandboxPhase::Review);
         resolved.merger = make(crate::sandbox::SandboxPhase::Merge);
-    } else if let Some(codex_binary) = deps.production_codex_binary.clone() {
-        let project_path = std::path::PathBuf::from(&project.path);
-        resolved.planner = Arc::new(CodexPlanningPhaseRunner::new(
-            codex_binary.clone(),
-            project_path.clone(),
-        ));
-        resolved.implementation = Arc::new(CodexImplementationPhaseRunner::new(
-            codex_binary.clone(),
-            project_path.clone(),
-        ));
-        resolved.review = Arc::new(CodexReviewPhaseRunner::new(
-            codex_binary.clone(),
-            project_path.clone(),
-        ));
-        resolved.merger = Arc::new(CodexMergePhaseRunner::new(codex_binary, project_path));
     }
     if let (Some(gh_binary), Some(source)) = (
         deps.production_gh_binary.clone(),

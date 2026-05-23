@@ -11,9 +11,8 @@ use std::process::Command;
 use agentic_afk_contracts::{IssueSource, ProjectResponse};
 
 use crate::plan_run::{
-    AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, ImplementationPhaseRunner,
-    IntegrationBranchPusher, IntegrationBranchRefresher, IssueLifecycleWriter, MergePhaseRunner,
-    PlanRunPhaseError, PlanningPhaseRunner, RefreshedBaseline, ReviewPhaseRunner,
+    AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, IntegrationBranchPusher,
+    IntegrationBranchRefresher, IssueLifecycleWriter, PlanRunPhaseError, RefreshedBaseline,
 };
 use crate::create_assignment_worktree;
 
@@ -256,141 +255,11 @@ impl IssueLifecycleWriter for GhLifecycleWriter {
     }
 }
 
-// --- Codex-driven phase runners ---
-//
-// Each phase runner spawns `codex exec` with the rendered prompt and
-// captures the structured terminal outcome. The Plan Run coordinator
-// parses the agent stdout itself; these adapters only return the raw
-// output string so the parsing contract stays in one place.
-
-/// Codex `--output-last-message` does not stream stdout to the parent
-/// process, so spawning the agent through `run_codex_exec` would lose the
-/// `<plan>` / `<impl>` / `<review>` / `<merge>` tagged body the
-/// coordinator parses. Until the agent gains a structured plan-run
-/// terminal output, the production runners exec `codex exec` directly and
-/// capture stdout themselves.
-fn run_codex_capture_stdout(
-    codex_binary_path: &Path,
-    project_path: &Path,
-    prompt: &str,
-) -> Result<String, String> {
-    let output = Command::new(codex_binary_path)
-        .current_dir(project_path)
-        .args(["exec", "--dangerously-bypass-approvals-and-sandbox"])
-        .arg(prompt)
-        .output()
-        .map_err(|e| format!("failed to spawn codex: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "codex exec failed: {}",
-            command_output(&output)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Production planner: runs `codex exec` from the project path and
-/// returns raw stdout.
-pub struct CodexPlanningPhaseRunner {
-    codex_binary_path: PathBuf,
-    project_path: PathBuf,
-}
-
-impl CodexPlanningPhaseRunner {
-    pub fn new(codex_binary_path: impl Into<PathBuf>, project_path: impl Into<PathBuf>) -> Self {
-        Self {
-            codex_binary_path: codex_binary_path.into(),
-            project_path: project_path.into(),
-        }
-    }
-}
-
-impl PlanningPhaseRunner for CodexPlanningPhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
-        run_codex_capture_stdout(&self.codex_binary_path, &self.project_path, prompt)
-            .map_err(PlanRunPhaseError::Planning)
-    }
-}
-
-/// Production implementation runner: runs `codex exec` from the project
-/// path (the worktree path is encoded in the prompt; the agent executes
-/// against the worktree per its instructions).
-pub struct CodexImplementationPhaseRunner {
-    codex_binary_path: PathBuf,
-    project_path: PathBuf,
-}
-
-impl CodexImplementationPhaseRunner {
-    pub fn new(codex_binary_path: impl Into<PathBuf>, project_path: impl Into<PathBuf>) -> Self {
-        Self {
-            codex_binary_path: codex_binary_path.into(),
-            project_path: project_path.into(),
-        }
-    }
-}
-
-impl ImplementationPhaseRunner for CodexImplementationPhaseRunner {
-    fn run(
-        &self,
-        prompt: &str,
-        _context: &crate::plan_run::AssignmentContext<'_>,
-    ) -> Result<String, PlanRunPhaseError> {
-        run_codex_capture_stdout(&self.codex_binary_path, &self.project_path, prompt)
-            .map_err(PlanRunPhaseError::Implementation)
-    }
-}
-
-/// Production review runner.
-pub struct CodexReviewPhaseRunner {
-    codex_binary_path: PathBuf,
-    project_path: PathBuf,
-}
-
-impl CodexReviewPhaseRunner {
-    pub fn new(codex_binary_path: impl Into<PathBuf>, project_path: impl Into<PathBuf>) -> Self {
-        Self {
-            codex_binary_path: codex_binary_path.into(),
-            project_path: project_path.into(),
-        }
-    }
-}
-
-impl ReviewPhaseRunner for CodexReviewPhaseRunner {
-    fn run(
-        &self,
-        prompt: &str,
-        _context: &crate::plan_run::AssignmentContext<'_>,
-    ) -> Result<String, PlanRunPhaseError> {
-        run_codex_capture_stdout(&self.codex_binary_path, &self.project_path, prompt)
-            .map_err(PlanRunPhaseError::Review)
-    }
-}
-
-/// Production merge runner.
-pub struct CodexMergePhaseRunner {
-    codex_binary_path: PathBuf,
-    project_path: PathBuf,
-}
-
-impl CodexMergePhaseRunner {
-    pub fn new(codex_binary_path: impl Into<PathBuf>, project_path: impl Into<PathBuf>) -> Self {
-        Self {
-            codex_binary_path: codex_binary_path.into(),
-            project_path: project_path.into(),
-        }
-    }
-}
-
-impl MergePhaseRunner for CodexMergePhaseRunner {
-    fn run(
-        &self,
-        prompt: &str,
-        _context: &crate::plan_run::AssignmentContext<'_>,
-    ) -> Result<String, PlanRunPhaseError> {
-        run_codex_capture_stdout(&self.codex_binary_path, &self.project_path, prompt)
-            .map_err(PlanRunPhaseError::Merge)
-    }
-}
+// Codex phase runners now live in [`crate::codex_runner`] as
+// `DockerCodexRunner`. The host-only `Codex*PhaseRunner` adapters and
+// `run_codex_capture_stdout` that used to live here were removed by
+// issue #76; every Codex phase now runs inside a Codex Sandbox
+// container.
 
 #[cfg(test)]
 mod tests {
