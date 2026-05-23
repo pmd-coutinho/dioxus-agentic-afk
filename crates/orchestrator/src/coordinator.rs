@@ -1665,18 +1665,16 @@ async fn record_push_phase_output(
     outcome: &PushOutcome,
     attempt: u32,
 ) {
-    let (stderr, kind_field) = match outcome {
-        PushOutcome::Success => (String::new(), "success"),
-        PushOutcome::NonFastForward { detail } => (detail.clone(), "non_fast_forward"),
-        PushOutcome::Other { detail } => (detail.clone(), "other"),
+    let stderr = match outcome {
+        PushOutcome::Success => String::new(),
+        PushOutcome::NonFastForward { detail } | PushOutcome::Other { detail } => detail.clone(),
     };
-    let body = serde_json::json!({
-        "kind": kind_field,
-        "stderr": stderr,
-        "fast_forward": outcome.fast_forward(),
-        "attempt": attempt,
-    });
-    let _ = persistence::record_plan_run_phase_output(
+    let body = agentic_afk_contracts::PhaseOutputBody::Push {
+        stderr,
+        fast_forward: outcome.fast_forward(),
+        attempt,
+    };
+    let _ = persistence::record_plan_run_phase_output_typed(
         db,
         plan_run_id,
         "push",

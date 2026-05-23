@@ -1763,6 +1763,85 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn write_seam_accepts_push_with_succeeded_and_failed() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        // Push body paired with `succeeded` is the happy-path Plan-Run-scoped
+        // push row (ADR-0038 push slice). `assignment_id` stays `None`.
+        let succ = PhaseOutputBody::Push {
+            stderr: String::new(),
+            fast_forward: true,
+            attempt: 1,
+        };
+        let stored = record_plan_run_phase_output_typed(&db, &plan_run.id, "push", "succeeded", &succ)
+            .await
+            .unwrap();
+        assert_eq!(stored.phase, "push");
+        assert_eq!(stored.outcome, "succeeded");
+        assert!(stored.assignment_id.is_none(),
+            "push Phase Output must be Plan-Run-scoped (assignment_id = None)");
+
+        // Push body paired with `failed` carries the upstream stderr.
+        let failed = PhaseOutputBody::Push {
+            stderr: "remote rejected: non-fast-forward".to_string(),
+            fast_forward: false,
+            attempt: 2,
+        };
+        let stored = record_plan_run_phase_output_typed(&db, &plan_run.id, "push", "failed", &failed)
+            .await
+            .unwrap();
+        assert_eq!(stored.outcome, "failed");
+        assert!(stored.assignment_id.is_none());
+        assert_eq!(
+            stored.body_json["stderr"].as_str(),
+            Some("remote rejected: non-fast-forward")
+        );
+        assert_eq!(stored.body_json["fast_forward"].as_bool(), Some(false));
+        assert_eq!(stored.body_json["attempt"].as_u64(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn write_seam_rejects_push_with_non_push_outcome() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Push {
+            stderr: String::new(),
+            fast_forward: true,
+            attempt: 1,
+        };
+        // `merged` belongs to the Merge pairing — a Push body paired with
+        // a non-push outcome must be rejected so the audit log stays sound.
+        let result =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "push", "merged", &body).await;
+        assert!(
+            matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
+            "expected PhaseOutputMismatch, got {result:?}"
+        );
+    }
+
     fn make_issue(source_id: &str, readiness: &str, lifecycle_status: &str) -> SourceIssueSnapshot {
         SourceIssueSnapshot {
             source_id: source_id.to_string(),

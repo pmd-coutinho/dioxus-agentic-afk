@@ -1364,9 +1364,23 @@ async fn retry_push_non_fast_forward_blocks_assignment_with_push_non_fast_forwar
         .collect();
     assert_eq!(push_outputs.len(), 2);
     assert!(push_outputs.iter().all(|p| p.outcome == "failed"));
-    assert_eq!(
-        push_outputs[1].body_json["kind"].as_str(),
-        Some("non_fast_forward")
+    // The retry attempt is a non-fast-forward: typed Push body carries
+    // `fast_forward=false`, the upstream stderr, and the 1-indexed attempt.
+    assert_eq!(push_outputs[1].body_json["fast_forward"].as_bool(), Some(false));
+    assert_eq!(push_outputs[1].body_json["attempt"].as_u64(), Some(2));
+    assert!(
+        push_outputs[1].body_json["stderr"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("non-fast-forward")
+            || push_outputs[1].body_json["stderr"]
+                .as_str()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains("fetch first"),
+        "stderr should carry the non-fast-forward upstream message: {:?}",
+        push_outputs[1].body_json["stderr"]
     );
 
     // No Lifecycle `Completed` write-back because the push never landed.
@@ -1446,7 +1460,18 @@ async fn retry_push_transient_other_failure_leaves_assignment_merge_staged() {
         .collect();
     assert_eq!(push_outputs.len(), 2);
     assert!(push_outputs.iter().all(|p| p.outcome == "failed"));
-    assert_eq!(push_outputs[1].body_json["kind"].as_str(), Some("other"));
+    // Transient `Other` failure: typed Push body carries
+    // `fast_forward=false`, the upstream stderr, and the 1-indexed attempt.
+    assert_eq!(push_outputs[1].body_json["fast_forward"].as_bool(), Some(false));
+    assert_eq!(push_outputs[1].body_json["attempt"].as_u64(), Some(2));
+    assert!(
+        !push_outputs[1].body_json["stderr"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty(),
+        "stderr should carry the upstream error text: {:?}",
+        push_outputs[1].body_json["stderr"]
+    );
 
     // Operator may still retry — confirm the route still accepts another
     // call (and would 422 if the assignment weren't merge_staged).

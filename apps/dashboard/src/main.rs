@@ -598,12 +598,32 @@ fn PlanRunCard(
                         Some(active) => {
                             let id_short = active.id.chars().take(8).collect::<String>();
                             let assignments = active.assignments.clone();
+                            // Plan-Run-scoped Phase Output rows (assignment_id =
+                            // None) — currently the typed `Push` rows recorded
+                            // by the Merge Phase push boundary and operator
+                            // Retry Push (ADR-0038 / #61). Append-only,
+                            // ordered by `recorded_at`.
+                            let mut header_phase_outputs: Vec<agentic_afk_contracts::PhaseOutputResponse> = active
+                                .phase_outputs
+                                .iter()
+                                .filter(|p| p.assignment_id.is_none())
+                                .cloned()
+                                .collect();
+                            header_phase_outputs.sort_by(|a, b| a.recorded_at.cmp(&b.recorded_at));
                             rsx! {
                                 div { class: "flex flex-col gap-2", "data-testid": "plan-run-active",
                                     StatusPill { tone: PillTone::Running, label: "Running".to_string() }
                                     p { class: "font-mono text-[12px] text-ink", "{id_short}" }
                                     p { class: "text-[12px] text-ink-2",
                                         "{active.integration_branch} @ {active.baseline_commit}"
+                                    }
+                                    if !header_phase_outputs.is_empty() {
+                                        div { class: "mt-1 flex flex-col gap-1",
+                                            "data-testid": "plan-run-card-header-phase-outputs",
+                                            for phase_output in header_phase_outputs.iter() {
+                                                PhaseOutputRow { phase_output: phase_output.clone() }
+                                            }
+                                        }
                                     }
                                     if !assignments.is_empty() {
                                         div { class: "mt-1 flex flex-col gap-1",
@@ -932,9 +952,14 @@ fn PhaseOutputRow(phase_output: agentic_afk_contracts::PhaseOutputResponse) -> E
     let mut expanded = use_signal(|| false);
     let pill_label = format!("{} {}", phase_output.phase, phase_output.outcome);
 
+    let row_testid = if phase_output.assignment_id.is_some() {
+        "assignment-phase-output-row"
+    } else {
+        "plan-run-phase-output-row"
+    };
     rsx! {
         div { class: "flex flex-col gap-1",
-            "data-testid": "assignment-phase-output-row",
+            "data-testid": row_testid,
             "data-expanded": if expanded() { "true" } else { "false" },
             button {
                 r#type: "button",
@@ -1103,8 +1128,22 @@ fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element 
                 }
             }
         },
-        PhaseOutputBody::Planning(body)
-        | PhaseOutputBody::Push(body) => {
+        PhaseOutputBody::Push { stderr, fast_forward, attempt } => rsx! {
+            div { class: "flex flex-col gap-2",
+                "data-testid": "phase-output-push",
+                p { class: "font-mono text-[11px] text-ink-2",
+                    "data-testid": "phase-output-push-attempt",
+                    "attempt {attempt} \u{2022} fast_forward={fast_forward}"
+                }
+                if !stderr.is_empty() {
+                    pre { class: "whitespace-pre-wrap font-mono text-[11px] text-coral rounded border border-line/40 bg-surface-2/60 p-2",
+                        "data-testid": "phase-output-push-stderr",
+                        "{stderr}"
+                    }
+                }
+            }
+        },
+        PhaseOutputBody::Planning(body) => {
             let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
             rsx! {
                 pre { class: "whitespace-pre-wrap font-mono text-[11px] text-ink-2", "{pretty}" }

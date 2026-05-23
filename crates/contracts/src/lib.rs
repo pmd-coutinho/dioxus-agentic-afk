@@ -428,8 +428,22 @@ pub enum PhaseOutputBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_reason: Option<String>,
     },
-    /// Integration Branch push body (stub).
-    Push(serde_json::Value),
+    /// Integration Branch push body — the structured product of one
+    /// `git push` attempt against the Integration Branch. `stderr` carries
+    /// the upstream error text on failure (empty on success);
+    /// `fast_forward` is `true` only when the upstream accepted the push
+    /// as a fast-forward update; `attempt` is the 1-indexed attempt number
+    /// for this Plan Run (one row per attempt — append-only, never
+    /// mutating prior rows). Validated against `outcome = "succeeded"` or
+    /// `outcome = "failed"` at the persistence write seam (ADR-0038).
+    Push {
+        #[serde(default)]
+        stderr: String,
+        #[serde(default)]
+        fast_forward: bool,
+        #[serde(default)]
+        attempt: u32,
+    },
     /// Failure body — carries the surfaced error and the RFC-7807
     /// problem-type URN of the originating CoordinatorError when known.
     /// Used by every phase failure path so Dashboard rendering and the
@@ -492,7 +506,7 @@ impl PhaseOutputBody {
             Self::Implementation { .. } => "implementation",
             Self::Review { .. } => "review",
             Self::Merge { .. } => "merge",
-            Self::Push(_) => "push",
+            Self::Push { .. } => "push",
             Self::Failed { .. } => "failed",
         }
     }
@@ -948,6 +962,37 @@ mod tests {
             json.contains("\"block_reason\":\"unresolvable merge conflict\""),
             "{json}"
         );
+        let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, body);
+    }
+
+    #[test]
+    fn phase_output_body_push_success_round_trips() {
+        let body = PhaseOutputBody::Push {
+            stderr: String::new(),
+            fast_forward: true,
+            attempt: 1,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"phase\":\"push\""), "{json}");
+        assert!(json.contains("\"fast_forward\":true"), "{json}");
+        assert!(json.contains("\"attempt\":1"), "{json}");
+        let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, body);
+    }
+
+    #[test]
+    fn phase_output_body_push_failure_carries_stderr() {
+        let body = PhaseOutputBody::Push {
+            stderr: "remote rejected: non-fast-forward".to_string(),
+            fast_forward: false,
+            attempt: 2,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"phase\":\"push\""), "{json}");
+        assert!(json.contains("\"stderr\":\"remote rejected: non-fast-forward\""), "{json}");
+        assert!(json.contains("\"fast_forward\":false"), "{json}");
+        assert!(json.contains("\"attempt\":2"), "{json}");
         let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
         assert_eq!(back, body);
     }

@@ -157,9 +157,12 @@ fn wrap_legacy_body(
     body_json: &serde_json::Value,
 ) -> PhaseOutputBody {
     // Push records structured bodies for both success and failure
-    // outcomes (ADR-0038 push slice) — keep the body shape intact.
+    // outcomes (ADR-0038 push slice). Inject the `phase` discriminator
+    // so serde can route the legacy free-form body into the typed
+    // [`PhaseOutputBody::Push`] variant; fall back to a zero-value Push
+    // shape when the body cannot be coerced so the row still lands.
     if phase == "push" {
-        return PhaseOutputBody::Push(body_json.clone());
+        return inject_phase_and_deserialize_push(body_json);
     }
     if outcome == "failed" {
         let error = body_json
@@ -218,6 +221,25 @@ fn parse_merge_body(body_json: &serde_json::Value) -> PhaseOutputBody {
 /// route it into the matching typed [`PhaseOutputBody`] variant. Falls
 /// back to a Failed row when the body cannot be coerced so legacy
 /// in-the-wild rows still land somewhere the Dashboard can render.
+/// Coerce a free-form push body into the typed [`PhaseOutputBody::Push`]
+/// variant. Falls back to a zero-valued Push (empty stderr,
+/// `fast_forward=false`, attempt=0) when the body cannot be coerced so
+/// the row still lands.
+fn inject_phase_and_deserialize_push(body_json: &serde_json::Value) -> PhaseOutputBody {
+    let mut value = body_json.clone();
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "phase".to_string(),
+            serde_json::Value::String("push".to_string()),
+        );
+    }
+    serde_json::from_value::<PhaseOutputBody>(value).unwrap_or(PhaseOutputBody::Push {
+        stderr: String::new(),
+        fast_forward: false,
+        attempt: 0,
+    })
+}
+
 fn inject_phase_and_deserialize(body_json: &serde_json::Value, phase_tag: &str) -> PhaseOutputBody {
     let mut value = body_json.clone();
     if let Some(obj) = value.as_object_mut() {
@@ -296,7 +318,18 @@ fn validate_outcome_body(outcome: &str, body: &PhaseOutputBody) -> Result<(), Pe
             outcome: outcome.to_string(),
         });
     }
-    if is_failed_outcome && !is_failed_body && !matches!(body, PhaseOutputBody::Push(_)) {
+    if is_failed_outcome && !is_failed_body && !matches!(body, PhaseOutputBody::Push { .. }) {
+        return Err(PersistenceError::PhaseOutputMismatch {
+            body_phase: body.phase_tag(),
+            outcome: outcome.to_string(),
+        });
+    }
+    // Push body pairs with `succeeded` (fast-forward accepted) or
+    // `failed` (non-fast-forward / network / auth). Other outcomes would
+    // corrupt the audit log (ADR-0038 push slice).
+    if matches!(body, PhaseOutputBody::Push { .. })
+        && !matches!(outcome, "succeeded" | "failed")
+    {
         return Err(PersistenceError::PhaseOutputMismatch {
             body_phase: body.phase_tag(),
             outcome: outcome.to_string(),
