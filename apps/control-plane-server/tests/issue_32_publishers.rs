@@ -45,6 +45,8 @@ async fn make_router() -> (axum::Router, persistence::Db, EventBus) {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router_with_bus(config, db.clone(), bus.clone());
     (app, db, bus)
@@ -388,6 +390,8 @@ async fn make_router_with_fakes(
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: worktrunk,
         codex_binary_path: codex,
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router_with_bus(config, db.clone(), bus.clone());
     (app, db, bus)

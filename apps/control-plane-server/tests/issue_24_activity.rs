@@ -60,6 +60,8 @@ async fn test_router(
         gh_binary_path: "gh".into(),
         worktrunk_binary_path,
         codex_binary_path,
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     (router(config, db.clone()), db)
 }

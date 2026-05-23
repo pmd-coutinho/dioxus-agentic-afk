@@ -29,6 +29,8 @@ async fn test_router() -> axum::Router {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     router(config, db)
 }
@@ -43,6 +45,8 @@ async fn test_router_with_db() -> (axum::Router, persistence::Db) {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     (router(config, db.clone()), db)
 }
@@ -68,6 +72,8 @@ async fn test_router_with_execution_and_gh(
         gh_binary_path,
         worktrunk_binary_path,
         codex_binary_path,
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     (router(config, db.clone()), db)
 }
@@ -203,6 +209,8 @@ async fn dashboard_shell_loads_from_the_local_control_plane() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
 
     let response = router(config, db)
@@ -233,6 +241,8 @@ async fn dashboard_browser_routes_fallback_without_claiming_api_paths() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router(config, db);
 
@@ -1053,6 +1063,8 @@ async fn lifecycle_status_write_back_updates_markdown_file() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router(config, db.clone());
 
@@ -1138,6 +1150,8 @@ async fn planning_snapshot_reflects_lifecycle_status_exclusions() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router(config, db.clone());
 
@@ -1221,6 +1235,8 @@ async fn lifecycle_status_write_back_preserves_raw_text() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router(config, db.clone());
 
@@ -1301,6 +1317,8 @@ async fn lifecycle_status_write_back_rejects_nonexistent_issue() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router(config, db.clone());
 
@@ -1360,6 +1378,8 @@ async fn lifecycle_status_write_back_rejects_invalid_status() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router(config, db.clone());
 
@@ -1418,6 +1438,8 @@ async fn lifecycle_status_write_back_rejects_github_source() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router(config, db.clone());
 

@@ -47,6 +47,8 @@ fn test_config() -> ControlPlaneConfig {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     }
 }
 

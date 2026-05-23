@@ -285,6 +285,440 @@ impl SandboxLauncher for DockerSandboxLauncher {
     }
 }
 
+// --- Plan Run trigger-time preflight (issue #73) ---
+
+use std::path::Path;
+use std::sync::Arc;
+
+use crate::coordinator::CoordinatorError;
+
+/// Probe the Docker daemon for reachability. Trait-fronted so tests can
+/// simulate an unavailable daemon without poking the host.
+pub trait DockerProbe: Send + Sync {
+    fn ping(&self) -> Result<(), String>;
+}
+
+/// Ensure the runtime image is present locally, building it if it is
+/// not. Returns the resolved image tag on success; on failure returns
+/// the `docker build` stderr that the preflight surfaces in the
+/// RFC-7807 `detail` field.
+pub trait RuntimeImageEnsurer: Send + Sync {
+    fn ensure(&self) -> Result<String, String>;
+}
+
+/// Production `DockerProbe` that shells out to `docker version`. A
+/// non-zero exit (or spawn failure) is treated as "daemon unavailable".
+pub struct CliDockerProbe {
+    docker_binary: PathBuf,
+}
+
+impl CliDockerProbe {
+    pub fn new(docker_binary: impl Into<PathBuf>) -> Self {
+        Self {
+            docker_binary: docker_binary.into(),
+        }
+    }
+}
+
+impl DockerProbe for CliDockerProbe {
+    fn ping(&self) -> Result<(), String> {
+        let output = Command::new(&self.docker_binary)
+            .args(["version", "--format", "{{.Server.Version}}"])
+            .output()
+            .map_err(|e| format!("docker not invocable: {e}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            Err(format!(
+                "docker version exited with {}: {}",
+                output.status,
+                truncate_stderr(&stderr)
+            ))
+        }
+    }
+}
+
+/// `RuntimeImageEnsurer` backed by the on-host `RuntimeImageBuilder`.
+pub struct BuilderImageEnsurer {
+    builder: RuntimeImageBuilder,
+}
+
+impl BuilderImageEnsurer {
+    pub fn new(builder: RuntimeImageBuilder) -> Self {
+        Self { builder }
+    }
+}
+
+impl RuntimeImageEnsurer for BuilderImageEnsurer {
+    fn ensure(&self) -> Result<String, String> {
+        self.builder.ensure().map_err(|e| match e {
+            SandboxError::Build(stderr) => truncate_stderr(&stderr),
+            other => other.to_string(),
+        })
+    }
+}
+
+/// Cap stderr blobs surfaced in problem-JSON `detail` so a runaway
+/// `docker build` log cannot blow up the response size.
+fn truncate_stderr(stderr: &str) -> String {
+    const LIMIT: usize = 4 * 1024;
+    if stderr.len() <= LIMIT {
+        return stderr.to_string();
+    }
+    let head = &stderr[..LIMIT];
+    format!("{head}\n…(truncated {} bytes)", stderr.len() - LIMIT)
+}
+
+/// Why a Plan Run trigger failed Sandbox preflight. Each variant maps
+/// to a stable RFC-7807 problem-type URN at the HTTP boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum SandboxPreflightFailure {
+    #[error("Docker daemon unavailable: {0}")]
+    DockerUnavailable(String),
+    #[error("Codex auth file not found at {0}")]
+    CodexAuthMissing(PathBuf),
+    #[error("Project worktree has no mise.toml at {0}")]
+    MiseTomlMissing(PathBuf),
+    #[error("runtime image build failed: {0}")]
+    RuntimeImageBuildFailed(String),
+}
+
+impl From<SandboxPreflightFailure> for CoordinatorError {
+    fn from(failure: SandboxPreflightFailure) -> Self {
+        let (urn, detail) = match &failure {
+            SandboxPreflightFailure::DockerUnavailable(detail) => (
+                "urn:agentic-afk:sandbox-docker-unavailable",
+                format!("Docker daemon unavailable: {detail}"),
+            ),
+            SandboxPreflightFailure::CodexAuthMissing(path) => (
+                "urn:agentic-afk:sandbox-codex-auth-missing",
+                format!(
+                    "Codex auth file not found at {}. Run `codex login` once to create it.",
+                    path.display()
+                ),
+            ),
+            SandboxPreflightFailure::MiseTomlMissing(path) => (
+                "urn:agentic-afk:sandbox-mise-toml-missing",
+                format!(
+                    "Project worktree at {} has no mise.toml. Codex Sandbox toolchain comes from mise.toml.",
+                    path.display()
+                ),
+            ),
+            SandboxPreflightFailure::RuntimeImageBuildFailed(stderr) => (
+                "urn:agentic-afk:sandbox-runtime-image-build-failed",
+                stderr.clone(),
+            ),
+        };
+        CoordinatorError::new(422, urn, detail)
+    }
+}
+
+/// Trait surface for dependency-injecting the preflight at the HTTP
+/// handler boundary. Production wires `SandboxPreflight`; integration
+/// tests inject a fake that returns each failure variant to drive the
+/// 422 + URN response without simulating real Docker/filesystem state.
+pub trait SandboxPreflightCheck: Send + Sync {
+    fn check(&self, project_path: &Path) -> Result<(), SandboxPreflightFailure>;
+}
+
+impl SandboxPreflightCheck for SandboxPreflight {
+    fn check(&self, project_path: &Path) -> Result<(), SandboxPreflightFailure> {
+        SandboxPreflight::check(self, project_path)
+    }
+}
+
+/// Test fake that always passes — used by existing integration tests
+/// that drive the Plan Run handler without simulating Sandbox state.
+pub struct AlwaysOkSandboxPreflight;
+
+impl SandboxPreflightCheck for AlwaysOkSandboxPreflight {
+    fn check(&self, _project_path: &Path) -> Result<(), SandboxPreflightFailure> {
+        Ok(())
+    }
+}
+
+/// Test fake that always returns a fixed failure. Used by the
+/// integration test in `apps/control-plane-server/tests/` to assert
+/// each preflight URN maps to a 422 problem response.
+pub struct RejectingSandboxPreflight {
+    template: SandboxFailureTemplate,
+}
+
+#[derive(Clone, Debug)]
+pub enum SandboxFailureTemplate {
+    DockerUnavailable(String),
+    CodexAuthMissing(PathBuf),
+    MiseTomlMissing(PathBuf),
+    RuntimeImageBuildFailed(String),
+}
+
+impl RejectingSandboxPreflight {
+    pub fn new(template: SandboxFailureTemplate) -> Self {
+        Self { template }
+    }
+
+    fn make(&self) -> SandboxPreflightFailure {
+        match &self.template {
+            SandboxFailureTemplate::DockerUnavailable(d) => {
+                SandboxPreflightFailure::DockerUnavailable(d.clone())
+            }
+            SandboxFailureTemplate::CodexAuthMissing(p) => {
+                SandboxPreflightFailure::CodexAuthMissing(p.clone())
+            }
+            SandboxFailureTemplate::MiseTomlMissing(p) => {
+                SandboxPreflightFailure::MiseTomlMissing(p.clone())
+            }
+            SandboxFailureTemplate::RuntimeImageBuildFailed(s) => {
+                SandboxPreflightFailure::RuntimeImageBuildFailed(s.clone())
+            }
+        }
+    }
+}
+
+impl SandboxPreflightCheck for RejectingSandboxPreflight {
+    fn check(&self, _project_path: &Path) -> Result<(), SandboxPreflightFailure> {
+        Err(self.make())
+    }
+}
+
+/// Plan Run trigger-time preflight for the Codex Sandbox. Four checks
+/// in fixed order; first failure wins. Holds host-wide collaborators
+/// (docker probe, codex auth path, runtime-image builder) behind small
+/// traits so unit tests can drive each branch without touching the host.
+/// The per-Plan-Run project path is supplied to `check`.
+pub struct SandboxPreflight {
+    docker: Arc<dyn DockerProbe>,
+    codex_auth_path: PathBuf,
+    image: Arc<dyn RuntimeImageEnsurer>,
+}
+
+impl SandboxPreflight {
+    pub fn new(
+        docker: Arc<dyn DockerProbe>,
+        codex_auth_path: impl Into<PathBuf>,
+        image: Arc<dyn RuntimeImageEnsurer>,
+    ) -> Self {
+        Self {
+            docker,
+            codex_auth_path: codex_auth_path.into(),
+            image,
+        }
+    }
+
+    /// Single entrypoint. Order mirrors ADR-0041 §"preflight": docker
+    /// daemon → codex auth → mise.toml → runtime image. Stops at the
+    /// first failure so an unreachable daemon does not cascade into a
+    /// meaningless image-build attempt. Sync because all four checks
+    /// are blocking I/O and the host trigger handler is the only caller.
+    pub fn check(&self, project_path: &Path) -> Result<(), SandboxPreflightFailure> {
+        self.docker
+            .ping()
+            .map_err(SandboxPreflightFailure::DockerUnavailable)?;
+
+        if !file_readable(&self.codex_auth_path) {
+            return Err(SandboxPreflightFailure::CodexAuthMissing(
+                self.codex_auth_path.clone(),
+            ));
+        }
+
+        let mise_toml = project_path.join("mise.toml");
+        if !mise_toml.is_file() {
+            return Err(SandboxPreflightFailure::MiseTomlMissing(
+                project_path.to_path_buf(),
+            ));
+        }
+
+        self.image
+            .ensure()
+            .map(|_tag| ())
+            .map_err(SandboxPreflightFailure::RuntimeImageBuildFailed)
+    }
+}
+
+fn file_readable(path: &Path) -> bool {
+    std::fs::File::open(path).is_ok()
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    struct OkDocker;
+    impl DockerProbe for OkDocker {
+        fn ping(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    struct FailDocker(&'static str);
+    impl DockerProbe for FailDocker {
+        fn ping(&self) -> Result<(), String> {
+            Err(self.0.to_string())
+        }
+    }
+
+    struct OkImage(&'static str);
+    impl RuntimeImageEnsurer for OkImage {
+        fn ensure(&self) -> Result<String, String> {
+            Ok(self.0.to_string())
+        }
+    }
+    struct FailImage(String);
+    impl RuntimeImageEnsurer for FailImage {
+        fn ensure(&self) -> Result<String, String> {
+            Err(self.0.clone())
+        }
+    }
+
+    fn tmpdir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!(
+            "agentic-afk-preflight-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn write_auth(dir: &Path) -> PathBuf {
+        let auth = dir.join("auth.json");
+        std::fs::write(&auth, "{}").unwrap();
+        auth
+    }
+
+    fn write_mise(dir: &Path) -> &Path {
+        std::fs::write(dir.join("mise.toml"), "[tools]\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn happy_path_all_four_checks_pass() {
+        let dir = tmpdir("happy");
+        let auth = write_auth(&dir);
+        write_mise(&dir);
+        let pf = SandboxPreflight::new(
+            Arc::new(OkDocker),
+            &auth,
+            Arc::new(OkImage("agentic-afk-runtime:abc")),
+        );
+        pf.check(&dir).expect("preflight passes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn docker_unavailable_short_circuits() {
+        let dir = tmpdir("docker-down");
+        // No auth, no mise.toml — still expect DockerUnavailable
+        // because docker is checked first.
+        let pf = SandboxPreflight::new(
+            Arc::new(FailDocker("connect refused")),
+            dir.join("missing-auth.json"),
+            Arc::new(OkImage("t")),
+        );
+        let err = pf.check(&dir).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(
+            err,
+            SandboxPreflightFailure::DockerUnavailable(detail) if detail.contains("connect refused")
+        ));
+    }
+
+    #[test]
+    fn codex_auth_missing_after_docker_passes() {
+        let dir = tmpdir("auth-missing");
+        write_mise(&dir);
+        let auth = dir.join("missing-auth.json");
+        let pf = SandboxPreflight::new(
+            Arc::new(OkDocker),
+            &auth,
+            Arc::new(OkImage("t")),
+        );
+        let err = pf.check(&dir).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(
+            err,
+            SandboxPreflightFailure::CodexAuthMissing(p) if p == auth
+        ));
+    }
+
+    #[test]
+    fn mise_toml_missing_after_auth_passes() {
+        let dir = tmpdir("mise-missing");
+        let auth = write_auth(&dir);
+        let pf = SandboxPreflight::new(
+            Arc::new(OkDocker),
+            &auth,
+            Arc::new(OkImage("t")),
+        );
+        let err = pf.check(&dir).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(
+            err,
+            SandboxPreflightFailure::MiseTomlMissing(p) if p == dir
+        ));
+    }
+
+    #[test]
+    fn runtime_image_build_failure_surfaces_stderr_in_detail() {
+        let dir = tmpdir("img-fail");
+        let auth = write_auth(&dir);
+        write_mise(&dir);
+        let stderr = "step 5/7: COPY entrypoint.sh — file not found";
+        let pf = SandboxPreflight::new(
+            Arc::new(OkDocker),
+            &auth,
+            Arc::new(FailImage(stderr.to_string())),
+        );
+        let err = pf.check(&dir).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        let coordinator_err: CoordinatorError = err.into();
+        assert_eq!(coordinator_err.status, 422);
+        assert_eq!(
+            coordinator_err.problem_type,
+            "urn:agentic-afk:sandbox-runtime-image-build-failed"
+        );
+        assert!(coordinator_err.detail.contains("entrypoint.sh"));
+    }
+
+    #[test]
+    fn coordinator_error_status_is_422_for_all_variants() {
+        let urns = [
+            (
+                SandboxPreflightFailure::DockerUnavailable("x".into()),
+                "urn:agentic-afk:sandbox-docker-unavailable",
+            ),
+            (
+                SandboxPreflightFailure::CodexAuthMissing("/x".into()),
+                "urn:agentic-afk:sandbox-codex-auth-missing",
+            ),
+            (
+                SandboxPreflightFailure::MiseTomlMissing("/x".into()),
+                "urn:agentic-afk:sandbox-mise-toml-missing",
+            ),
+            (
+                SandboxPreflightFailure::RuntimeImageBuildFailed("x".into()),
+                "urn:agentic-afk:sandbox-runtime-image-build-failed",
+            ),
+        ];
+        for (failure, expected_urn) in urns {
+            let err: CoordinatorError = failure.into();
+            assert_eq!(err.status, 422);
+            assert_eq!(err.problem_type, expected_urn);
+        }
+    }
+
+    #[test]
+    fn truncate_stderr_caps_long_blobs() {
+        let big = "x".repeat(5000);
+        let out = truncate_stderr(&big);
+        assert!(out.len() < big.len());
+        assert!(out.contains("truncated"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

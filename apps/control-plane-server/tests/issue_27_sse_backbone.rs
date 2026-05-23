@@ -51,6 +51,8 @@ async fn test_router() -> (axum::Router, persistence::Db) {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     (router(config, db.clone()), db)
 }
@@ -234,6 +236,8 @@ async fn sse_endpoint_emits_live_events_and_resumes_on_last_event_id() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router_with_bus(config, db.clone(), bus.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -308,6 +312,8 @@ async fn sse_endpoint_emits_resync_when_last_event_id_predates_ring() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router_with_bus(config, db.clone(), bus.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

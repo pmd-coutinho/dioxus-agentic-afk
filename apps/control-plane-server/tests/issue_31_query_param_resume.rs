@@ -49,6 +49,8 @@ async fn events_endpoint_honors_last_event_id_query_param_when_header_absent() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router_with_bus(config, db.clone(), bus.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -109,6 +111,8 @@ async fn last_event_id_header_takes_precedence_over_query_param() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let app = router_with_bus(config, db.clone(), bus.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -58,6 +58,8 @@ async fn empty_plan_run_publishes_started_phase_completed_completed_in_order() {
         gh_binary_path: "gh".into(),
         worktrunk_binary_path: "wt".into(),
         codex_binary_path: "codex".into(),
+        docker_binary_path: "docker".into(),
+        codex_auth_path: "/dev/null".into(),
     };
     let router = router_with_plan_run_deps_and_bus(config, db, bus.clone(), refresher, planner);
 

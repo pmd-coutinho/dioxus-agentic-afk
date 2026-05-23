@@ -51,6 +51,12 @@ pub struct ControlPlaneConfig {
     pub gh_binary_path: PathBuf,
     pub worktrunk_binary_path: PathBuf,
     pub codex_binary_path: PathBuf,
+    /// Docker CLI binary used by the Codex Sandbox preflight, builder,
+    /// and launcher. Defaults to `docker` on PATH.
+    pub docker_binary_path: PathBuf,
+    /// Path to the developer's Codex auth file that is bind-mounted into
+    /// every Codex Sandbox. Defaults to `~/.codex/auth.json`.
+    pub codex_auth_path: PathBuf,
 }
 
 impl ControlPlaneConfig {
@@ -74,6 +80,15 @@ impl ControlPlaneConfig {
         let codex_binary_path = std::env::var("AGENTIC_AFK_CODEX_BIN")
             .unwrap_or_else(|_| "codex".to_string())
             .into();
+        let docker_binary_path = std::env::var("AGENTIC_AFK_DOCKER_BIN")
+            .unwrap_or_else(|_| "docker".to_string())
+            .into();
+        let codex_auth_path: PathBuf = std::env::var("AGENTIC_AFK_CODEX_AUTH_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+                PathBuf::from(home).join(".codex").join("auth.json")
+            });
 
         Ok(Self {
             bind_address,
@@ -82,6 +97,8 @@ impl ControlPlaneConfig {
             gh_binary_path,
             worktrunk_binary_path,
             codex_binary_path,
+            docker_binary_path,
+            codex_auth_path,
         })
     }
 
@@ -100,6 +117,10 @@ pub(crate) struct AppState {
     pub(crate) db: Db,
     pub(crate) event_bus: event_bus::EventBus,
     pub(crate) plan_run_deps: PlanRunDeps,
+    /// Codex Sandbox trigger-time preflight (issue #73). Production
+    /// wires `SandboxPreflight`; tests inject `AlwaysOkSandboxPreflight`
+    /// or `RejectingSandboxPreflight` to drive the 422 + URN path.
+    pub(crate) sandbox_preflight: Arc<dyn agentic_afk_orchestrator::SandboxPreflightCheck>,
 }
 
 // `PlanRunDeps` lives in the orchestrator crate (issue #48). Tests and
@@ -209,7 +230,28 @@ fn default_test_deps() -> PlanRunDeps {
 /// endpoint subscribes from.
 pub fn router_with_bus(config: ControlPlaneConfig, db: Db, event_bus: event_bus::EventBus) -> Router {
     let deps = plan_run_deps_from_env(&config);
-    router_with_full_deps(config, db, event_bus, deps)
+    let preflight = production_sandbox_preflight(&config);
+    router_with_full_deps_and_preflight(config, db, event_bus, deps, preflight)
+}
+
+/// Production Codex Sandbox preflight wiring (issue #73). Backed by the
+/// host's docker CLI, the developer's `~/.codex/auth.json`, and the
+/// runtime-image builder that produces `agentic-afk-runtime:<hash>`.
+fn production_sandbox_preflight(
+    config: &ControlPlaneConfig,
+) -> Arc<dyn agentic_afk_orchestrator::SandboxPreflightCheck> {
+    let docker_probe: Arc<dyn agentic_afk_orchestrator::DockerProbe> = Arc::new(
+        agentic_afk_orchestrator::CliDockerProbe::new(config.docker_binary_path.clone()),
+    );
+    let image_ensurer: Arc<dyn agentic_afk_orchestrator::RuntimeImageEnsurer> =
+        Arc::new(agentic_afk_orchestrator::BuilderImageEnsurer::new(
+            agentic_afk_orchestrator::RuntimeImageBuilder::new(config.docker_binary_path.clone()),
+        ));
+    Arc::new(agentic_afk_orchestrator::SandboxPreflight::new(
+        docker_probe,
+        config.codex_auth_path.clone(),
+        image_ensurer,
+    ))
 }
 
 /// Build a router with caller-provided Plan Run phase dependencies. Tests
@@ -393,6 +435,23 @@ fn router_with_full_deps(
     event_bus: event_bus::EventBus,
     plan_run_deps: PlanRunDeps,
 ) -> Router {
+    let preflight: Arc<dyn agentic_afk_orchestrator::SandboxPreflightCheck> =
+        Arc::new(agentic_afk_orchestrator::AlwaysOkSandboxPreflight);
+    router_with_full_deps_and_preflight(config, db, event_bus, plan_run_deps, preflight)
+}
+
+/// Variant of [`router_with_full_deps`] that lets callers inject the
+/// Codex Sandbox preflight (issue #73). The single-arg form (used by
+/// `serve`) wires the production `SandboxPreflight`; tests can wire
+/// `AlwaysOkSandboxPreflight` to bypass or `RejectingSandboxPreflight`
+/// to drive the 422 + URN response per variant.
+pub fn router_with_full_deps_and_preflight(
+    config: ControlPlaneConfig,
+    db: Db,
+    event_bus: event_bus::EventBus,
+    plan_run_deps: PlanRunDeps,
+    sandbox_preflight: Arc<dyn agentic_afk_orchestrator::SandboxPreflightCheck>,
+) -> Router {
     let asset_dir = config.dashboard_asset_dir.clone();
     let index = asset_dir.join("index.html");
     let state = Arc::new(AppState {
@@ -400,6 +459,7 @@ fn router_with_full_deps(
         db,
         event_bus,
         plan_run_deps,
+        sandbox_preflight,
     });
 
     Router::new()
@@ -2082,6 +2142,20 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
             "Project must be trusted before starting a Plan Run".to_string(),
         );
     }
+
+    // Codex Sandbox preflight (issue #73). Runs before any Plan Run row,
+    // claim write, or Source Issue Lifecycle transition. Failures become
+    // a 422 problem-JSON response with a stable URN so the trigger
+    // surfaces the operator-actionable cause (docker down, codex auth
+    // missing, no mise.toml, runtime image build failed).
+    if let Err(failure) = state
+        .sandbox_preflight
+        .check(std::path::Path::new(&project.path))
+    {
+        let err: agentic_afk_orchestrator::CoordinatorError = failure.into();
+        return coordinator_error_to_response(err);
+    }
+
     let execution_config = match persistence::get_project_execution_config(&state.db, &id).await {
         Ok(Some(config)) => config,
         Ok(None) => {
