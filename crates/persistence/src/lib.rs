@@ -26,7 +26,9 @@ pub use activity::{
 pub use plan_run::{
     create_plan_run, finish_plan_run, get_active_plan_run, get_plan_run,
     get_project_execution_config, list_assignment_phase_outputs, list_recent_plan_runs,
-    record_assignment_phase_output, record_plan_run_phase_output, set_project_execution_config,
+    record_assignment_phase_output, record_assignment_phase_output_typed,
+    record_plan_run_phase_output, record_plan_run_phase_output_typed,
+    set_project_execution_config,
 };
 
 // Re-export new Plan Run assignment helpers at the crate root for
@@ -72,7 +74,18 @@ pub enum PersistenceError {
     AssignmentNotFound(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("Phase Output outcome {outcome} does not pair with {body_phase} body")]
+    PhaseOutputMismatch {
+        body_phase: &'static str,
+        outcome: String,
+    },
 }
+
+/// Hard ceiling on the serialized JSON size of a single Phase Output body.
+/// Bodies that serialize larger are replaced at the write seam with a
+/// `truncated_at: <bytes>` marker (ADR-0038) so push stderr or verification
+/// log dumps cannot push runaway rows through to the Dashboard.
+pub const PHASE_OUTPUT_BODY_MAX_BYTES: usize = 64 * 1024;
 
 pub type Db = Pool<Sqlite>;
 
@@ -1367,6 +1380,144 @@ mod tests {
                 .detail
                 .as_deref()
                 .is_some_and(|d| d.contains("merge conflict"))
+        );
+    }
+
+    #[tokio::test]
+    async fn write_seam_rejects_failed_outcome_with_non_failed_body() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        // Implementation body paired with outcome="failed" must be rejected
+        // at the single write-seam chokepoint.
+        let body = PhaseOutputBody::Implementation(serde_json::json!({}));
+        let result =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "failed", &body).await;
+        assert!(
+            matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
+            "expected PhaseOutputMismatch, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_seam_rejects_failed_body_with_non_failed_outcome() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Failed {
+            error: "boom".to_string(),
+            problem_type: None,
+        };
+        let result =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "review", "approved", &body).await;
+        assert!(
+            matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
+            "expected PhaseOutputMismatch, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_seam_truncates_body_over_64kb() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        // Build a Failed body whose serialized JSON exceeds 64 KB.
+        let huge_error: String = "x".repeat(65 * 1024);
+        let body = PhaseOutputBody::Failed {
+            error: huge_error.clone(),
+            problem_type: None,
+        };
+        let stored = record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "failed", &body)
+            .await
+            .unwrap();
+        // The stored body must carry a `truncated_at: <bytes>` marker.
+        let marker = stored
+            .body_json
+            .get("truncated_at")
+            .and_then(serde_json::Value::as_u64);
+        assert!(marker.is_some(), "body_json missing truncated_at marker: {stored:?}");
+        let bytes = marker.unwrap();
+        // The marker records the original serialized size (the byte count
+        // that triggered truncation), which must exceed the ceiling.
+        assert!(bytes > PHASE_OUTPUT_BODY_MAX_BYTES as u64, "marker bytes {bytes}");
+        // Round-trip via list to verify it persists on disk truncated.
+        let reloaded = get_plan_run(&db, &plan_run.id).await.unwrap();
+        let row = reloaded
+            .phase_outputs
+            .iter()
+            .find(|p| p.outcome == "failed")
+            .expect("failed row");
+        assert_eq!(
+            row.body_json.get("truncated_at"),
+            Some(&serde_json::Value::from(bytes))
+        );
+    }
+
+    #[tokio::test]
+    async fn write_seam_accepts_failed_failed_pair() {
+        use agentic_afk_contracts::PhaseOutputBody;
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+        let body = PhaseOutputBody::Failed {
+            error: "planner unparseable".to_string(),
+            problem_type: Some("urn:agentic-afk:planning-output-unparseable".to_string()),
+        };
+        let stored = record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "failed", &body)
+            .await
+            .unwrap();
+        // The SQL `phase` column tracks the originating phase identity
+        // (per ADR-0038 the outer `phase` column stays as `planning` /
+        // `implementation` / `review` / `merge` / `push`). The body JSON's
+        // `phase` tag carries the typed body variant ("failed" here).
+        assert_eq!(stored.phase, "planning");
+        assert_eq!(stored.outcome, "failed");
+        assert_eq!(
+            stored.body_json.get("phase").and_then(|v| v.as_str()),
+            Some("failed")
+        );
+        assert_eq!(
+            stored.body_json.get("error").and_then(|v| v.as_str()),
+            Some("planner unparseable")
         );
     }
 

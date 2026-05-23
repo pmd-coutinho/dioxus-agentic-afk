@@ -354,6 +354,78 @@ pub struct PlanRunResponse {
     pub assignments: Vec<IssueAssignmentResponse>,
 }
 
+/// Typed Phase Output body recorded against a Plan Run or Issue Assignment
+/// (ADR-0038). Tagged on the `phase` discriminator so every persisted body
+/// carries its phase identity inline; the outer `outcome` column remains the
+/// SQL-level filter for "failed phase outputs of Plan Run X" queries.
+///
+/// This slice ships the `Failed` variant fully. The remaining variants are
+/// stubs that wrap the existing free-form body JSON so per-phase shapes can
+/// be tightened in subsequent slices without breaking existing in-flight
+/// callsites or in-the-wild rows.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum PhaseOutputBody {
+    /// Planning Phase body (stub — see ADR-0038, future slice).
+    Planning(serde_json::Value),
+    /// Implementation Phase body (stub).
+    Implementation(serde_json::Value),
+    /// Review Phase body (stub).
+    Review(serde_json::Value),
+    /// Merge Phase body (stub).
+    Merge(serde_json::Value),
+    /// Integration Branch push body (stub).
+    Push(serde_json::Value),
+    /// Failure body — carries the surfaced error and the RFC-7807
+    /// problem-type URN of the originating CoordinatorError when known.
+    /// Used by every phase failure path so Dashboard rendering and the
+    /// write-seam validation share one shape.
+    Failed {
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        problem_type: Option<String>,
+    },
+}
+
+impl PhaseOutputBody {
+    /// Variant discriminator as it appears in the serialized `phase` tag.
+    /// Matches the existing `phase` column written by the persistence
+    /// seam so legacy rows keep their column value.
+    pub fn phase_tag(&self) -> &'static str {
+        match self {
+            Self::Planning(_) => "planning",
+            Self::Implementation(_) => "implementation",
+            Self::Review(_) => "review",
+            Self::Merge(_) => "merge",
+            Self::Push(_) => "push",
+            Self::Failed { .. } => "failed",
+        }
+    }
+
+    /// Permissive deserialization for legacy in-the-wild Phase Output bodies
+    /// recorded before ADR-0038 typing landed. Tries the strict tagged shape
+    /// first; on failure, falls back to `Failed` carrying the legacy body's
+    /// `error` field (or the whole body as a debug string) so the Dashboard
+    /// can still render the row.
+    pub fn from_legacy_value(value: serde_json::Value) -> Self {
+        if let Ok(typed) = serde_json::from_value::<PhaseOutputBody>(value.clone()) {
+            return typed;
+        }
+        let error = value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| value.to_string());
+        Self::Failed {
+            error,
+            problem_type: value
+                .get("problem_type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        }
+    }
+}
+
 /// One durable phase result (planning/implementation/review/merge) recorded
 /// for a Plan Run or Assignment Attempt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -666,6 +738,44 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         let back: BlockReasonResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back, response);
+    }
+
+    #[test]
+    fn phase_output_body_failed_round_trips_with_phase_tag() {
+        let body = PhaseOutputBody::Failed {
+            error: "boom".to_string(),
+            problem_type: Some("urn:agentic-afk:planning-phase-failed".to_string()),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"phase\":\"failed\""), "{json}");
+        assert!(json.contains("\"error\":\"boom\""), "{json}");
+        let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, body);
+    }
+
+    #[test]
+    fn phase_output_body_legacy_shape_falls_back_to_failed() {
+        // Existing in-the-wild rows pre-typed-body: just `{ "error": "..." }`
+        // with no `phase` tag should deserialize as the Failed variant so the
+        // Dashboard and write seam can still surface them.
+        let legacy = serde_json::json!({ "error": "stderr: rejected" });
+        let body = PhaseOutputBody::from_legacy_value(legacy);
+        match body {
+            PhaseOutputBody::Failed { error, problem_type } => {
+                assert_eq!(error, "stderr: rejected");
+                assert_eq!(problem_type, None);
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phase_output_body_planning_stub_round_trips() {
+        let body = PhaseOutputBody::Planning(serde_json::json!({ "summary": "ok" }));
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"phase\":\"planning\""), "{json}");
+        let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, body);
     }
 
     #[test]

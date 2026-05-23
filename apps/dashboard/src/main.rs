@@ -898,8 +898,20 @@ fn ReEnableSourceIssueButton(project_id: String, source_id: String) -> Element {
 
 #[component]
 fn AssignmentPhaseOutputRow(phase_output: agentic_afk_contracts::PhaseOutputResponse) -> Element {
+    rsx! { PhaseOutputRow { phase_output } }
+}
+
+/// Render one Phase Output row collapsed by default with a click-to-expand
+/// body view (ADR-0038 / issue #58). Each row owns its own expansion signal
+/// so multiple rows may be open at once.
+#[component]
+fn PhaseOutputRow(phase_output: agentic_afk_contracts::PhaseOutputResponse) -> Element {
+    use agentic_afk_contracts::PhaseOutputBody;
+
     let tone = match phase_output.outcome.as_str() {
-        "ready_for_review" | "approved" | "merged" => PillTone::Verified,
+        "ready_for_review" | "approved" | "merged" | "succeeded" | "succeeded_empty" => {
+            PillTone::Verified
+        }
         "rejected" | "failed" | "blocked" => PillTone::Failed,
         _ => PillTone::Pending,
     };
@@ -909,11 +921,79 @@ fn AssignmentPhaseOutputRow(phase_output: agentic_afk_contracts::PhaseOutputResp
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_string();
+    let truncated_bytes = phase_output
+        .body_json
+        .get("truncated_at")
+        .and_then(serde_json::Value::as_u64);
+    // Permissive parse: in-the-wild rows that pre-date typed bodies fall
+    // back to Failed via `from_legacy_value`, so the click-to-expand view
+    // always has a typed body to render.
+    let typed = PhaseOutputBody::from_legacy_value(phase_output.body_json.clone());
+    let mut expanded = use_signal(|| false);
+    let pill_label = format!("{} {}", phase_output.phase, phase_output.outcome);
+
     rsx! {
-        div { class: "flex items-center gap-2", "data-testid": "assignment-phase-output-row",
-            StatusPill { tone, label: format!("{} {}", phase_output.phase, phase_output.outcome) }
-            if !summary.is_empty() {
-                p { class: "text-[11px] text-ink-2", "{summary}" }
+        div { class: "flex flex-col gap-1",
+            "data-testid": "assignment-phase-output-row",
+            "data-expanded": if expanded() { "true" } else { "false" },
+            button {
+                r#type: "button",
+                class: "flex items-center gap-2 text-left",
+                "data-testid": "phase-output-toggle",
+                onclick: move |_| {
+                    let next = !expanded();
+                    expanded.set(next);
+                },
+                StatusPill { tone, label: pill_label }
+                if !summary.is_empty() {
+                    p { class: "text-[11px] text-ink-2", "{summary}" }
+                }
+            }
+            if expanded() {
+                div { class: "rounded border border-line/40 bg-surface-2/60 p-2",
+                    "data-testid": "phase-output-body",
+                    PhaseOutputBodyView { body: typed }
+                    if let Some(bytes) = truncated_bytes {
+                        p { class: "mt-1 font-mono text-[11px] text-coral",
+                            "data-testid": "phase-output-truncated",
+                            "[truncated] body was {bytes} bytes"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Render the typed Phase Output body. The Failed variant is the only
+/// variant fully covered by this slice; other variants fall back to a
+/// pretty-printed JSON dump until follow-up slices tighten them.
+#[component]
+fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element {
+    use agentic_afk_contracts::PhaseOutputBody;
+    match body {
+        PhaseOutputBody::Failed { error, problem_type } => rsx! {
+            div { class: "flex flex-col gap-1",
+                p { class: "font-mono text-[12px] text-coral",
+                    "data-testid": "phase-output-error",
+                    "{error}"
+                }
+                if let Some(urn) = problem_type {
+                    p { class: "font-mono text-[11px] text-ink-2",
+                        "data-testid": "phase-output-problem-type",
+                        "{urn}"
+                    }
+                }
+            }
+        },
+        PhaseOutputBody::Planning(body)
+        | PhaseOutputBody::Implementation(body)
+        | PhaseOutputBody::Review(body)
+        | PhaseOutputBody::Merge(body)
+        | PhaseOutputBody::Push(body) => {
+            let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
+            rsx! {
+                pre { class: "whitespace-pre-wrap font-mono text-[11px] text-ink-2", "{pretty}" }
             }
         }
     }

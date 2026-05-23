@@ -261,6 +261,9 @@ impl CoordinatorError {
                 (404, "urn:agentic-afk:assignment-not-found")
             }
             PersistenceError::Database(_) => (500, "urn:agentic-afk:internal-error"),
+            PersistenceError::PhaseOutputMismatch { .. } => {
+                (500, "urn:agentic-afk:phase-output-mismatch")
+            }
         };
         Self::new(status, problem_type, error.to_string())
     }

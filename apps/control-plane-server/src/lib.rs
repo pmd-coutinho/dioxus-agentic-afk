@@ -1572,6 +1572,11 @@ pub(crate) fn persistence_error_to_response(err: PersistenceError) -> Response {
             "urn:agentic-afk:internal-error",
             "Internal Server Error",
         ),
+        PersistenceError::PhaseOutputMismatch { .. } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "urn:agentic-afk:phase-output-mismatch",
+            "Internal Server Error",
+        ),
     };
 
     let problem = ProblemDetail {

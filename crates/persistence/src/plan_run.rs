@@ -1,9 +1,9 @@
 //! Persistence helpers for Project Execution Config and Plan Runs (ADR-0034).
 
-use crate::{Db, PersistenceError};
+use crate::{Db, PHASE_OUTPUT_BODY_MAX_BYTES, PersistenceError};
 use agentic_afk_contracts::{
-    PhaseOutputResponse, PlanRunResponse, ProjectExecutionConfigResponse, ProjectId,
-    SetProjectExecutionConfigRequest,
+    PhaseOutputBody, PhaseOutputResponse, PlanRunResponse, ProjectExecutionConfigResponse,
+    ProjectId, SetProjectExecutionConfigRequest,
 };
 use uuid::Uuid;
 
@@ -89,6 +89,11 @@ pub async fn create_plan_run(
     get_plan_run(db, &id).await
 }
 
+/// Plan-Run-scoped Phase Output write seam (free-form body, legacy callers).
+///
+/// Wraps the raw `body_json` in the appropriate [`PhaseOutputBody`] stub so
+/// the single typed write-seam below performs the outcome/body-pairing
+/// validation and 64 KB truncation (ADR-0038).
 pub async fn record_plan_run_phase_output(
     db: &Db,
     plan_run_id: &str,
@@ -96,7 +101,23 @@ pub async fn record_plan_run_phase_output(
     outcome: &str,
     body_json: &serde_json::Value,
 ) -> Result<PhaseOutputResponse, PersistenceError> {
-    record_phase_output(db, plan_run_id, None, phase, outcome, body_json).await
+    let body = wrap_legacy_body(phase, outcome, body_json);
+    record_phase_output(db, plan_run_id, None, phase, outcome, &body).await
+}
+
+/// Plan-Run-scoped typed write seam. Validates outcome ↔ body variant
+/// pairing and truncates the serialized body to 64 KB before persisting.
+/// `phase` is the recording-phase column (planning / implementation / review
+/// / merge / push) and may differ from the body's variant tag when the body
+/// is `Failed` (the column stays as the originating phase per ADR-0038).
+pub async fn record_plan_run_phase_output_typed(
+    db: &Db,
+    plan_run_id: &str,
+    phase: &str,
+    outcome: &str,
+    body: &PhaseOutputBody,
+) -> Result<PhaseOutputResponse, PersistenceError> {
+    record_phase_output(db, plan_run_id, None, phase, outcome, body).await
 }
 
 /// Record a Phase Output attributed to a particular Issue Assignment
@@ -110,28 +131,83 @@ pub async fn record_assignment_phase_output(
     outcome: &str,
     body_json: &serde_json::Value,
 ) -> Result<PhaseOutputResponse, PersistenceError> {
-    record_phase_output(
-        db,
-        plan_run_id,
-        Some(assignment_id),
-        phase,
-        outcome,
-        body_json,
-    )
-    .await
+    let body = wrap_legacy_body(phase, outcome, body_json);
+    record_phase_output(db, plan_run_id, Some(assignment_id), phase, outcome, &body).await
 }
 
+/// Assignment-scoped typed write seam (see [`record_plan_run_phase_output_typed`]).
+pub async fn record_assignment_phase_output_typed(
+    db: &Db,
+    plan_run_id: &str,
+    assignment_id: &str,
+    phase: &str,
+    outcome: &str,
+    body: &PhaseOutputBody,
+) -> Result<PhaseOutputResponse, PersistenceError> {
+    record_phase_output(db, plan_run_id, Some(assignment_id), phase, outcome, body).await
+}
+
+/// Wrap a free-form legacy body in the matching [`PhaseOutputBody`] variant.
+/// `outcome="failed"` always routes through [`PhaseOutputBody::Failed`] so
+/// the chokepoint validation can guard the pairing; other phases stay in
+/// their stub variants until subsequent ADR-0038 slices tighten them.
+fn wrap_legacy_body(
+    phase: &str,
+    outcome: &str,
+    body_json: &serde_json::Value,
+) -> PhaseOutputBody {
+    // Push records structured bodies for both success and failure
+    // outcomes (ADR-0038 push slice) — keep the body shape intact.
+    if phase == "push" {
+        return PhaseOutputBody::Push(body_json.clone());
+    }
+    if outcome == "failed" {
+        let error = body_json
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| body_json.to_string());
+        let problem_type = body_json
+            .get("problem_type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        return PhaseOutputBody::Failed {
+            error,
+            problem_type,
+        };
+    }
+    match phase {
+        "planning" => PhaseOutputBody::Planning(body_json.clone()),
+        "implementation" => PhaseOutputBody::Implementation(body_json.clone()),
+        "review" => PhaseOutputBody::Review(body_json.clone()),
+        "merge" => PhaseOutputBody::Merge(body_json.clone()),
+        // Unknown phase: route to Failed so the row still lands with a
+        // typed body the Dashboard can render.
+        _ => PhaseOutputBody::Failed {
+            error: body_json.to_string(),
+            problem_type: None,
+        },
+    }
+}
+
+/// Single chokepoint for Phase Output persistence (ADR-0038).
+/// Validates that `outcome` and the body variant pair sensibly, serializes
+/// the body to JSON, replaces it with a `truncated_at: <bytes>` marker when
+/// the serialized form exceeds [`PHASE_OUTPUT_BODY_MAX_BYTES`], and writes
+/// the row.
 async fn record_phase_output(
     db: &Db,
     plan_run_id: &str,
     assignment_id: Option<&str>,
     phase: &str,
     outcome: &str,
-    body_json: &serde_json::Value,
+    body: &PhaseOutputBody,
 ) -> Result<PhaseOutputResponse, PersistenceError> {
-    let id = Uuid::new_v4().to_string();
-    let body_text = serde_json::to_string(body_json)
+    validate_outcome_body(outcome, body)?;
+    let stored_body = truncate_body_if_needed(body)?;
+    let body_text = serde_json::to_string(&stored_body)
         .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
+    let id = Uuid::new_v4().to_string();
     let recorded_at = current_unix_timestamp();
     sqlx::query(
         r#"
@@ -153,10 +229,59 @@ async fn record_phase_output(
     Ok(PhaseOutputResponse {
         phase: phase.to_string(),
         outcome: outcome.to_string(),
-        body_json: body_json.clone(),
+        body_json: stored_body,
         recorded_at,
         assignment_id: assignment_id.map(str::to_owned),
     })
+}
+
+/// Reject outcome ↔ body pairings that would corrupt the audit log.
+/// At this slice the validated pairings are:
+/// * [`PhaseOutputBody::Failed`] requires `outcome == "failed"` — the
+///   Failed variant carries an error string and has no other plausible
+///   outcome.
+/// * `outcome == "failed"` paired with a structured phase body
+///   (Planning / Implementation / Review / Merge) is rejected: those
+///   variants are stubs and surface failures through the Failed variant.
+///   The Push variant is exempt because push records structured bodies
+///   for both success and failure outcomes (ADR-0038 push slice).
+fn validate_outcome_body(outcome: &str, body: &PhaseOutputBody) -> Result<(), PersistenceError> {
+    let is_failed_body = matches!(body, PhaseOutputBody::Failed { .. });
+    let is_failed_outcome = outcome == "failed";
+    if is_failed_body && !is_failed_outcome {
+        return Err(PersistenceError::PhaseOutputMismatch {
+            body_phase: body.phase_tag(),
+            outcome: outcome.to_string(),
+        });
+    }
+    if is_failed_outcome && !is_failed_body && !matches!(body, PhaseOutputBody::Push(_)) {
+        return Err(PersistenceError::PhaseOutputMismatch {
+            body_phase: body.phase_tag(),
+            outcome: outcome.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Serialize `body` and, if the JSON exceeds the 64 KB ceiling, replace it
+/// with a marker object so the on-disk row stays bounded. Returns the
+/// `serde_json::Value` that will land in the `body_json` column.
+fn truncate_body_if_needed(
+    body: &PhaseOutputBody,
+) -> Result<serde_json::Value, PersistenceError> {
+    let raw = serde_json::to_value(body)
+        .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
+    let serialized = serde_json::to_string(&raw)
+        .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
+    if serialized.len() <= PHASE_OUTPUT_BODY_MAX_BYTES {
+        return Ok(raw);
+    }
+    // Preserve the `phase` tag so the truncated row still discriminates,
+    // and append the marker so the Dashboard can render `[truncated]`.
+    Ok(serde_json::json!({
+        "phase": body.phase_tag(),
+        "truncated_at": serialized.len(),
+    }))
 }
 
 /// List Phase Outputs attributed to one Issue Assignment, oldest first.
