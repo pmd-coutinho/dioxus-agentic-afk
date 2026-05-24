@@ -64,6 +64,18 @@ _Avoid_: Assignment Sandbox, Project container, Plan Run container, agent VM
 One manually started **Planning Phase** and the parallel issue work it selects through **Review Phase** and **Merge Phase**, all based on one refreshed **Integration Branch** baseline.
 _Avoid_: Backlog, queue drain, individual assignment
 
+**Plan Run State**:
+The lifecycle state of a **Plan Run**. It says whether the run is still active or finished; active progress is inferred as **Plan Run Stage**, while finished results are inferred as **Plan Run Outcome**.
+_Avoid_: Plan Run outcome, batch result, assignment summary
+
+**Plan Run Stage**:
+The derived current position of an active **Plan Run** for human interpretation. It is inferred from **Phase Outputs** and **Issue Assignments**, not persisted as the **Plan Run State**.
+_Avoid_: Plan Run Status, Assignment Status, Lifecycle Status
+
+**Plan Run Outcome**:
+The derived classification of a finished **Plan Run** for human interpretation and **Auto-Replan** branching. It is inferred from **Issue Assignments** and **Phase Outputs**, not persisted as the **Plan Run State**.
+_Avoid_: Plan Run State, persisted terminal, run status
+
 **Assignment Attempt**:
 One agent execution pass within an **Issue Assignment**, such as an implementation pass, review pass, or later implementation pass in a **Review Loop**.
 _Avoid_: Assignment, retry branch, agent log
@@ -169,6 +181,9 @@ _Avoid_: afk, dioxus-agentic-afk
 - A **Source Issue** may be a **Ready Issue**
 - A **Source Issue** may have one **Lifecycle Status**
 - A **Plan Run** may contain one or more **Issue Assignments**
+- A **Plan Run** has one **Plan Run State**
+- An active **Plan Run** has one derived **Plan Run Stage**
+- A finished **Plan Run** has one derived **Plan Run Outcome**
 - A **Ready Issue** may have at most one active **Issue Assignment**
 - An **Issue Assignment** may have one or more **Assignment Attempts**
 - An **Issue Assignment** has one **Assignment Worktree**
