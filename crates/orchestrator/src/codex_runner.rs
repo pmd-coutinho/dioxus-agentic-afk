@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::plan_run::{
     AssignmentContext, ImplementationPhaseRunner, MergePhaseRunner, PlanRunPhaseError,
-    PlanningPhaseRunner, ReviewPhaseRunner,
+    PlanningContext, PlanningPhaseRunner, ReviewPhaseRunner,
 };
 use crate::sandbox::{
     MISE_CACHE_VOLUME, SandboxLaunchSpec, SandboxLauncher, SandboxMount, SandboxPhase,
@@ -193,14 +193,18 @@ cat "$last_message""#
 }
 
 impl PlanningPhaseRunner for DockerCodexRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        context: &PlanningContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         // Planning is invoked once per Plan Run before any assignment
         // exists, so the labels carry empty assignment/attempt slots.
-        // The plan-run-id / project-id are not available without a wider
-        // refactor of the Planning trait, so fall back to placeholders;
-        // a follow-up may extend `PlanningPhaseRunner::run` to take a
-        // small `PlanningContext` if these labels need real values.
-        let spec = self.build_spec_planning(prompt, "", "");
+        let spec = self.build_spec_planning(
+            prompt,
+            &context.plan_run.id,
+            context.project.id.0.as_str(),
+        );
         self.launcher
             .launch(spec)
             .map_err(|e| PlanRunPhaseError::Planning(e.to_string()))

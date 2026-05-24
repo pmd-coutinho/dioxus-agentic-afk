@@ -280,7 +280,11 @@ async fn list_plan_runs_returns_history_newest_first() {
 async fn planner_failure_records_failed_phase_output_and_failed_state() {
     struct FailingPlanner;
     impl PlanningPhaseRunner for FailingPlanner {
-        fn run(&self, _prompt: &str) -> Result<String, PlanRunPhaseError> {
+        fn run(
+            &self,
+            _prompt: &str,
+            _context: &agentic_afk_orchestrator::plan_run::PlanningContext<'_>,
+        ) -> Result<String, PlanRunPhaseError> {
             Err(PlanRunPhaseError::Planning("codex blew up".to_string()))
         }
     }

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentic_afk_contracts::{IssueAssignmentResponse, PlanRunResponse, ProjectId, ProjectResponse};
-use agentic_afk_orchestrator::plan_run::AssignmentContext;
+use agentic_afk_orchestrator::plan_run::{AssignmentContext, PlanningContext};
 use agentic_afk_orchestrator::{
     DockerCodexRunner, FakeSandboxLauncher, ImplementationPhaseRunner, MergePhaseRunner,
     PlanRunPhaseError, PlanningPhaseRunner, ReviewPhaseRunner, SandboxError, SandboxMount,
@@ -93,13 +93,27 @@ fn planning_launch_mounts_project_read_only_and_returns_stdout() {
     ));
     let runner = make_runner(launcher.clone(), SandboxPhase::Planning);
 
-    let stdout = PlanningPhaseRunner::run(&runner, "plan now").expect("planning launch succeeds");
+    let project = project("/host/proj");
+    let plan_run = plan_run();
+    let ctx = PlanningContext {
+        project: &project,
+        plan_run: &plan_run,
+    };
+    let stdout =
+        PlanningPhaseRunner::run(&runner, "plan now", &ctx).expect("planning launch succeeds");
     assert!(stdout.contains("<plan>"));
 
     let launches = launcher.launches();
     assert_eq!(launches.len(), 1);
     let launch = &launches[0];
     assert_eq!(launch.phase, SandboxPhase::Planning);
+    assert!(launch.labels.iter().any(|(key, value)| {
+        key == "agentic-afk.plan-run-id" && value == "plan-run-7"
+    }));
+    assert!(launch
+        .labels
+        .iter()
+        .any(|(key, value)| key == "agentic-afk.project-id" && value == "proj-42"));
     assert_codex_exec_uses_last_message_capture(&launch.command, "plan now");
     let work_mount = bind_mount(&launch.mounts, "/host/proj").expect("project bind mount");
     match work_mount {

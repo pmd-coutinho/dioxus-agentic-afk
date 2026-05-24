@@ -416,7 +416,8 @@ pub async fn run_plan_run(
         Err(error) => return Err(CoordinatorError::from_persistence(error)),
     };
 
-    let planner_stdout = match deps.planner.run(&prompt) {
+    let planning_context = crate::plan_run::PlanningContext { project, plan_run };
+    let planner_stdout = match deps.planner.run(&prompt, &planning_context) {
         Ok(stdout) => stdout,
         Err(error) => {
             let _ = phase_handle.fail(&error).await;
@@ -2144,12 +2145,28 @@ mod tests {
     #[test]
     fn resolve_deps_passes_through_when_production_binaries_unset() {
         let deps = PlanRunDeps::default_test_deps();
-        let resolved = resolve_deps_for_project(&deps, &test_project());
+        let project = test_project();
+        let resolved = resolve_deps_for_project(&deps, &project);
+        let plan_run = agentic_afk_contracts::PlanRunResponse {
+            id: "plan-run-test".to_string(),
+            project_id: project.id.clone(),
+            integration_branch: "main".to_string(),
+            baseline_commit: "deadbeef".to_string(),
+            state: "running".to_string(),
+            started_at: "2026-05-24T00:00:00Z".to_string(),
+            finished_at: None,
+            phase_outputs: Vec::new(),
+            assignments: Vec::new(),
+        };
+        let context = crate::plan_run::PlanningContext {
+            project: &project,
+            plan_run: &plan_run,
+        };
         // Production binaries None: planner runner should still be the
         // FakePlanningPhaseRunner default test deps installs.
         let stdout = resolved
             .planner
-            .run("ignored")
+            .run("ignored", &context)
             .expect("fake planner returns stdout");
         assert!(stdout.contains("<plan>"));
         // Lifecycle writer should still be the FakeLifecycleWriter, which

@@ -51,6 +51,14 @@ pub struct AssignmentContext<'a> {
     pub assignment: &'a agentic_afk_contracts::IssueAssignmentResponse,
 }
 
+/// Plan-Run-scoped context passed to the Planning Phase runner.
+/// Production `DockerCodexRunner` uses the IDs to populate the
+/// `agentic-afk.*` Docker labels on the Planning Phase Codex Sandbox.
+pub struct PlanningContext<'a> {
+    pub project: &'a agentic_afk_contracts::ProjectResponse,
+    pub plan_run: &'a agentic_afk_contracts::PlanRunResponse,
+}
+
 /// Refresh the configured Integration Branch and report the baseline commit.
 pub trait IntegrationBranchRefresher: Send + Sync {
     fn refresh(
@@ -63,7 +71,11 @@ pub trait IntegrationBranchRefresher: Send + Sync {
 /// Execute the Planning Phase prompt and return the raw agent stdout for
 /// the Plan Run coordinator to parse.
 pub trait PlanningPhaseRunner: Send + Sync {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError>;
+    fn run(
+        &self,
+        prompt: &str,
+        context: &PlanningContext<'_>,
+    ) -> Result<String, PlanRunPhaseError>;
 }
 
 /// Test refresher that returns a fixed baseline on every call.
@@ -108,7 +120,11 @@ impl FakePlanningPhaseRunner {
 }
 
 impl PlanningPhaseRunner for FakePlanningPhaseRunner {
-    fn run(&self, prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        prompt: &str,
+        _context: &PlanningContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         *self.last_prompt.lock().unwrap() = Some(prompt.to_string());
         Ok(self.stdout.clone())
     }
@@ -392,7 +408,11 @@ pub struct ParsedReviewOutput {
 pub struct UnimplementedPlanningPhaseRunner;
 
 impl PlanningPhaseRunner for UnimplementedPlanningPhaseRunner {
-    fn run(&self, _prompt: &str) -> Result<String, PlanRunPhaseError> {
+    fn run(
+        &self,
+        _prompt: &str,
+        _context: &PlanningContext<'_>,
+    ) -> Result<String, PlanRunPhaseError> {
         Err(PlanRunPhaseError::Planning(
             "real Codex planning runner not implemented yet".to_string(),
         ))
