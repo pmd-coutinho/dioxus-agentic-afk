@@ -264,12 +264,18 @@ async fn worktrunk_missing_returns_422_before_plan_run_row() {
     let body = trigger_resp.into_body().collect().await.unwrap().to_bytes();
     let problem: ProblemDetailJson = serde_json::from_slice(&body).expect("problem json parses");
     assert_eq!(problem.status, 422);
-    assert_eq!(problem.problem_type, "urn:agentic-afk:worktrunk-unavailable");
+    assert_eq!(
+        problem.problem_type,
+        "urn:agentic-afk:worktrunk-unavailable"
+    );
 
     let rows = persistence::list_recent_plan_runs(&db, &project.id.0, 10)
         .await
         .unwrap();
-    assert!(rows.is_empty(), "worktrunk preflight must not create Plan Run rows");
+    assert!(
+        rows.is_empty(),
+        "worktrunk preflight must not create Plan Run rows"
+    );
 
     let _ = std::fs::remove_dir_all(&project_dir);
 }

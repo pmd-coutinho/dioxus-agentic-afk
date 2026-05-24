@@ -39,9 +39,15 @@ pub fn derive_button_render_state(state: Option<MutationState>) -> ButtonRenderS
 
 fn variant_classes(variant: ButtonVariant) -> &'static str {
     match variant {
-        ButtonVariant::Default => "text-ink bg-cyan/5 border-stroke hover:text-void hover:bg-cyan hover:shadow-[0_0_28px_rgba(91,233,255,0.45)]",
-        ButtonVariant::Primary => "text-cyan border-cyan/50 bg-[linear-gradient(180deg,rgba(91,233,255,0.18),rgba(91,233,255,0.04))] hover:text-void hover:bg-cyan",
-        ButtonVariant::Destructive => "text-coral border-coral/50 bg-[linear-gradient(180deg,rgba(255,110,110,0.18),rgba(255,110,110,0.04))] hover:text-void hover:bg-coral hover:shadow-[0_0_28px_rgba(255,110,110,0.45)]",
+        ButtonVariant::Default => {
+            "text-ink bg-cyan/5 border-stroke hover:text-void hover:bg-cyan hover:shadow-[0_0_28px_rgba(91,233,255,0.45)]"
+        }
+        ButtonVariant::Primary => {
+            "text-cyan border-cyan/50 bg-[linear-gradient(180deg,rgba(91,233,255,0.18),rgba(91,233,255,0.04))] hover:text-void hover:bg-cyan"
+        }
+        ButtonVariant::Destructive => {
+            "text-coral border-coral/50 bg-[linear-gradient(180deg,rgba(255,110,110,0.18),rgba(255,110,110,0.04))] hover:text-void hover:bg-coral hover:shadow-[0_0_28px_rgba(255,110,110,0.45)]"
+        }
     }
 }
 
@@ -63,9 +69,7 @@ pub fn ActionButton(
     let render_state = derive_button_render_state(store.state(&mutation_key));
     let is_pending = matches!(render_state, ButtonRenderState::Pending);
     let error = match &render_state {
-        ButtonRenderState::IdleWithError { title, detail } => {
-            Some((title.clone(), detail.clone()))
-        }
+        ButtonRenderState::IdleWithError { title, detail } => Some((title.clone(), detail.clone())),
         _ => None,
     };
     let is_disabled = is_pending || disabled;
@@ -120,10 +124,7 @@ mod tests {
 
     #[test]
     fn no_store_entry_renders_idle() {
-        assert_eq!(
-            derive_button_render_state(None),
-            ButtonRenderState::Idle
-        );
+        assert_eq!(derive_button_render_state(None), ButtonRenderState::Idle);
     }
 
     #[test]

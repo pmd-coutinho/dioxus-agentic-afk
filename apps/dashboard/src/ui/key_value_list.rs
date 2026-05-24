@@ -15,11 +15,7 @@ pub fn KeyValueList(children: Element) -> Element {
 /// One row of a `KeyValueList`. `mono` defaults to `true` so identifiers,
 /// paths, and timestamps line up; pass `mono: false` for prose values.
 #[component]
-pub fn KeyValueRow(
-    label: String,
-    value: String,
-    #[props(default = true)] mono: bool,
-) -> Element {
+pub fn KeyValueRow(label: String, value: String, #[props(default = true)] mono: bool) -> Element {
     let value_class = if mono {
         "min-w-0 break-words font-mono text-[13px] text-ink"
     } else {

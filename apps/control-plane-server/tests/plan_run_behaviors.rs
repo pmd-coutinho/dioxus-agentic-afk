@@ -209,8 +209,12 @@ async fn second_plan_run_returns_409_while_first_is_active() {
     // a second start — same observable contract as a real concurrent start.
     let db = persistence::connect_in_memory().await.unwrap();
     persistence::migrate(&db).await.unwrap();
-    let router =
-        router_with_plan_run_deps(test_config(), db.clone(), static_refresher(), empty_plan_planner());
+    let router = router_with_plan_run_deps(
+        test_config(),
+        db.clone(),
+        static_refresher(),
+        empty_plan_planner(),
+    );
     let project = make_project(&router).await;
     trust(&router, &project.id.0).await;
     set_config(&router, &project.id.0).await;
@@ -233,8 +237,12 @@ async fn second_plan_run_returns_409_while_first_is_active() {
 async fn list_plan_runs_returns_history_newest_first() {
     let db = persistence::connect_in_memory().await.unwrap();
     persistence::migrate(&db).await.unwrap();
-    let router =
-        router_with_plan_run_deps(test_config(), db.clone(), static_refresher(), empty_plan_planner());
+    let router = router_with_plan_run_deps(
+        test_config(),
+        db.clone(),
+        static_refresher(),
+        empty_plan_planner(),
+    );
     let project = make_project(&router).await;
     trust(&router, &project.id.0).await;
     set_config(&router, &project.id.0).await;
@@ -326,10 +334,7 @@ async fn execution_config_rejects_non_positive_concurrency() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri(format!(
-                    "/api/projects/{}/execution-config",
-                    project.id.0
-                ))
+                .uri(format!("/api/projects/{}/execution-config", project.id.0))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&SetProjectExecutionConfigRequest {
@@ -366,10 +371,7 @@ async fn planning_prompt_substitutes_integration_branch_and_baseline() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri(format!(
-                    "/api/projects/{}/execution-config",
-                    project.id.0
-                ))
+                .uri(format!("/api/projects/{}/execution-config", project.id.0))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&SetProjectExecutionConfigRequest {
@@ -390,7 +392,6 @@ async fn planning_prompt_substitutes_integration_branch_and_baseline() {
     assert!(prompt.contains("Plan Run Baseline: f00ba2"), "{prompt}");
     assert!(prompt.contains("Max Parallel Tasks: 7"), "{prompt}");
 }
-
 
 #[tokio::test]
 async fn planning_prompt_carries_project_instructions_and_source_brief() {

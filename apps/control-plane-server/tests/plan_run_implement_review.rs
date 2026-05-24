@@ -97,7 +97,8 @@ async fn build_fixture(
         Arc::new(FakePlanningPhaseRunner::with_stdout(
             r#"<plan>{"issues":[{"source_issue_id":"42","title":"t","branch":"agent/issue-42","selection_summary":"ok"}],"summary":"s"}</plan>"#,
         )),
-        Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir())) as Arc<dyn AssignmentWorktreeProvisioner>,
+        Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir()))
+            as Arc<dyn AssignmentWorktreeProvisioner>,
         Arc::new(FakeLifecycleWriter::new()) as Arc<dyn IssueLifecycleWriter>,
         impl_runner.clone() as Arc<dyn ImplementationPhaseRunner>,
         review_runner.clone() as Arc<dyn ReviewPhaseRunner>,
@@ -282,7 +283,10 @@ async fn implementation_prompt_carries_project_instructions_and_source_brief() {
         prompt.contains("issue brief body for 42"),
         "implementation prompt must include the raw Source Issue brief: {prompt}"
     );
-    assert!(prompt.contains("Plan Run Baseline: baseline-sha"), "{prompt}");
+    assert!(
+        prompt.contains("Plan Run Baseline: baseline-sha"),
+        "{prompt}"
+    );
     assert!(prompt.contains("Issue Branch: agent/issue-42"), "{prompt}");
     // Ensure no proposal-era outcome words slip in by mistake.
     assert!(
@@ -306,7 +310,10 @@ async fn review_prompt_includes_implementation_output_and_project_instructions()
         .review_runner
         .last_prompt()
         .expect("review runner called");
-    assert!(prompt.contains("Rule: respect repo conventions."), "{prompt}");
+    assert!(
+        prompt.contains("Rule: respect repo conventions."),
+        "{prompt}"
+    );
     assert!(prompt.contains("impl summary text"), "{prompt}");
     assert!(prompt.contains("Source Issue: 42"), "{prompt}");
 }
@@ -362,8 +369,7 @@ async fn rejected_review_with_exhausted_retry_limit_blocks_assignment_and_fails_
     assert!(runs[0].assignments[0].block_reason.is_some());
     // Review Phase Output is still persisted as durable Review Loop evidence.
     assert!(
-        runs[0]
-            .assignments[0]
+        runs[0].assignments[0]
             .phase_outputs
             .iter()
             .any(|p| p.phase == "review" && p.outcome == "rejected")

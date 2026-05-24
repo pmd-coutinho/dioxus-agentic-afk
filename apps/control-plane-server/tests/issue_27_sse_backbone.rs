@@ -118,26 +118,12 @@ async fn snapshot_sequence_advances_after_activity_publish() {
     // Publish two activities via the public publisher; sequences must
     // advance to 2 on the bus.
     let bus = EventBus::new();
-    control_plane_events::record_activity(
-        &db,
-        &bus,
-        &project.id.0,
-        None,
-        "seed_event_one",
-        None,
-    )
-    .await
-    .unwrap();
-    control_plane_events::record_activity(
-        &db,
-        &bus,
-        &project.id.0,
-        None,
-        "seed_event_two",
-        None,
-    )
-    .await
-    .unwrap();
+    control_plane_events::record_activity(&db, &bus, &project.id.0, None, "seed_event_one", None)
+        .await
+        .unwrap();
+    control_plane_events::record_activity(&db, &bus, &project.id.0, None, "seed_event_two", None)
+        .await
+        .unwrap();
     assert_eq!(bus.latest_sequence(&ProjectId(project.id.0.clone())), 2);
 
     // The snapshot still reads its own router-scoped bus (sequence 0 there).
@@ -248,7 +234,16 @@ async fn sse_endpoint_emits_live_events_and_resumes_on_last_event_id() {
 
     // First connection: subscribe before any events are published.
     let url = format!("http://{addr}/api/projects/{}/events", project.id.0);
-    let body = read_sse_until(&url, None, 2, std::time::Duration::from_secs(2), &bus, &db, &project.id.0).await;
+    let body = read_sse_until(
+        &url,
+        None,
+        2,
+        std::time::Duration::from_secs(2),
+        &bus,
+        &db,
+        &project.id.0,
+    )
+    .await;
     let parsed = parse_sse_events(&body);
     assert_eq!(parsed.len(), 2, "expected 2 events, got {parsed:?}");
     assert_eq!(parsed[0].id, "1");
@@ -257,17 +252,25 @@ async fn sse_endpoint_emits_live_events_and_resumes_on_last_event_id() {
     for (idx, item) in parsed.iter().enumerate() {
         let event: ProjectEvent = serde_json::from_str(&item.data).unwrap();
         match event {
-            ProjectEvent::Activity(entry) => assert_eq!(
-                entry.kind,
-                if idx == 0 { "first" } else { "second" }
-            ),
+            ProjectEvent::Activity(entry) => {
+                assert_eq!(entry.kind, if idx == 0 { "first" } else { "second" })
+            }
             other => panic!("expected Activity, got {other:?}"),
         }
     }
 
     // Reconnect with Last-Event-ID: 1; only sequence 2 should be replayed
     // since it is still in the ring.
-    let body = read_sse_until(&url, Some(1), 1, std::time::Duration::from_secs(2), &bus, &db, &project.id.0).await;
+    let body = read_sse_until(
+        &url,
+        Some(1),
+        1,
+        std::time::Duration::from_secs(2),
+        &bus,
+        &db,
+        &project.id.0,
+    )
+    .await;
     let parsed = parse_sse_events(&body);
     assert!(!parsed.is_empty(), "expected at least one replay event");
     assert_eq!(parsed[0].id, "2");
@@ -324,11 +327,26 @@ async fn sse_endpoint_emits_resync_when_last_event_id_predates_ring() {
 
     let url = format!("http://{addr}/api/projects/{}/events", project.id.0);
     // Last-Event-ID: 1 predates the ring (which holds 3, 4).
-    let body = read_sse_until(&url, Some(1), 1, std::time::Duration::from_secs(2), &bus, &db, &project.id.0).await;
+    let body = read_sse_until(
+        &url,
+        Some(1),
+        1,
+        std::time::Duration::from_secs(2),
+        &bus,
+        &db,
+        &project.id.0,
+    )
+    .await;
     let parsed = parse_sse_events(&body);
-    assert!(!parsed.is_empty(), "expected at least one frame, got: {body:?}");
+    assert!(
+        !parsed.is_empty(),
+        "expected at least one frame, got: {body:?}"
+    );
     let event: ProjectEvent = serde_json::from_str(&parsed[0].data).unwrap();
-    assert!(matches!(event, ProjectEvent::Resync), "expected Resync, got {event:?}");
+    assert!(
+        matches!(event, ProjectEvent::Resync),
+        "expected Resync, got {event:?}"
+    );
 }
 
 #[derive(Debug)]
@@ -379,9 +397,8 @@ async fn read_sse_until(
     let (host_port, path) = parsed.split_once('/').unwrap();
     let path = format!("/{path}");
 
-    let mut request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host_port}\r\nAccept: text/event-stream\r\n"
-    );
+    let mut request =
+        format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nAccept: text/event-stream\r\n");
     if let Some(id) = last_event_id {
         request.push_str(&format!("Last-Event-ID: {id}\r\n"));
     }

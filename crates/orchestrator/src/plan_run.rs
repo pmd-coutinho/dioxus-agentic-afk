@@ -421,30 +421,24 @@ pub fn parse_planning_output(stdout: &str) -> Result<ParsedPlanningOutput, Strin
 
 fn extract_planning_body(stdout: &str) -> Result<&str, String> {
     if let Some(end) = stdout.rfind("</plan>") {
-        let start = stdout[..end]
-            .rfind("<plan>")
-            .ok_or_else(|| {
-                format!(
-                    "planning output missing <plan> opening tag; output ends with: {}",
-                    excerpt_for_error(stdout)
-                )
-            })?
-            + "<plan>".len();
+        let start = stdout[..end].rfind("<plan>").ok_or_else(|| {
+            format!(
+                "planning output missing <plan> opening tag; output ends with: {}",
+                excerpt_for_error(stdout)
+            )
+        })? + "<plan>".len();
         if end < start {
             return Err("planning output has malformed <plan> tags".to_string());
         }
         return Ok(strip_json_code_fence(stdout[start..end].trim()));
     }
 
-    let start = stdout
-        .rfind("<plan>")
-        .ok_or_else(|| {
-            format!(
-                "planning output missing <plan> opening tag; output ends with: {}",
-                excerpt_for_error(stdout)
-            )
-        })?
-        + "<plan>".len();
+    let start = stdout.rfind("<plan>").ok_or_else(|| {
+        format!(
+            "planning output missing <plan> opening tag; output ends with: {}",
+            excerpt_for_error(stdout)
+        )
+    })? + "<plan>".len();
     Ok(strip_json_code_fence(stdout[start..].trim()))
 }
 
@@ -540,11 +534,7 @@ impl LifecycleStatus {
 /// the Claimed transition is a correctness invariant per ADR-0035, and
 /// every later transition is best-effort and recorded as Activity.
 pub trait IssueLifecycleWriter: Send + Sync {
-    fn write(
-        &self,
-        source_id: &str,
-        status: LifecycleStatus,
-    ) -> Result<(), PlanRunPhaseError>;
+    fn write(&self, source_id: &str, status: LifecycleStatus) -> Result<(), PlanRunPhaseError>;
 }
 
 /// Test provisioner that records its calls and returns a fixed worktree
@@ -619,11 +609,7 @@ impl Default for FakeLifecycleWriter {
 }
 
 impl IssueLifecycleWriter for FakeLifecycleWriter {
-    fn write(
-        &self,
-        source_id: &str,
-        status: LifecycleStatus,
-    ) -> Result<(), PlanRunPhaseError> {
+    fn write(&self, source_id: &str, status: LifecycleStatus) -> Result<(), PlanRunPhaseError> {
         self.calls
             .lock()
             .unwrap()
@@ -658,11 +644,7 @@ impl AssignmentWorktreeProvisioner for UnimplementedWorktreeProvisioner {
 pub struct UnimplementedLifecycleWriter;
 
 impl IssueLifecycleWriter for UnimplementedLifecycleWriter {
-    fn write(
-        &self,
-        _source_id: &str,
-        _status: LifecycleStatus,
-    ) -> Result<(), PlanRunPhaseError> {
+    fn write(&self, _source_id: &str, _status: LifecycleStatus) -> Result<(), PlanRunPhaseError> {
         Err(PlanRunPhaseError::LifecycleWrite(
             "real Issue Source lifecycle writer not implemented yet".to_string(),
         ))
@@ -686,11 +668,7 @@ pub trait MergePhaseRunner: Send + Sync {
 /// `git push`; tests inject a fake so the Integration Branch push
 /// boundary can be asserted without touching real git remotes.
 pub trait IntegrationBranchPusher: Send + Sync {
-    fn push(
-        &self,
-        project_path: &Path,
-        integration_branch: &str,
-    ) -> Result<(), PlanRunPhaseError>;
+    fn push(&self, project_path: &Path, integration_branch: &str) -> Result<(), PlanRunPhaseError>;
 }
 
 /// Clean up the Assignment Worktree and deterministic branch for one
@@ -856,11 +834,7 @@ impl Default for FakeIntegrationBranchPusher {
 }
 
 impl IntegrationBranchPusher for FakeIntegrationBranchPusher {
-    fn push(
-        &self,
-        project_path: &Path,
-        integration_branch: &str,
-    ) -> Result<(), PlanRunPhaseError> {
+    fn push(&self, project_path: &Path, integration_branch: &str) -> Result<(), PlanRunPhaseError> {
         self.calls
             .lock()
             .unwrap()
@@ -1395,8 +1369,7 @@ mod fake_pusher_tests {
     #[test]
     #[should_panic(expected = "script is exhausted")]
     fn scripted_pusher_panics_when_over_called() {
-        let pusher =
-            FakeIntegrationBranchPusher::with_outcomes(vec![FakePushOutcome::Success]);
+        let pusher = FakeIntegrationBranchPusher::with_outcomes(vec![FakePushOutcome::Success]);
         let path = PathBuf::from("/tmp/proj");
         let _ = pusher.push(&path, "main");
         let _ = pusher.push(&path, "main");

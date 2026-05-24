@@ -137,7 +137,11 @@ async fn mark_prd_moves_eligible_issue_into_overrides_bucket() {
     let project = seed_project_with_eligible_issue(&app).await;
 
     let before = fetch_planning(&app, &project.id.0).await;
-    let eligible_ids: Vec<&str> = before.eligible.iter().map(|i| i.source_id.as_str()).collect();
+    let eligible_ids: Vec<&str> = before
+        .eligible
+        .iter()
+        .map(|i| i.source_id.as_str())
+        .collect();
     assert!(eligible_ids.contains(&"001-prd"));
     assert!(eligible_ids.contains(&"002-work"));
     assert!(before.prd_overrides.is_empty());
@@ -159,7 +163,11 @@ async fn mark_prd_moves_eligible_issue_into_overrides_bucket() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let after = fetch_planning(&app, &project.id.0).await;
-    let eligible_ids: Vec<&str> = after.eligible.iter().map(|i| i.source_id.as_str()).collect();
+    let eligible_ids: Vec<&str> = after
+        .eligible
+        .iter()
+        .map(|i| i.source_id.as_str())
+        .collect();
     assert!(!eligible_ids.contains(&"001-prd"));
     assert!(eligible_ids.contains(&"002-work"));
     let prd_ids: Vec<&str> = after

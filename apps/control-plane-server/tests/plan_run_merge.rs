@@ -112,8 +112,9 @@ async fn build_fixture(
         Arc::new(FakePlanningPhaseRunner::with_stdout(
             r#"<plan>{"issues":[{"source_issue_id":"42","title":"t","branch":"agent/issue-42","selection_summary":"baseline ready"}],"summary":"s"}</plan>"#,
         )),
-        Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir().join("agentic-afk-merge-wt")))
-            as Arc<dyn AssignmentWorktreeProvisioner>,
+        Arc::new(FakeWorktreeProvisioner::new(
+            std::env::temp_dir().join("agentic-afk-merge-wt"),
+        )) as Arc<dyn AssignmentWorktreeProvisioner>,
         Arc::new(FakeLifecycleWriter::new()) as Arc<dyn IssueLifecycleWriter>,
         impl_runner.clone() as Arc<dyn ImplementationPhaseRunner>,
         review_runner.clone() as Arc<dyn ReviewPhaseRunner>,
@@ -241,7 +242,12 @@ async fn successful_merge_completes_source_issue_and_finishes_plan_run() {
     let fixture = build_fixture(IMPL_OK, REVIEW_APPROVED, MERGE_OK, None).await;
     let pid = fixture.project.id.0.clone();
     let resp = start(&fixture.router, &pid).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{}",
+        read_text(resp).await
+    );
 
     // Plan Run finishes as `succeeded` (not `succeeded_empty` — that
     // outcome is reserved for empty Planning Phases).
@@ -273,10 +279,7 @@ async fn successful_merge_completes_source_issue_and_finishes_plan_run() {
         .expect("push Phase Output recorded on Plan Run");
     assert_eq!(push_output.outcome, "succeeded");
     assert!(push_output.assignment_id.is_none());
-    assert_eq!(
-        push_output.body_json["fast_forward"].as_bool(),
-        Some(true)
-    );
+    assert_eq!(push_output.body_json["fast_forward"].as_bool(), Some(true));
 
     // Durable merge Phase Output attributed to the assignment with
     // verification evidence preserved.
@@ -314,7 +317,12 @@ async fn blocked_merge_does_not_push_and_fails_plan_run_with_block_reason() {
     let fixture = build_fixture(IMPL_OK, REVIEW_APPROVED, MERGE_BLOCKED, None).await;
     let pid = fixture.project.id.0.clone();
     let resp = start(&fixture.router, &pid).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{}",
+        read_text(resp).await
+    );
 
     let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 10)
         .await
@@ -580,7 +588,12 @@ async fn merge_phase_failure_blocks_assignment_and_fails_plan_run() {
     // the worktree is cleaned up at Plan Run finish, and the Plan Run
     // settles as `failed` (no merged work). The HTTP response carries
     // the final Plan Run shape.
-    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{}",
+        read_text(resp).await
+    );
 
     assert_eq!(pusher.call_count(), 0, "no push on merge runner failure");
     // Worktree IS cleaned at Plan Run finish (issue #46) for blocked
@@ -592,7 +605,9 @@ async fn merge_phase_failure_blocks_assignment_and_fails_plan_run() {
     );
 
     // Plan Run is failed, assignment is blocked.
-    let runs = persistence::list_recent_plan_runs(&db, &pid, 10).await.unwrap();
+    let runs = persistence::list_recent_plan_runs(&db, &pid, 10)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].state, "failed");
     assert_eq!(runs[0].assignments[0].status, "blocked");
@@ -951,7 +966,12 @@ async fn happy_path_push_passes_assignment_through_merge_staged_to_merged() {
     let mut subscriber = Box::pin(bus.subscribe(&ProjectId(pid.clone()), None));
 
     let resp = start(&router, &pid).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{}",
+        read_text(resp).await
+    );
 
     // Plan Run is `succeeded` and the assignment ended at `merged`.
     let runs = persistence::list_recent_plan_runs(&db, &pid, 10)
@@ -1266,10 +1286,7 @@ async fn retry_push_success_advances_staged_to_merged_and_plan_run_stays_failed(
         .calls()
         .into_iter()
         .filter(|(_, status)| {
-            matches!(
-                status,
-                agentic_afk_orchestrator::LifecycleStatus::Completed
-            )
+            matches!(status, agentic_afk_orchestrator::LifecycleStatus::Completed)
         })
         .collect();
     assert_eq!(
@@ -1372,7 +1389,10 @@ async fn retry_push_non_fast_forward_blocks_assignment_with_push_non_fast_forwar
     assert!(push_outputs.iter().all(|p| p.outcome == "failed"));
     // The retry attempt is a non-fast-forward: typed Push body carries
     // `fast_forward=false`, the upstream stderr, and the 1-indexed attempt.
-    assert_eq!(push_outputs[1].body_json["fast_forward"].as_bool(), Some(false));
+    assert_eq!(
+        push_outputs[1].body_json["fast_forward"].as_bool(),
+        Some(false)
+    );
     assert_eq!(push_outputs[1].body_json["attempt"].as_u64(), Some(2));
     assert!(
         push_outputs[1].body_json["stderr"]
@@ -1395,10 +1415,7 @@ async fn retry_push_non_fast_forward_blocks_assignment_with_push_non_fast_forwar
         .calls()
         .into_iter()
         .filter(|(_, status)| {
-            matches!(
-                status,
-                agentic_afk_orchestrator::LifecycleStatus::Completed
-            )
+            matches!(status, agentic_afk_orchestrator::LifecycleStatus::Completed)
         })
         .collect();
     assert!(completed.is_empty());
@@ -1446,10 +1463,7 @@ async fn retry_push_transient_other_failure_leaves_assignment_merge_staged() {
         .calls()
         .into_iter()
         .filter(|(_, status)| {
-            matches!(
-                status,
-                agentic_afk_orchestrator::LifecycleStatus::Completed
-            )
+            matches!(status, agentic_afk_orchestrator::LifecycleStatus::Completed)
         })
         .collect();
     assert!(completed.is_empty());
@@ -1468,7 +1482,10 @@ async fn retry_push_transient_other_failure_leaves_assignment_merge_staged() {
     assert!(push_outputs.iter().all(|p| p.outcome == "failed"));
     // Transient `Other` failure: typed Push body carries
     // `fast_forward=false`, the upstream stderr, and the 1-indexed attempt.
-    assert_eq!(push_outputs[1].body_json["fast_forward"].as_bool(), Some(false));
+    assert_eq!(
+        push_outputs[1].body_json["fast_forward"].as_bool(),
+        Some(false)
+    );
     assert_eq!(push_outputs[1].body_json["attempt"].as_u64(), Some(2));
     assert!(
         !push_outputs[1].body_json["stderr"]
@@ -1490,18 +1507,20 @@ async fn call_abandon_staged(
     assignment_id: &str,
     body: Option<&serde_json::Value>,
 ) -> axum::response::Response {
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri(format!(
-            "/api/projects/{project_id}/assignments/{assignment_id}/abandon-staged"
-        ));
+    let mut builder = Request::builder().method("POST").uri(format!(
+        "/api/projects/{project_id}/assignments/{assignment_id}/abandon-staged"
+    ));
     let body = if let Some(value) = body {
         builder = builder.header("content-type", "application/json");
         Body::from(serde_json::to_string(value).unwrap())
     } else {
         Body::empty()
     };
-    router.clone().oneshot(builder.body(body).unwrap()).await.unwrap()
+    router
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap()
 }
 
 #[tokio::test]

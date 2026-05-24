@@ -129,8 +129,8 @@ impl TrackedPhase {
         // PhaseOutputBody is a typed enum derived with serde — `to_value`
         // cannot fail. Unwrapping here is safer than introducing a sqlx
         // dep on the orchestrator crate solely to wrap the error.
-        let body_json = serde_json::to_value(&body)
-            .expect("PhaseOutputBody serialization is infallible");
+        let body_json =
+            serde_json::to_value(&body).expect("PhaseOutputBody serialization is infallible");
         Ok(PhaseOutputResponse {
             phase: self.phase.to_string(),
             outcome: outcome.to_string(),
@@ -159,10 +159,7 @@ impl TrackedPhase {
 /// [`TrackedPhase::fail`]. Prefer [`run`] when the terminal write can
 /// happen inside a single closure; use `start` when the row body depends
 /// on validation steps that happen after the Codex Sandbox returns.
-pub async fn start(
-    db: &Db,
-    locator: PhaseLocator,
-) -> Result<TrackedPhase, PersistenceError> {
+pub async fn start(db: &Db, locator: PhaseLocator) -> Result<TrackedPhase, PersistenceError> {
     let row_id = insert_in_flight_phase_output(
         db,
         &locator.plan_run_id,

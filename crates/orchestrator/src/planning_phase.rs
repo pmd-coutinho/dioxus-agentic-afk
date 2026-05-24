@@ -9,9 +9,7 @@
 //! worktree provisioning, or a typed `PlanningRejection` the coordinator
 //! maps to an RFC-7807 problem response.
 
-use agentic_afk_contracts::{
-    ProjectExecutionConfigResponse, ProjectResponse, SourceIssueSnapshot,
-};
+use agentic_afk_contracts::{ProjectExecutionConfigResponse, ProjectResponse, SourceIssueSnapshot};
 
 use crate::coordinator::CoordinatorError;
 use crate::plan_run::{
@@ -53,11 +51,9 @@ pub enum PlanningRejection {
 impl From<PlanningRejection> for CoordinatorError {
     fn from(rejection: PlanningRejection) -> Self {
         match rejection {
-            PlanningRejection::Unparseable(error) => CoordinatorError::new(
-                500,
-                "urn:agentic-afk:planning-output-unparseable",
-                error,
-            ),
+            PlanningRejection::Unparseable(error) => {
+                CoordinatorError::new(500, "urn:agentic-afk:planning-output-unparseable", error)
+            }
             PlanningRejection::ExceedsMaxParallel { got, cap } => CoordinatorError::new(
                 500,
                 "urn:agentic-afk:planning-exceeds-max-parallel",
@@ -209,8 +205,8 @@ mod tests {
     fn pairs_selections_with_eligible_snapshots() {
         let parsed = parsed_with(&format!("[{}]", selection_object("42")));
         let eligible = vec![snapshot("42"), snapshot("99")];
-        let claims = validate_planner_selection(&parsed, &eligible, 2, true)
-            .expect("validation succeeds");
+        let claims =
+            validate_planner_selection(&parsed, &eligible, 2, true).expect("validation succeeds");
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].selection.source_issue_id, "42");
         assert_eq!(claims[0].eligible_issue.source_id, "42");

@@ -35,7 +35,12 @@ pub fn summarize_project_path(path: impl AsRef<Path>) -> Option<GitSummary> {
 pub fn detect_default_branch(project_path: &Path) -> Option<String> {
     let output = Command::new("git")
         .current_dir(project_path)
-        .args(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+        .args([
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {

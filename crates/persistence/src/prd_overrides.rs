@@ -39,13 +39,11 @@ pub async fn unmark_prd(
     project_id: &str,
     source_id: &str,
 ) -> Result<Vec<PrdOverride>, PersistenceError> {
-    sqlx::query(
-        "DELETE FROM project_prd_overrides WHERE project_id = ?1 AND source_id = ?2",
-    )
-    .bind(project_id)
-    .bind(source_id)
-    .execute(db)
-    .await?;
+    sqlx::query("DELETE FROM project_prd_overrides WHERE project_id = ?1 AND source_id = ?2")
+        .bind(project_id)
+        .bind(source_id)
+        .execute(db)
+        .await?;
     list_prd_overrides(db, project_id).await
 }
 
@@ -62,6 +60,9 @@ pub async fn list_prd_overrides(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(source_id, marked_at)| PrdOverride { source_id, marked_at })
+        .map(|(source_id, marked_at)| PrdOverride {
+            source_id,
+            marked_at,
+        })
         .collect())
 }

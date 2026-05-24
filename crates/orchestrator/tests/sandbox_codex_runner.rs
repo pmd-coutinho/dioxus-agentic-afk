@@ -14,15 +14,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agentic_afk_contracts::{
-    IssueAssignmentResponse, PlanRunResponse, ProjectId, ProjectResponse,
-};
+use agentic_afk_contracts::{IssueAssignmentResponse, PlanRunResponse, ProjectId, ProjectResponse};
+use agentic_afk_orchestrator::plan_run::AssignmentContext;
 use agentic_afk_orchestrator::{
     DockerCodexRunner, FakeSandboxLauncher, ImplementationPhaseRunner, MergePhaseRunner,
     PlanRunPhaseError, PlanningPhaseRunner, ReviewPhaseRunner, SandboxError, SandboxMount,
     SandboxPhase,
 };
-use agentic_afk_orchestrator::plan_run::AssignmentContext;
 
 fn project(path: &str) -> ProjectResponse {
     ProjectResponse {
@@ -246,25 +244,29 @@ fn every_launch_carries_the_five_labels_and_auth_config_cache_mounts() {
         "config bind mount missing"
     );
     assert!(
-        launch
-            .mounts
-            .iter()
-            .any(|m| matches!(m, SandboxMount::Volume { name, .. } if name == "agentic-afk-mise-cache")),
+        launch.mounts.iter().any(
+            |m| matches!(m, SandboxMount::Volume { name, .. } if name == "agentic-afk-mise-cache")
+        ),
         "mise cache volume mount missing"
     );
 
     // HOME env always points at the per-container codex home.
-    assert!(launch.env.iter().any(|(k, v)| k == "HOME" && v == "/tmp/codex-home"));
+    assert!(
+        launch
+            .env
+            .iter()
+            .any(|(k, v)| k == "HOME" && v == "/tmp/codex-home")
+    );
 }
 
 #[test]
 fn implementation_runner_error_maps_to_implementation_variant_not_planning() {
-    let launcher = Arc::new(
-        FakeSandboxLauncher::with_stdout("").fail_with(SandboxError::NonZero {
+    let launcher = Arc::new(FakeSandboxLauncher::with_stdout("").fail_with(
+        SandboxError::NonZero {
             status: 1,
             stderr: "codex blew up".to_string(),
-        }),
-    );
+        },
+    ));
     let runner = make_runner(launcher.clone(), SandboxPhase::Implementation);
     let project = project("/host/proj");
     let plan_run = plan_run();
@@ -283,12 +285,12 @@ fn implementation_runner_error_maps_to_implementation_variant_not_planning() {
 
 #[test]
 fn review_runner_error_maps_to_review_variant_not_planning() {
-    let launcher = Arc::new(
-        FakeSandboxLauncher::with_stdout("").fail_with(SandboxError::NonZero {
+    let launcher = Arc::new(FakeSandboxLauncher::with_stdout("").fail_with(
+        SandboxError::NonZero {
             status: 1,
             stderr: "codex blew up".to_string(),
-        }),
-    );
+        },
+    ));
     let runner = make_runner(launcher.clone(), SandboxPhase::Review);
     let project = project("/host/proj");
     let plan_run = plan_run();
@@ -307,12 +309,12 @@ fn review_runner_error_maps_to_review_variant_not_planning() {
 
 #[test]
 fn merge_runner_error_maps_to_merge_variant() {
-    let launcher = Arc::new(
-        FakeSandboxLauncher::with_stdout("").fail_with(SandboxError::NonZero {
+    let launcher = Arc::new(FakeSandboxLauncher::with_stdout("").fail_with(
+        SandboxError::NonZero {
             status: 1,
             stderr: "codex blew up".to_string(),
-        }),
-    );
+        },
+    ));
     let runner = make_runner(launcher.clone(), SandboxPhase::Merge);
     let project = project("/host/proj");
     let plan_run = plan_run();

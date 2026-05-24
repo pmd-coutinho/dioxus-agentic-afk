@@ -44,10 +44,7 @@ where
         let Ok(parsed) = serde_json::from_str::<ProjectEvent>(&data) else {
             return;
         };
-        let sequence = event
-            .last_event_id()
-            .parse::<u64>()
-            .unwrap_or(0);
+        let sequence = event.last_event_id().parse::<u64>().unwrap_or(0);
         on_event(sequence, parsed);
     });
     source.set_onmessage(Some(on_message.as_ref().unchecked_ref()));

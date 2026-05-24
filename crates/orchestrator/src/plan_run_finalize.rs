@@ -85,7 +85,10 @@ mod tests {
             planning_was_empty: true,
             outcomes: vec![],
         };
-        assert_eq!(decide_plan_run_terminal(&input), PlanRunTerminal::SucceededEmpty);
+        assert_eq!(
+            decide_plan_run_terminal(&input),
+            PlanRunTerminal::SucceededEmpty
+        );
     }
 
     #[test]

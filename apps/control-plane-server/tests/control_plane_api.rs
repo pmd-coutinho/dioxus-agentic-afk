@@ -1,7 +1,6 @@
 use agentic_afk_contracts::{
     CreateProjectRequest, EnableIssueSourceRequest, HealthResponse, IssueAssignmentResponse,
-    PlanningSnapshotResponse, ProblemDetail, ProjectResponse,
-    SourceIssueSnapshot,
+    PlanningSnapshotResponse, ProblemDetail, ProjectResponse, SourceIssueSnapshot,
 };
 use agentic_afk_control_plane_server::{ControlPlaneConfig, router};
 use agentic_afk_persistence::{self as persistence};
@@ -190,7 +189,10 @@ async fn local_control_plane_reports_health_and_truthful_app_info() {
     assert_eq!(app_info.api_status, "connected");
     assert_eq!(app_info.version, env!("CARGO_PKG_VERSION"));
     assert_eq!(app_info.config.bind_address, "127.0.0.1:0");
-    assert_eq!(app_info.config.dashboard_asset_dir, "target/dx/agentic-afk-dashboard/release/web/public");
+    assert_eq!(
+        app_info.config.dashboard_asset_dir,
+        "target/dx/agentic-afk-dashboard/release/web/public"
+    );
     assert_eq!(app_info.config.database_url, "sqlite::memory:");
 }
 
@@ -390,7 +392,13 @@ async fn create_project_via_api() {
     assert_eq!(response.status(), StatusCode::CREATED);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let project: ProjectResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(project.path, "/tmp");
+    assert_eq!(
+        project.path,
+        std::fs::canonicalize("/tmp")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    );
     assert!(!project.id.0.is_empty());
     assert_eq!(project.trusted, false);
     assert_eq!(project.git_summary, None);

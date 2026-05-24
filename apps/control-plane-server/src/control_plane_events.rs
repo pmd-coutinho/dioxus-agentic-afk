@@ -33,9 +33,9 @@ use std::future::Future;
 
 use agentic_afk_contracts::{
     AssignmentAttemptResponse, AutoReplanState, IssueAssignmentResponse, IssueSourceCandidate,
-    IssueSourceSyncResponse, PhaseOutputResponse, PlanRunResponse, PlanningSnapshotResponse,
-    PauseReason, ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse,
-    ProjectId, ProjectResponse,
+    IssueSourceSyncResponse, PauseReason, PhaseOutputResponse, PlanRunResponse,
+    PlanningSnapshotResponse, ProjectActivityEntryResponse, ProjectEvent,
+    ProjectExecutionConfigResponse, ProjectId, ProjectResponse,
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError, ProjectActivityEntry};
 
@@ -75,14 +75,8 @@ pub async fn record_activity(
     kind: &str,
     detail: Option<&str>,
 ) -> Result<ProjectActivityEntry, PersistenceError> {
-    let entry = persistence::record_project_activity(
-        db,
-        project_id,
-        assignment_id,
-        kind,
-        detail,
-    )
-    .await?;
+    let entry =
+        persistence::record_project_activity(db, project_id, assignment_id, kind, detail).await?;
     let wire = ProjectActivityEntryResponse {
         id: entry.id.clone(),
         project_id: entry.project_id.clone(),
@@ -91,7 +85,10 @@ pub async fn record_activity(
         detail: entry.detail.clone(),
         recorded_at: entry.recorded_at.clone(),
     };
-    bus.publish(&ProjectId(project_id.to_string()), ProjectEvent::Activity(wire));
+    bus.publish(
+        &ProjectId(project_id.to_string()),
+        ProjectEvent::Activity(wire),
+    );
     Ok(entry)
 }
 
@@ -147,7 +144,11 @@ pub fn publish_auto_replan_state_changed(
     )
 }
 
-pub fn publish_assignment_created(bus: &EventBus, project_id: &str, assignment: IssueAssignmentResponse) -> u64 {
+pub fn publish_assignment_created(
+    bus: &EventBus,
+    project_id: &str,
+    assignment: IssueAssignmentResponse,
+) -> u64 {
     bus.publish(
         &ProjectId(project_id.to_string()),
         ProjectEvent::AssignmentCreated(assignment),
@@ -180,7 +181,11 @@ pub fn publish_assignment_attempt_added(
     )
 }
 
-pub fn publish_plan_run_started(bus: &EventBus, project_id: &str, plan_run: PlanRunResponse) -> u64 {
+pub fn publish_plan_run_started(
+    bus: &EventBus,
+    project_id: &str,
+    plan_run: PlanRunResponse,
+) -> u64 {
     bus.publish(
         &ProjectId(project_id.to_string()),
         ProjectEvent::PlanRunStarted(plan_run),
@@ -202,7 +207,11 @@ pub fn publish_plan_run_phase_completed(
     )
 }
 
-pub fn publish_plan_run_completed(bus: &EventBus, project_id: &str, plan_run: PlanRunResponse) -> u64 {
+pub fn publish_plan_run_completed(
+    bus: &EventBus,
+    project_id: &str,
+    plan_run: PlanRunResponse,
+) -> u64 {
     bus.publish(
         &ProjectId(project_id.to_string()),
         ProjectEvent::PlanRunCompleted(plan_run),

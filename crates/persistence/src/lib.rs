@@ -26,17 +26,15 @@ pub use activity::{
     record_project_activity,
 };
 pub use auto_replan::{AutoReplanStateStore, AutoReplanStatus};
-pub use prd_overrides::{PrdOverride, list_prd_overrides, mark_prd, unmark_prd};
 pub use plan_run::{
-    InFlightPhaseRowSummary, complete_in_flight_phase_output, create_plan_run,
-    finish_plan_run, get_active_plan_run, get_plan_run, get_project_execution_config,
-    insert_in_flight_phase_output, list_assignment_phase_outputs,
-    list_in_flight_phase_rows, list_recent_plan_runs, mark_in_flight_rows_interrupted,
-    mark_phase_row_interrupted, record_assignment_phase_output,
+    InFlightPhaseRowSummary, complete_in_flight_phase_output, create_plan_run, finish_plan_run,
+    get_active_plan_run, get_plan_run, get_project_execution_config, insert_in_flight_phase_output,
+    list_assignment_phase_outputs, list_in_flight_phase_rows, list_recent_plan_runs,
+    mark_in_flight_rows_interrupted, mark_phase_row_interrupted, record_assignment_phase_output,
     record_assignment_phase_output_typed, record_in_flight_phase_process,
-    record_plan_run_phase_output, record_plan_run_phase_output_typed,
-    set_project_execution_config,
+    record_plan_run_phase_output, record_plan_run_phase_output_typed, set_project_execution_config,
 };
+pub use prd_overrides::{PrdOverride, list_prd_overrides, mark_prd, unmark_prd};
 
 // Re-export new Plan Run assignment helpers at the crate root for
 // convenience; defined further down in this module.
@@ -1468,7 +1466,8 @@ mod tests {
             summary: String::new(),
         };
         let result =
-            record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "failed", &body).await;
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "failed", &body)
+                .await;
         assert!(
             matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
             "expected PhaseOutputMismatch, got {result:?}"
@@ -1495,7 +1494,8 @@ mod tests {
             problem_type: None,
         };
         let result =
-            record_plan_run_phase_output_typed(&db, &plan_run.id, "review", "approved", &body).await;
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "review", "approved", &body)
+                .await;
         assert!(
             matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
             "expected PhaseOutputMismatch, got {result:?}"
@@ -1523,19 +1523,26 @@ mod tests {
             error: huge_error.clone(),
             problem_type: None,
         };
-        let stored = record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "failed", &body)
-            .await
-            .unwrap();
+        let stored =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "failed", &body)
+                .await
+                .unwrap();
         // The stored body must carry a `truncated_at: <bytes>` marker.
         let marker = stored
             .body_json
             .get("truncated_at")
             .and_then(serde_json::Value::as_u64);
-        assert!(marker.is_some(), "body_json missing truncated_at marker: {stored:?}");
+        assert!(
+            marker.is_some(),
+            "body_json missing truncated_at marker: {stored:?}"
+        );
         let bytes = marker.unwrap();
         // The marker records the original serialized size (the byte count
         // that triggered truncation), which must exceed the ceiling.
-        assert!(bytes > PHASE_OUTPUT_BODY_MAX_BYTES as u64, "marker bytes {bytes}");
+        assert!(
+            bytes > PHASE_OUTPUT_BODY_MAX_BYTES as u64,
+            "marker bytes {bytes}"
+        );
         // Round-trip via list to verify it persists on disk truncated.
         let reloaded = get_plan_run(&db, &plan_run.id).await.unwrap();
         let row = reloaded
@@ -1568,9 +1575,10 @@ mod tests {
             error: "planner unparseable".to_string(),
             problem_type: Some("urn:agentic-afk:planning-output-unparseable".to_string()),
         };
-        let stored = record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "failed", &body)
-            .await
-            .unwrap();
+        let stored =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "failed", &body)
+                .await
+                .unwrap();
         // The SQL `phase` column tracks the originating phase identity
         // (per ADR-0038 the outer `phase` column stays as `planning` /
         // `implementation` / `review` / `merge` / `push`). The body JSON's
@@ -1732,9 +1740,14 @@ mod tests {
             gaps: vec![],
             summary: "x".into(),
         };
-        let result =
-            record_plan_run_phase_output_typed(&db, &plan_run.id, "review", "ready_for_review", &body)
-                .await;
+        let result = record_plan_run_phase_output_typed(
+            &db,
+            &plan_run.id,
+            "review",
+            "ready_for_review",
+            &body,
+        )
+        .await;
         assert!(
             matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
             "expected PhaseOutputMismatch, got {result:?}"
@@ -1816,8 +1829,7 @@ mod tests {
         // `approved` belongs to the Review pairing — Merge bodies must
         // never land with a non-merge outcome.
         let result =
-            record_plan_run_phase_output_typed(&db, &plan_run.id, "merge", "approved", &body)
-                .await;
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "merge", "approved", &body).await;
         assert!(
             matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
             "expected PhaseOutputMismatch, got {result:?}"
@@ -1846,13 +1858,16 @@ mod tests {
             fast_forward: true,
             attempt: 1,
         };
-        let stored = record_plan_run_phase_output_typed(&db, &plan_run.id, "push", "succeeded", &succ)
-            .await
-            .unwrap();
+        let stored =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "push", "succeeded", &succ)
+                .await
+                .unwrap();
         assert_eq!(stored.phase, "push");
         assert_eq!(stored.outcome, "succeeded");
-        assert!(stored.assignment_id.is_none(),
-            "push Phase Output must be Plan-Run-scoped (assignment_id = None)");
+        assert!(
+            stored.assignment_id.is_none(),
+            "push Phase Output must be Plan-Run-scoped (assignment_id = None)"
+        );
 
         // Push body paired with `failed` carries the upstream stderr.
         let failed = PhaseOutputBody::Push {
@@ -1860,9 +1875,10 @@ mod tests {
             fast_forward: false,
             attempt: 2,
         };
-        let stored = record_plan_run_phase_output_typed(&db, &plan_run.id, "push", "failed", &failed)
-            .await
-            .unwrap();
+        let stored =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "push", "failed", &failed)
+                .await
+                .unwrap();
         assert_eq!(stored.outcome, "failed");
         assert!(stored.assignment_id.is_none());
         assert_eq!(
@@ -1933,15 +1949,10 @@ mod tests {
                 reason: "depends on #62".into(),
             }],
         };
-        let stored = record_plan_run_phase_output_typed(
-            &db,
-            &plan_run.id,
-            "planning",
-            "succeeded",
-            &body,
-        )
-        .await
-        .unwrap();
+        let stored =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "succeeded", &body)
+                .await
+                .unwrap();
         assert_eq!(stored.phase, "planning");
         assert_eq!(stored.outcome, "succeeded");
         assert_eq!(
@@ -2004,14 +2015,9 @@ mod tests {
         };
         // Empty selections must pair with `succeeded_empty`, never with
         // plain `succeeded`.
-        let result = record_plan_run_phase_output_typed(
-            &db,
-            &plan_run.id,
-            "planning",
-            "succeeded",
-            &body,
-        )
-        .await;
+        let result =
+            record_plan_run_phase_output_typed(&db, &plan_run.id, "planning", "succeeded", &body)
+                .await;
         assert!(
             matches!(result, Err(PersistenceError::PhaseOutputMismatch { .. })),
             "expected PhaseOutputMismatch, got {result:?}"
@@ -2098,7 +2104,10 @@ mod tests {
             .await
             .unwrap();
         let after_complete = list_in_flight_phase_rows(&db).await.unwrap();
-        assert!(after_complete.is_empty(), "completed row no longer in-flight");
+        assert!(
+            after_complete.is_empty(),
+            "completed row no longer in-flight"
+        );
 
         let outputs = list_phase_outputs_for_tests(&db, &plan_run.id).await;
         assert_eq!(outputs.len(), 1, "exactly one row per phase invocation");
@@ -2142,10 +2151,7 @@ mod tests {
         assert_eq!(second[0].outcome, "interrupted");
     }
 
-    async fn list_phase_outputs_for_tests(
-        db: &Db,
-        plan_run_id: &str,
-    ) -> Vec<(String, String)> {
+    async fn list_phase_outputs_for_tests(db: &Db, plan_run_id: &str) -> Vec<(String, String)> {
         sqlx::query_as::<_, (String, String)>(
             "SELECT phase, outcome FROM plan_run_phase_outputs WHERE plan_run_id = ? ORDER BY recorded_at",
         )

@@ -31,9 +31,7 @@
 use std::collections::BTreeSet;
 
 use agentic_afk_contracts::{BlockReason, IssueAssignmentResponse};
-use agentic_afk_persistence::{
-    self as persistence, Db, InFlightPhaseRowSummary, PersistenceError,
-};
+use agentic_afk_persistence::{self as persistence, Db, InFlightPhaseRowSummary, PersistenceError};
 
 use crate::coordinator::EventPublisher;
 
@@ -112,10 +110,7 @@ pub struct RecoveryReport {
 /// best-effort — recovery succeeds even if SSE/event publishing has not
 /// started yet (the rows are durable, so a later dashboard reconnect
 /// will see the recovered state on the next snapshot fetch).
-pub async fn run(
-    db: &Db,
-    events: &dyn EventPublisher,
-) -> Result<RecoveryReport, PersistenceError> {
+pub async fn run(db: &Db, events: &dyn EventPublisher) -> Result<RecoveryReport, PersistenceError> {
     let rows = persistence::list_in_flight_phase_rows(db).await?;
     let mut report = RecoveryReport {
         rows_scanned: rows.len(),
@@ -165,8 +160,7 @@ async fn process_row(
             report.planning_rows_recovered += 1;
         }
         Some(assignment_id) => {
-            let assignment =
-                persistence::get_issue_assignment_public(db, assignment_id).await?;
+            let assignment = persistence::get_issue_assignment_public(db, assignment_id).await?;
             match assignment.status.as_str() {
                 "merge_staged" => {
                     // ADR-0042: a staged push is itself a recoverable
@@ -255,7 +249,8 @@ async fn maybe_finish_plan_run(
     if !all_terminal {
         return Ok(false);
     }
-    let finished = persistence::finish_plan_run(db, plan_run_id, PLAN_RUN_TERMINAL_FINISHED).await?;
+    let finished =
+        persistence::finish_plan_run(db, plan_run_id, PLAN_RUN_TERMINAL_FINISHED).await?;
     events.plan_run_completed(&plan_run.project_id.0, finished);
     Ok(true)
 }
@@ -266,8 +261,7 @@ mod tests {
     use agentic_afk_contracts::{CreateProjectRequest, IssueSource, SourceIssueSnapshot};
     use agentic_afk_persistence::{
         connect_in_memory, create_plan_run, create_plan_run_assignment, create_project,
-        insert_in_flight_phase_output, list_project_activity, migrate,
-        set_assignment_status,
+        insert_in_flight_phase_output, list_project_activity, migrate, set_assignment_status,
     };
     use std::sync::Mutex;
 
@@ -308,12 +302,7 @@ mod tests {
             _phase_output: agentic_afk_contracts::PhaseOutputResponse,
         ) {
         }
-        fn assignment_created(
-            &self,
-            _project_id: &str,
-            _assignment: IssueAssignmentResponse,
-        ) {
-        }
+        fn assignment_created(&self, _project_id: &str, _assignment: IssueAssignmentResponse) {}
         fn assignment_status_changed(
             &self,
             _project_id: &str,
@@ -415,10 +404,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(assignment.status, "blocked");
-        let kind = assignment
-            .block_reason
-            .as_ref()
-            .map(|r| r.kind);
+        let kind = assignment.block_reason.as_ref().map(|r| r.kind);
         assert_eq!(kind, Some(BlockReason::OrchestratorRestart));
 
         let activities = list_project_activity(&db, &project_id, 10).await.unwrap();
@@ -473,14 +459,9 @@ mod tests {
         set_assignment_status(&db, &assignment.id, "merge_staged", None)
             .await
             .unwrap();
-        let _row = insert_in_flight_phase_output(
-            &db,
-            &plan_run_id,
-            Some(&assignment.id),
-            "merge",
-        )
-        .await
-        .unwrap();
+        let _row = insert_in_flight_phase_output(&db, &plan_run_id, Some(&assignment.id), "merge")
+            .await
+            .unwrap();
 
         let events = CapturingEvents::new();
         let report = run(&db, &events).await.unwrap();
@@ -535,6 +516,9 @@ mod tests {
             .iter()
             .filter(|a| a.kind == ACTIVITY_KIND_ASSIGNMENT_BLOCKED_ON_RESTART)
             .count();
-        assert_eq!(count, 1, "exactly one Activity entry per recovered assignment");
+        assert_eq!(
+            count, 1,
+            "exactly one Activity entry per recovered assignment"
+        );
     }
 }

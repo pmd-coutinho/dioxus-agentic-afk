@@ -14,8 +14,12 @@ pub fn EmptyState(
     children: Element,
 ) -> Element {
     let glyph = match accent {
-        EmptyStateAccent::Cyan => "border-cyan shadow-[0_0_24px_rgba(91,233,255,0.35),inset_0_0_16px_rgba(91,233,255,0.18)]",
-        EmptyStateAccent::Magenta => "border-magenta shadow-[0_0_24px_rgba(199,146,255,0.35),inset_0_0_16px_rgba(199,146,255,0.18)]",
+        EmptyStateAccent::Cyan => {
+            "border-cyan shadow-[0_0_24px_rgba(91,233,255,0.35),inset_0_0_16px_rgba(91,233,255,0.18)]"
+        }
+        EmptyStateAccent::Magenta => {
+            "border-magenta shadow-[0_0_24px_rgba(199,146,255,0.35),inset_0_0_16px_rgba(199,146,255,0.18)]"
+        }
     };
     rsx! {
         div {

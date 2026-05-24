@@ -148,7 +148,10 @@ async fn process_container(
     };
 
     let assignment = persistence::get_issue_assignment_public(db, assignment_id).await?;
-    if matches!(assignment.status.as_str(), "merged" | "blocked" | "merge_staged") {
+    if matches!(
+        assignment.status.as_str(),
+        "merged" | "blocked" | "merge_staged"
+    ) {
         // Idempotent: the DB-side scanner may have already blocked this
         // assignment, or the merge already succeeded.
         return Ok(());
@@ -365,7 +368,10 @@ mod tests {
         }
 
         fn rm_force(&self, container_name: &str) -> Result<(), String> {
-            self.removed.lock().unwrap().push(container_name.to_string());
+            self.removed
+                .lock()
+                .unwrap()
+                .push(container_name.to_string());
             Ok(())
         }
     }
@@ -385,8 +391,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let plan_run =
-            create_plan_run(db, &project.id.0, "main", "baseline-sha").await.unwrap();
+        let plan_run = create_plan_run(db, &project.id.0, "main", "baseline-sha")
+            .await
+            .unwrap();
         let snapshot = SourceIssueSnapshot {
             source_id: "issue-1".to_string(),
             title: "t".to_string(),
@@ -431,8 +438,7 @@ mod tests {
      {
         let db = connect_in_memory().await.unwrap();
         migrate(&db).await.unwrap();
-        let (_project_id, plan_run_id, assignment_id) =
-            seed_assignment(&db, "implementing").await;
+        let (_project_id, plan_run_id, assignment_id) = seed_assignment(&db, "implementing").await;
 
         let container = SandboxContainer {
             name: format!("agentic-afk-assignment-{assignment_id}-implementation"),
@@ -492,8 +498,7 @@ mod tests {
     async fn planning_container_is_killed_and_removed() {
         let db = connect_in_memory().await.unwrap();
         migrate(&db).await.unwrap();
-        let (_project_id, plan_run_id, _assignment_id) =
-            seed_assignment(&db, "implementing").await;
+        let (_project_id, plan_run_id, _assignment_id) = seed_assignment(&db, "implementing").await;
 
         let container = SandboxContainer {
             name: format!("agentic-afk-planning-{plan_run_id}"),
@@ -514,8 +519,7 @@ mod tests {
     async fn second_sweep_is_idempotent_no_double_block() {
         let db = connect_in_memory().await.unwrap();
         migrate(&db).await.unwrap();
-        let (_project_id, plan_run_id, assignment_id) =
-            seed_assignment(&db, "implementing").await;
+        let (_project_id, plan_run_id, assignment_id) = seed_assignment(&db, "implementing").await;
 
         let container = SandboxContainer {
             name: format!("agentic-afk-assignment-{assignment_id}-implementation"),

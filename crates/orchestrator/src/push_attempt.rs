@@ -165,7 +165,10 @@ mod tests {
         let result = Err(PlanRunPhaseError::IntegrationPush(
             "remote: Permission to owner/repo.git denied to alice.".to_string(),
         ));
-        assert!(matches!(classify_push_result(result), PushOutcome::Other { .. }));
+        assert!(matches!(
+            classify_push_result(result),
+            PushOutcome::Other { .. }
+        ));
     }
 
     #[test]
@@ -199,10 +202,7 @@ mod tests {
     #[test]
     fn outcome_str_matches_phase_output_taxonomy() {
         assert_eq!(
-            PushOutcome::NonFastForward {
-                detail: "x".into()
-            }
-            .outcome_str(),
+            PushOutcome::NonFastForward { detail: "x".into() }.outcome_str(),
             "failed"
         );
         assert_eq!(

@@ -721,11 +721,7 @@ mod preflight_tests {
         let dir = tmpdir("auth-missing");
         write_mise(&dir);
         let auth = dir.join("missing-auth.json");
-        let pf = SandboxPreflight::new(
-            Arc::new(OkDocker),
-            &auth,
-            Arc::new(OkImage("t")),
-        );
+        let pf = SandboxPreflight::new(Arc::new(OkDocker), &auth, Arc::new(OkImage("t")));
         let err = pf.check(&dir).unwrap_err();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(
@@ -738,11 +734,7 @@ mod preflight_tests {
     fn mise_toml_missing_after_auth_passes() {
         let dir = tmpdir("mise-missing");
         let auth = write_auth(&dir);
-        let pf = SandboxPreflight::new(
-            Arc::new(OkDocker),
-            &auth,
-            Arc::new(OkImage("t")),
-        );
+        let pf = SandboxPreflight::new(Arc::new(OkDocker), &auth, Arc::new(OkImage("t")));
         let err = pf.check(&dir).unwrap_err();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(
@@ -859,14 +851,22 @@ mod tests {
             args.windows(2)
                 .any(|w| w[0] == "--pids-limit" && w[1] == "512")
         );
-        assert!(args.windows(2).any(|w| w[0] == "--user" && w[1] == "1000:1000"));
-        assert!(args.windows(2).any(|w| w[0] == "--workdir" && w[1] == "/work"));
-        assert!(args.windows(2).any(
-            |w| w[0] == "--label" && w[1] == "agentic-afk.phase=planning"
-        ));
-        assert!(args.windows(2).any(
-            |w| w[0] == "--env" && w[1] == "HOME=/tmp/codex-home"
-        ));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--user" && w[1] == "1000:1000")
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--workdir" && w[1] == "/work")
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--label" && w[1] == "agentic-afk.phase=planning")
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--env" && w[1] == "HOME=/tmp/codex-home")
+        );
         let image_idx = args
             .iter()
             .position(|a| a == "agentic-afk-runtime:abc123")

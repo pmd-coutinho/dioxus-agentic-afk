@@ -126,10 +126,7 @@ mod tests {
         }
     }
 
-    fn raw_with_prds(
-        issues: Vec<SourceIssueSnapshot>,
-        prd_ids: &[&str],
-    ) -> RawPlanningSnapshot {
+    fn raw_with_prds(issues: Vec<SourceIssueSnapshot>, prd_ids: &[&str]) -> RawPlanningSnapshot {
         let mut raw = raw(issues);
         raw.prd_source_ids = prd_ids.iter().map(|id| id.to_string()).collect();
         raw
