@@ -416,7 +416,11 @@ pub async fn run_plan_run(
         Err(error) => return Err(CoordinatorError::from_persistence(error)),
     };
 
-    let planning_context = crate::plan_run::PlanningContext { project, plan_run };
+    let planning_context = crate::plan_run::PlanningContext {
+        project,
+        plan_run,
+        process_recorder: Some(&phase_handle.recorder),
+    };
     let planner_stdout = match deps.planner.run(&prompt, &planning_context) {
         Ok(stdout) => stdout,
         Err(error) => {
@@ -863,6 +867,7 @@ async fn run_assignment_implement_review(
             project,
             plan_run,
             assignment,
+            process_recorder: impl_handle.as_ref().map(|handle| &handle.recorder),
         };
         let impl_stdout = match deps.implementation.run(&impl_prompt, &impl_ctx) {
             Ok(stdout) => stdout,
@@ -957,6 +962,7 @@ async fn run_assignment_implement_review(
             project,
             plan_run,
             assignment,
+            process_recorder: review_handle.as_ref().map(|handle| &handle.recorder),
         };
         let review_stdout = match deps.review.run(&review_prompt, &review_ctx) {
             Ok(stdout) => stdout,
@@ -1279,6 +1285,7 @@ async fn finalize_parallel_plan_run(
             project,
             plan_run,
             assignment: &merge_assignment,
+            process_recorder: Some(&merge_handle.recorder),
         };
         let merge_outcome: AssignmentMergeOutcome = match deps.merger.run(&prompt, &merge_ctx) {
             Err(error) => {
@@ -2161,6 +2168,7 @@ mod tests {
         let context = crate::plan_run::PlanningContext {
             project: &project,
             plan_run: &plan_run,
+            process_recorder: None,
         };
         // Production binaries None: planner runner should still be the
         // FakePlanningPhaseRunner default test deps installs.

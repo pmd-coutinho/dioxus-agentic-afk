@@ -98,6 +98,7 @@ fn planning_launch_mounts_project_read_only_and_returns_stdout() {
     let ctx = PlanningContext {
         project: &project,
         plan_run: &plan_run,
+        process_recorder: None,
     };
     let stdout =
         PlanningPhaseRunner::run(&runner, "plan now", &ctx).expect("planning launch succeeds");
@@ -107,14 +108,19 @@ fn planning_launch_mounts_project_read_only_and_returns_stdout() {
     assert_eq!(launches.len(), 1);
     let launch = &launches[0];
     assert_eq!(launch.phase, SandboxPhase::Planning);
-    assert!(launch.labels.iter().any(|(key, value)| {
-        key == "agentic-afk.plan-run-id" && value == "plan-run-7"
-    }));
-    assert!(launch
-        .labels
-        .iter()
-        .any(|(key, value)| key == "agentic-afk.project-id" && value == "proj-42"));
-    assert_codex_exec_uses_last_message_capture(&launch.command, "plan now");
+    assert!(
+        launch
+            .labels
+            .iter()
+            .any(|(key, value)| { key == "agentic-afk.plan-run-id" && value == "plan-run-7" })
+    );
+    assert!(
+        launch
+            .labels
+            .iter()
+            .any(|(key, value)| key == "agentic-afk.project-id" && value == "proj-42")
+    );
+    assert_codex_exec_uses_last_message_capture(&launch.command, "plan now", "gpt-5.5");
     let work_mount = bind_mount(&launch.mounts, "/host/proj").expect("project bind mount");
     match work_mount {
         SandboxMount::Bind {
@@ -142,6 +148,7 @@ fn implementation_launch_mounts_assignment_worktree_read_write() {
         project: &project,
         plan_run: &plan_run,
         assignment: &assignment,
+        process_recorder: None,
     };
     let stdout = ImplementationPhaseRunner::run(&runner, "implement now", &ctx)
         .expect("implementation launch succeeds");
@@ -149,7 +156,7 @@ fn implementation_launch_mounts_assignment_worktree_read_write() {
 
     let launch = &launcher.launches()[0];
     assert_eq!(launch.phase, SandboxPhase::Implementation);
-    assert_codex_exec_uses_last_message_capture(&launch.command, "implement now");
+    assert_codex_exec_uses_last_message_capture(&launch.command, "implement now", "gpt-5.4");
     let work_mount =
         bind_mount(&launch.mounts, "/host/worktrees/issue-1").expect("worktree bind mount");
     match work_mount {
@@ -168,13 +175,21 @@ fn implementation_launch_mounts_assignment_worktree_read_write() {
     }
 }
 
-fn assert_codex_exec_uses_last_message_capture(command: &[String], prompt: &str) {
+fn assert_codex_exec_uses_last_message_capture(command: &[String], prompt: &str, model: &str) {
     assert_eq!(command.first().map(String::as_str), Some("bash"));
     assert_eq!(command.get(1).map(String::as_str), Some("-lc"));
     let script = command.get(2).expect("bash script present");
     assert!(
         script.contains("--output-last-message"),
         "command must capture only Codex final answer: {script}"
+    );
+    assert!(
+        script.contains(&format!("--model {model}")),
+        "command must pin Codex model to {model}: {script}"
+    );
+    assert!(
+        script.contains(r#"model_reasoning_effort="medium""#),
+        "command must pin Codex reasoning effort to medium: {script}"
     );
     assert!(
         script.contains(">\"$transcript\""),
@@ -199,6 +214,7 @@ fn review_and_merge_launches_also_mount_worktree_read_write() {
             project: &project,
             plan_run: &plan_run,
             assignment: &assignment,
+            process_recorder: None,
         };
         match phase {
             SandboxPhase::Review => {
@@ -211,6 +227,7 @@ fn review_and_merge_launches_also_mount_worktree_read_write() {
         }
         let launch = &launcher.launches()[0];
         assert_eq!(launch.phase, phase);
+        assert_codex_exec_uses_last_message_capture(&launch.command, phase.as_label(), "gpt-5.5");
         let work = bind_mount(&launch.mounts, "/host/wt/x").expect("worktree mount");
         match work {
             SandboxMount::Bind { read_only, .. } => assert!(!read_only),
@@ -230,6 +247,7 @@ fn every_launch_carries_the_five_labels_and_auth_config_cache_mounts() {
         project: &project,
         plan_run: &plan_run,
         assignment: &assignment,
+        process_recorder: None,
     };
     let _ = ImplementationPhaseRunner::run(&runner, "p", &ctx);
 
@@ -289,6 +307,7 @@ fn implementation_runner_error_maps_to_implementation_variant_not_planning() {
         project: &project,
         plan_run: &plan_run,
         assignment: &assignment,
+        process_recorder: None,
     };
     let err = ImplementationPhaseRunner::run(&runner, "p", &ctx).unwrap_err();
     assert!(
@@ -313,6 +332,7 @@ fn review_runner_error_maps_to_review_variant_not_planning() {
         project: &project,
         plan_run: &plan_run,
         assignment: &assignment,
+        process_recorder: None,
     };
     let err = ReviewPhaseRunner::run(&runner, "p", &ctx).unwrap_err();
     assert!(
@@ -337,6 +357,7 @@ fn merge_runner_error_maps_to_merge_variant() {
         project: &project,
         plan_run: &plan_run,
         assignment: &assignment,
+        process_recorder: None,
     };
     let err = MergePhaseRunner::run(&runner, "p", &ctx).unwrap_err();
     assert!(

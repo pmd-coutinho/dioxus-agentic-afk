@@ -106,7 +106,7 @@ impl DockerCodexRunner {
             mounts: self.mounts(self.project_path.clone(), true),
             workdir: PathBuf::from("/work"),
             env: vec![("HOME".to_string(), "/tmp/codex-home".to_string())],
-            command: codex_exec_command(prompt),
+            command: codex_exec_command(prompt, self.phase.codex_model()),
             memory,
             cpus,
             pids_limit: pids,
@@ -143,7 +143,7 @@ impl DockerCodexRunner {
             mounts: self.mounts(PathBuf::from(&context.assignment.worktree_path), false),
             workdir: PathBuf::from("/work"),
             env: vec![("HOME".to_string(), "/tmp/codex-home".to_string())],
-            command: codex_exec_command(prompt),
+            command: codex_exec_command(prompt, self.phase.codex_model()),
             memory,
             cpus,
             pids_limit: pids,
@@ -177,16 +177,46 @@ impl DockerCodexRunner {
     }
 }
 
-fn codex_exec_command(prompt: &str) -> Vec<String> {
-    vec![
-        "bash".to_string(),
-        "-lc".to_string(),
+struct CodexModelConfig {
+    model: &'static str,
+    reasoning_effort: &'static str,
+}
+
+trait CodexPhaseModel {
+    fn codex_model(self) -> CodexModelConfig;
+}
+
+impl CodexPhaseModel for SandboxPhase {
+    fn codex_model(self) -> CodexModelConfig {
+        match self {
+            SandboxPhase::Implementation => CodexModelConfig {
+                model: "gpt-5.4",
+                reasoning_effort: "medium",
+            },
+            SandboxPhase::Planning | SandboxPhase::Review | SandboxPhase::Merge => {
+                CodexModelConfig {
+                    model: "gpt-5.5",
+                    reasoning_effort: "medium",
+                }
+            }
+        }
+    }
+}
+
+fn codex_exec_command(prompt: &str, model: CodexModelConfig) -> Vec<String> {
+    let script = format!(
         r#"set -euo pipefail
 last_message="$(mktemp /tmp/agentic-afk-last-message.XXXXXX)"
 transcript="$(mktemp /tmp/agentic-afk-codex-transcript.XXXXXX)"
-codex exec --dangerously-bypass-approvals-and-sandbox --output-last-message "$last_message" "$1" >"$transcript"
-cat "$last_message""#
-            .to_string(),
+codex exec --model {model_name} -c 'model_reasoning_effort="{reasoning_effort}"' --dangerously-bypass-approvals-and-sandbox --output-last-message "$last_message" "$1" >"$transcript"
+cat "$last_message""#,
+        model_name = model.model,
+        reasoning_effort = model.reasoning_effort,
+    );
+    vec![
+        "bash".to_string(),
+        "-lc".to_string(),
+        script,
         "agentic-afk-codex-exec".to_string(),
         prompt.to_string(),
     ]
@@ -200,13 +230,10 @@ impl PlanningPhaseRunner for DockerCodexRunner {
     ) -> Result<String, PlanRunPhaseError> {
         // Planning is invoked once per Plan Run before any assignment
         // exists, so the labels carry empty assignment/attempt slots.
-        let spec = self.build_spec_planning(
-            prompt,
-            &context.plan_run.id,
-            context.project.id.0.as_str(),
-        );
+        let spec =
+            self.build_spec_planning(prompt, &context.plan_run.id, context.project.id.0.as_str());
         self.launcher
-            .launch(spec)
+            .launch(spec, context.process_recorder)
             .map_err(|e| PlanRunPhaseError::Planning(e.to_string()))
     }
 }
@@ -219,7 +246,7 @@ impl ImplementationPhaseRunner for DockerCodexRunner {
     ) -> Result<String, PlanRunPhaseError> {
         let spec = self.build_spec_assignment(prompt, context);
         self.launcher
-            .launch(spec)
+            .launch(spec, context.process_recorder)
             .map_err(|e| PlanRunPhaseError::Implementation(e.to_string()))
     }
 }
@@ -232,7 +259,7 @@ impl ReviewPhaseRunner for DockerCodexRunner {
     ) -> Result<String, PlanRunPhaseError> {
         let spec = self.build_spec_assignment(prompt, context);
         self.launcher
-            .launch(spec)
+            .launch(spec, context.process_recorder)
             .map_err(|e| PlanRunPhaseError::Review(e.to_string()))
     }
 }
@@ -245,7 +272,7 @@ impl MergePhaseRunner for DockerCodexRunner {
     ) -> Result<String, PlanRunPhaseError> {
         let spec = self.build_spec_assignment(prompt, context);
         self.launcher
-            .launch(spec)
+            .launch(spec, context.process_recorder)
             .map_err(|e| PlanRunPhaseError::Merge(e.to_string()))
     }
 }

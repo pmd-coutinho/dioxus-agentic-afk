@@ -9,9 +9,11 @@
 //! See ADR-0041.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
+
+use crate::in_flight_phase_tracker::PhaseProcessRecorder;
 
 pub const RUNTIME_DOCKERFILE: &str = include_str!("../runtime/Dockerfile");
 pub const RUNTIME_ENTRYPOINT: &str = include_str!("../runtime/entrypoint.sh");
@@ -184,7 +186,11 @@ fn render_mount(mount: &SandboxMount) -> String {
 /// Launches a Codex Sandbox container per spec and returns captured
 /// stdout on success.
 pub trait SandboxLauncher: Send + Sync {
-    fn launch(&self, spec: SandboxLaunchSpec) -> Result<String, SandboxError>;
+    fn launch(
+        &self,
+        spec: SandboxLaunchSpec,
+        recorder: Option<&PhaseProcessRecorder>,
+    ) -> Result<String, SandboxError>;
 }
 
 /// Builds the runtime image on demand and returns the content-hash tag.
@@ -334,7 +340,11 @@ impl Default for FakeSandboxLauncher {
 }
 
 impl SandboxLauncher for FakeSandboxLauncher {
-    fn launch(&self, spec: SandboxLaunchSpec) -> Result<String, SandboxError> {
+    fn launch(
+        &self,
+        spec: SandboxLaunchSpec,
+        _recorder: Option<&PhaseProcessRecorder>,
+    ) -> Result<String, SandboxError> {
         self.launches.lock().unwrap().push(RecordedLaunch {
             phase: spec.phase,
             container_name: spec.container_name,
@@ -359,12 +369,27 @@ impl SandboxLauncher for FakeSandboxLauncher {
 }
 
 impl SandboxLauncher for DockerSandboxLauncher {
-    fn launch(&self, spec: SandboxLaunchSpec) -> Result<String, SandboxError> {
+    fn launch(
+        &self,
+        spec: SandboxLaunchSpec,
+        recorder: Option<&PhaseProcessRecorder>,
+    ) -> Result<String, SandboxError> {
         let args = docker_run_args(&spec);
-        let output = Command::new(&self.docker_binary)
+        let child_started_at = current_unix_timestamp();
+        let child = Command::new(&self.docker_binary)
             .args(&args)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| SandboxError::Spawn(format!("docker run: {e}")))?;
+        if let Some(recorder) = recorder {
+            recorder
+                .record_blocking(child.id(), &child_started_at)
+                .map_err(|e| SandboxError::Spawn(format!("record docker process: {e}")))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|e| SandboxError::Spawn(format!("docker run wait: {e}")))?;
         if !output.status.success() {
             return Err(SandboxError::NonZero {
                 status: output.status.code().unwrap_or(-1),
@@ -373,6 +398,14 @@ impl SandboxLauncher for DockerSandboxLauncher {
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+}
+
+fn current_unix_timestamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("unix:{seconds}")
 }
 
 // --- Plan Run trigger-time preflight (issue #73) ---
@@ -804,6 +837,67 @@ mod preflight_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn docker_launcher_records_child_pid_before_waiting() {
+        use agentic_afk_contracts::CreateProjectRequest;
+        use agentic_afk_persistence::{
+            connect_in_memory, create_plan_run, create_project, list_in_flight_phase_rows, migrate,
+        };
+        use std::os::unix::fs::PermissionsExt;
+
+        let script_dir =
+            std::env::temp_dir().join(format!("agentic-afk-fake-docker-{}", std::process::id()));
+        std::fs::create_dir_all(&script_dir).unwrap();
+        let script = script_dir.join("docker");
+        std::fs::write(&script, "#!/bin/sh\necho sandbox-ok\n").unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let db = connect_in_memory().await.unwrap();
+        migrate(&db).await.unwrap();
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "abc")
+            .await
+            .unwrap();
+        let tracked = crate::in_flight_phase_tracker::start(
+            &db,
+            crate::in_flight_phase_tracker::PhaseLocator {
+                plan_run_id: plan_run.id,
+                assignment_id: None,
+                phase: "planning",
+            },
+        )
+        .await
+        .unwrap();
+
+        let launcher = DockerSandboxLauncher::new(script);
+        let stdout = launcher
+            .launch(sample_spec(Vec::new()), Some(&tracked.recorder))
+            .unwrap();
+        assert_eq!(stdout.trim(), "sandbox-ok");
+
+        let rows = list_in_flight_phase_rows(&db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].process_id.is_some(),
+            "docker child PID should be stamped before wait completes"
+        );
+
+        let _ = std::fs::remove_dir_all(script_dir);
+    }
 
     #[test]
     fn runtime_image_tag_uses_repo_and_short_hex() {

@@ -88,10 +88,13 @@ fn smoke_build_and_mise_install_against_repo_mise_toml() {
     };
 
     let version_out = launcher
-        .launch(base_spec(
-            vec!["mise".to_string(), "--version".to_string()],
-            "agentic-afk-smoke-mise-version",
-        ))
+        .launch(
+            base_spec(
+                vec!["mise".to_string(), "--version".to_string()],
+                "agentic-afk-smoke-mise-version",
+            ),
+            None,
+        )
         .expect("mise --version succeeds in container");
     assert!(
         !version_out.trim().is_empty(),
@@ -101,10 +104,13 @@ fn smoke_build_and_mise_install_against_repo_mise_toml() {
     // First mise install — primes the named cache volume.
     let t0 = std::time::Instant::now();
     launcher
-        .launch(base_spec(
-            vec!["mise".to_string(), "install".to_string()],
-            "agentic-afk-smoke-mise-install-1",
-        ))
+        .launch(
+            base_spec(
+                vec!["mise".to_string(), "install".to_string()],
+                "agentic-afk-smoke-mise-install-1",
+            ),
+            None,
+        )
         .expect("mise install (first run) succeeds");
     let first_elapsed = t0.elapsed();
 
@@ -114,10 +120,13 @@ fn smoke_build_and_mise_install_against_repo_mise_toml() {
     // performance assertion.
     let t1 = std::time::Instant::now();
     launcher
-        .launch(base_spec(
-            vec!["mise".to_string(), "install".to_string()],
-            "agentic-afk-smoke-mise-install-2",
-        ))
+        .launch(
+            base_spec(
+                vec!["mise".to_string(), "install".to_string()],
+                "agentic-afk-smoke-mise-install-2",
+            ),
+            None,
+        )
         .expect("mise install (second run) succeeds");
     let second_elapsed = t1.elapsed();
 

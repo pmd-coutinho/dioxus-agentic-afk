@@ -49,6 +49,7 @@ pub struct AssignmentContext<'a> {
     pub project: &'a agentic_afk_contracts::ProjectResponse,
     pub plan_run: &'a agentic_afk_contracts::PlanRunResponse,
     pub assignment: &'a agentic_afk_contracts::IssueAssignmentResponse,
+    pub process_recorder: Option<&'a crate::in_flight_phase_tracker::PhaseProcessRecorder>,
 }
 
 /// Plan-Run-scoped context passed to the Planning Phase runner.
@@ -57,6 +58,7 @@ pub struct AssignmentContext<'a> {
 pub struct PlanningContext<'a> {
     pub project: &'a agentic_afk_contracts::ProjectResponse,
     pub plan_run: &'a agentic_afk_contracts::PlanRunResponse,
+    pub process_recorder: Option<&'a crate::in_flight_phase_tracker::PhaseProcessRecorder>,
 }
 
 /// Refresh the configured Integration Branch and report the baseline commit.
@@ -71,11 +73,8 @@ pub trait IntegrationBranchRefresher: Send + Sync {
 /// Execute the Planning Phase prompt and return the raw agent stdout for
 /// the Plan Run coordinator to parse.
 pub trait PlanningPhaseRunner: Send + Sync {
-    fn run(
-        &self,
-        prompt: &str,
-        context: &PlanningContext<'_>,
-    ) -> Result<String, PlanRunPhaseError>;
+    fn run(&self, prompt: &str, context: &PlanningContext<'_>)
+    -> Result<String, PlanRunPhaseError>;
 }
 
 /// Test refresher that returns a fixed baseline on every call.

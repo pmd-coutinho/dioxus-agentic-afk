@@ -79,6 +79,16 @@ impl PhaseProcessRecorder {
     pub fn row_id(&self) -> &str {
         &self.row_id
     }
+
+    pub fn record_blocking(
+        &self,
+        process_id: u32,
+        process_started_at: &str,
+    ) -> Result<(), PersistenceError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.record(process_id, process_started_at))
+        })
+    }
 }
 
 /// Errors returned by [`run`]. `Phase` wraps the spawn closure's error
