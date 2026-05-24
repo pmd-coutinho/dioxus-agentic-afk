@@ -341,23 +341,71 @@ pub fn parse_review_output(stdout: &str) -> Result<ParsedReviewOutput, String> {
 fn extract_tagged_json(stdout: &str, tag: &str) -> Result<serde_json::Value, String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
-    let end = stdout
-        .rfind(&close)
-        .ok_or_else(|| format!("output missing {close} closing tag"))?;
-    let start = stdout[..end]
-        .rfind(&open)
-        .ok_or_else(|| format!("output missing {open} opening tag"))?
-        + open.len();
-    if end < start {
-        return Err(format!("output has malformed {tag} tags"));
-    }
-    let body = strip_json_code_fence(stdout[start..end].trim());
+    let body = if let Some(end) = stdout.rfind(&close) {
+        let start = stdout[..end]
+            .rfind(&open)
+            .ok_or_else(|| format!("output missing {open} opening tag"))?
+            + open.len();
+        if end < start {
+            return Err(format!("output has malformed {tag} tags"));
+        }
+        strip_json_code_fence(stdout[start..end].trim())
+    } else {
+        let start = stdout
+            .rfind(&open)
+            .ok_or_else(|| format!("output missing {open} opening tag"))?
+            + open.len();
+        strip_json_code_fence(stdout[start..].trim())
+    };
     serde_json::from_str(body).map_err(|error| {
         format!(
             "{tag} output is not valid JSON: {error}; body starts with: {}",
             excerpt_for_error(body)
         )
     })
+}
+
+#[cfg(test)]
+mod parse_tagged_phase_output_tests {
+    use super::*;
+
+    #[test]
+    fn implementation_output_parses_without_closing_tag_when_json_is_complete() {
+        let parsed =
+            parse_implementation_output(r#"<impl>{"outcome":"ready_for_review","summary":"done"}"#)
+                .expect("implementation output without closing tag parses");
+
+        assert_eq!(parsed.outcome, "ready_for_review");
+        assert_eq!(parsed.body["summary"], "done");
+    }
+
+    #[test]
+    fn review_output_parses_without_closing_tag_when_json_is_complete() {
+        let parsed = parse_review_output(r#"<review>{"outcome":"approved","summary":"ok"}"#)
+            .expect("review output without closing tag parses");
+
+        assert_eq!(parsed.outcome, "approved");
+        assert_eq!(parsed.body["summary"], "ok");
+    }
+
+    #[test]
+    fn merge_output_parses_without_closing_tag_when_json_is_complete() {
+        let parsed = parse_merge_output(r#"<merge>{"outcome":"merged","summary":"ok"}"#)
+            .expect("merge output without closing tag parses");
+
+        assert_eq!(parsed.outcome, "merged");
+        assert_eq!(parsed.body["summary"], "ok");
+    }
+
+    #[test]
+    fn tagged_phase_output_still_rejects_missing_opening_tag() {
+        let error = parse_implementation_output(r#"{"outcome":"ready_for_review"}"#).unwrap_err();
+
+        assert!(
+            error.contains("output missing <impl> opening tag"),
+            "{error}"
+        );
+    }
 }
 
 fn strip_json_code_fence(body: &str) -> &str {
