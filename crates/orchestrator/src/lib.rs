@@ -103,20 +103,48 @@ pub fn create_assignment_worktree(
     project_path: &Path,
     branch: &str,
 ) -> Result<PathBuf, String> {
-    let output = Command::new(worktrunk_binary_path)
-        .current_dir(project_path)
-        .args([
-            "switch", "--create", branch, "--yes", "--no-cd", "--format", "json",
-        ])
-        .output()
-        .map_err(|error| format!("failed to start Worktrunk: {error}"))?;
+    let output = run_worktrunk_switch(worktrunk_binary_path, project_path, branch, true)?;
     if !output.status.success() {
+        if worktrunk_branch_exists(branch, &output) {
+            let reuse_output =
+                run_worktrunk_switch(worktrunk_binary_path, project_path, branch, false)?;
+            return parse_worktrunk_path("Worktrunk assignment worktree switch", &reuse_output);
+        }
         return Err(command_failure(
             "Worktrunk assignment worktree creation",
             &output,
         ));
     }
 
+    parse_worktrunk_path("Worktrunk assignment worktree creation", &output)
+}
+
+fn run_worktrunk_switch(
+    worktrunk_binary_path: &Path,
+    project_path: &Path,
+    branch: &str,
+    create: bool,
+) -> Result<std::process::Output, String> {
+    let mut command = Command::new(worktrunk_binary_path);
+    command.current_dir(project_path).arg("switch");
+    if create {
+        command.arg("--create");
+    }
+    command.args([branch, "--yes", "--no-cd", "--format", "json"]);
+    command
+        .output()
+        .map_err(|error| format!("failed to start Worktrunk: {error}"))
+}
+
+fn worktrunk_branch_exists(branch: &str, output: &std::process::Output) -> bool {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stderr.contains("already exists") && stderr.contains(branch)
+}
+
+fn parse_worktrunk_path(label: &str, output: &std::process::Output) -> Result<PathBuf, String> {
+    if !output.status.success() {
+        return Err(command_failure(label, output));
+    }
     let json: Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("failed to parse Worktrunk worktree output: {error}"))?;
     find_path_value(&json)
@@ -147,5 +175,124 @@ fn command_failure(label: &str, output: &std::process::Output) -> String {
         format!("{label} exited with {}", output.status)
     } else {
         format!("{label} exited with {}: {stderr}", output.status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_assignment_worktree;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn create_assignment_worktree_reuses_existing_branch() {
+        let fixture = WorktrunkFixture::new("reuse");
+        fixture.write_fake_worktrunk(
+            r#"#!/bin/sh
+printf '%s\n' "$@" >> "__CALLS__"
+if [ "$2" = "--create" ]; then
+  echo 'Branch agent/issue-79 already exists' >&2
+  echo 'To switch to the existing branch, run without --create: wt switch agent/issue-79' >&2
+  exit 1
+fi
+printf '{"path":"/tmp/reused-agent-issue-79"}'
+"#,
+        );
+
+        let path = create_assignment_worktree(
+            fixture.worktrunk_path(),
+            fixture.project_path(),
+            "agent/issue-79",
+        )
+        .expect("existing branch should be reused");
+
+        assert_eq!(path, PathBuf::from("/tmp/reused-agent-issue-79"));
+        let calls = fs::read_to_string(fixture.calls_path()).unwrap();
+        assert!(calls.contains("switch\n--create\nagent/issue-79"));
+        assert!(calls.contains("switch\nagent/issue-79\n--yes"));
+    }
+
+    #[test]
+    fn create_assignment_worktree_does_not_retry_unrelated_failure() {
+        let fixture = WorktrunkFixture::new("fatal");
+        fixture.write_fake_worktrunk(
+            r#"#!/bin/sh
+printf '%s\n' "$@" >> "__CALLS__"
+echo 'docker is unavailable' >&2
+exit 1
+"#,
+        );
+
+        let error = create_assignment_worktree(
+            fixture.worktrunk_path(),
+            fixture.project_path(),
+            "agent/issue-79",
+        )
+        .expect_err("unrelated failures should remain fatal");
+
+        assert!(error.contains("docker is unavailable"));
+        let calls = fs::read_to_string(fixture.calls_path()).unwrap();
+        assert_eq!(calls.matches("switch").count(), 1);
+    }
+
+    struct WorktrunkFixture {
+        root: PathBuf,
+        project: PathBuf,
+        worktrunk: PathBuf,
+        calls: PathBuf,
+    }
+
+    impl WorktrunkFixture {
+        fn new(name: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "agentic-afk-worktrunk-{name}-{}-{nanos}",
+                std::process::id()
+            ));
+            let project = root.join("project");
+            fs::create_dir_all(&project).unwrap();
+            let worktrunk = root.join("wt");
+            let calls = root.join("calls");
+            Self {
+                root,
+                project,
+                worktrunk,
+                calls,
+            }
+        }
+
+        fn write_fake_worktrunk(&self, body: &str) {
+            let script = body.replace("__CALLS__", &self.calls.display().to_string());
+            fs::write(&self.worktrunk, script).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = fs::metadata(&self.worktrunk).unwrap().permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&self.worktrunk, permissions).unwrap();
+            }
+        }
+
+        fn worktrunk_path(&self) -> &Path {
+            &self.worktrunk
+        }
+
+        fn project_path(&self) -> &Path {
+            &self.project
+        }
+
+        fn calls_path(&self) -> &Path {
+            &self.calls
+        }
+    }
+
+    impl Drop for WorktrunkFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 }
