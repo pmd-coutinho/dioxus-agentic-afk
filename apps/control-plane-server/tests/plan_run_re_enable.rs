@@ -31,12 +31,7 @@ use tower::ServiceExt;
 /// re-enable surface to act on.
 struct FaultyOnReadyWriter {
     target_source_id: String,
-    calls: Mutex<
-        Vec<(
-            String,
-            agentic_afk_control_plane_server::LifecycleStatus,
-        )>,
-    >,
+    calls: Mutex<Vec<(String, agentic_afk_control_plane_server::LifecycleStatus)>>,
 }
 
 impl FaultyOnReadyWriter {
@@ -436,10 +431,7 @@ async fn re_enable_with_writeback_fault_injection_clears_locally_and_records_act
     assert_eq!(status, StatusCode::OK, "{body}");
     let outcome: ReEnableSourceIssueResponse = serde_json::from_str(&body).unwrap();
     assert!(outcome.local_cleared, "local clear still succeeded");
-    assert!(
-        !outcome.writeback.ok,
-        "writeback.ok is false: {outcome:?}"
-    );
+    assert!(!outcome.writeback.ok, "writeback.ok is false: {outcome:?}");
     let error = outcome
         .writeback
         .error

@@ -1028,7 +1028,10 @@ mod tests {
         let legacy = serde_json::json!({ "error": "stderr: rejected" });
         let body = PhaseOutputBody::from_legacy_value(legacy);
         match body {
-            PhaseOutputBody::Failed { error, problem_type } => {
+            PhaseOutputBody::Failed {
+                error,
+                problem_type,
+            } => {
                 assert_eq!(error, "stderr: rejected");
                 assert_eq!(problem_type, None);
             }
@@ -1079,7 +1082,9 @@ mod tests {
         let json = r#"{"phase":"review","findings":["missing tests"],"summary":"x"}"#;
         let body: PhaseOutputBody = serde_json::from_str(json).unwrap();
         match body {
-            PhaseOutputBody::Review { findings, summary, .. } => {
+            PhaseOutputBody::Review {
+                findings, summary, ..
+            } => {
                 assert_eq!(findings.len(), 1);
                 assert_eq!(findings[0].location, None);
                 assert_eq!(findings[0].message, "missing tests");
@@ -1101,7 +1106,10 @@ mod tests {
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains("\"phase\":\"merge\""), "{json}");
         assert!(json.contains("\"merged_source_ids\":[\"42\"]"), "{json}");
-        assert!(json.contains("\"summary\":\"integrated cleanly\""), "{json}");
+        assert!(
+            json.contains("\"summary\":\"integrated cleanly\""),
+            "{json}"
+        );
         let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
         assert_eq!(back, body);
     }
@@ -1148,7 +1156,10 @@ mod tests {
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains("\"phase\":\"push\""), "{json}");
-        assert!(json.contains("\"stderr\":\"remote rejected: non-fast-forward\""), "{json}");
+        assert!(
+            json.contains("\"stderr\":\"remote rejected: non-fast-forward\""),
+            "{json}"
+        );
         assert!(json.contains("\"fast_forward\":false"), "{json}");
         assert!(json.contains("\"attempt\":2"), "{json}");
         let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
@@ -1174,7 +1185,10 @@ mod tests {
         assert!(json.contains("\"phase\":\"planning\""), "{json}");
         assert!(json.contains("\"source_issue_id\":\"62\""), "{json}");
         assert!(json.contains("\"branch\":\"agent/issue-62\""), "{json}");
-        assert!(json.contains("\"selection_summary\":\"baseline ready\""), "{json}");
+        assert!(
+            json.contains("\"selection_summary\":\"baseline ready\""),
+            "{json}"
+        );
         assert!(json.contains("\"reason\":\"depends on #62\""), "{json}");
         let back: PhaseOutputBody = serde_json::from_str(&json).unwrap();
         assert_eq!(back, body);

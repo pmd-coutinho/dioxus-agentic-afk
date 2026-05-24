@@ -28,11 +28,9 @@ pub enum ImplementationRejection {
 impl From<ImplementationRejection> for CoordinatorError {
     fn from(rejection: ImplementationRejection) -> Self {
         match rejection {
-            ImplementationRejection::PhaseFailed(error) => CoordinatorError::new(
-                500,
-                "urn:agentic-afk:implementation-phase-failed",
-                error,
-            ),
+            ImplementationRejection::PhaseFailed(error) => {
+                CoordinatorError::new(500, "urn:agentic-afk:implementation-phase-failed", error)
+            }
             ImplementationRejection::Unparseable(error) => CoordinatorError::new(
                 500,
                 "urn:agentic-afk:implementation-output-unparseable",

@@ -46,16 +46,12 @@ pub enum ReviewLoopRejection {
 impl From<ReviewLoopRejection> for CoordinatorError {
     fn from(rejection: ReviewLoopRejection) -> Self {
         match rejection {
-            ReviewLoopRejection::PhaseFailed(error) => CoordinatorError::new(
-                500,
-                "urn:agentic-afk:review-phase-failed",
-                error,
-            ),
-            ReviewLoopRejection::Unparseable(error) => CoordinatorError::new(
-                500,
-                "urn:agentic-afk:review-output-unparseable",
-                error,
-            ),
+            ReviewLoopRejection::PhaseFailed(error) => {
+                CoordinatorError::new(500, "urn:agentic-afk:review-phase-failed", error)
+            }
+            ReviewLoopRejection::Unparseable(error) => {
+                CoordinatorError::new(500, "urn:agentic-afk:review-output-unparseable", error)
+            }
         }
     }
 }

@@ -96,7 +96,8 @@ async fn build_fixture(
         Arc::new(FakePlanningPhaseRunner::with_stdout(
             r#"<plan>{"issues":[{"source_issue_id":"42","title":"t","branch":"agent/issue-42","selection_summary":"ok"}],"summary":"s"}</plan>"#,
         )),
-        Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir())) as Arc<dyn AssignmentWorktreeProvisioner>,
+        Arc::new(FakeWorktreeProvisioner::new(std::env::temp_dir()))
+            as Arc<dyn AssignmentWorktreeProvisioner>,
         Arc::new(FakeLifecycleWriter::new()) as Arc<dyn IssueLifecycleWriter>,
         impl_runner.clone() as Arc<dyn ImplementationPhaseRunner>,
         review_runner.clone() as Arc<dyn ReviewPhaseRunner>,
@@ -227,7 +228,12 @@ async fn rejected_review_loops_back_into_another_implementation_pass_then_approv
     .await;
     let pid = fixture.project.id.0.clone();
     let resp = start(&fixture.router, &pid).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{}",
+        read_text(resp).await
+    );
 
     // Two implementation passes and two review passes ran.
     assert_eq!(fixture.impl_runner.call_count(), 2);
@@ -385,17 +391,11 @@ async fn re_enable_blocked_assignment_clears_blocked_lifecycle_and_resets_counte
         )
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "{}",
-        read_text(resp).await
-    );
+    assert_eq!(resp.status(), StatusCode::OK, "{}", read_text(resp).await);
 
-    let cleared: IssueAssignmentResponse =
-        persistence::get_assignment(&fixture.db, &assignment_id)
-            .await
-            .unwrap();
+    let cleared: IssueAssignmentResponse = persistence::get_assignment(&fixture.db, &assignment_id)
+        .await
+        .unwrap();
     assert_ne!(
         cleared.status, "blocked",
         "re-enable must clear the blocked lifecycle"

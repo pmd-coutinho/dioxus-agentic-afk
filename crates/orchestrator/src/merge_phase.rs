@@ -46,11 +46,9 @@ pub enum MergeRejection {
 impl From<MergeRejection> for CoordinatorError {
     fn from(rejection: MergeRejection) -> Self {
         match rejection {
-            MergeRejection::Unparseable(error) => CoordinatorError::new(
-                500,
-                "urn:agentic-afk:merge-output-unparseable",
-                error,
-            ),
+            MergeRejection::Unparseable(error) => {
+                CoordinatorError::new(500, "urn:agentic-afk:merge-output-unparseable", error)
+            }
         }
     }
 }
@@ -125,7 +123,10 @@ mod tests {
     #[test]
     fn merged_outcome_classifies_merged() {
         let p = parsed("merged", json!({"summary": "ok"}));
-        assert!(matches!(decide_merge_outcome(&p), AssignmentMergeOutcome::Merged));
+        assert!(matches!(
+            decide_merge_outcome(&p),
+            AssignmentMergeOutcome::Merged
+        ));
     }
 
     #[test]

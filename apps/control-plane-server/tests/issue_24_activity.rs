@@ -4,9 +4,7 @@
 //! `detail` projection that prevents full Codex output from leaking into the
 //! Activity audit log.
 
-use agentic_afk_contracts::{
-    CreateProjectRequest, EnableIssueSourceRequest, ProjectResponse,
-};
+use agentic_afk_contracts::{CreateProjectRequest, EnableIssueSourceRequest, ProjectResponse};
 use agentic_afk_control_plane_server::{ControlPlaneConfig, router};
 use agentic_afk_persistence::{self as persistence};
 use axum::body::Body;

@@ -10,11 +10,11 @@ use std::process::Command;
 
 use agentic_afk_contracts::{IssueSource, ProjectResponse};
 
+use crate::create_assignment_worktree;
 use crate::plan_run::{
     AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, IntegrationBranchPusher,
     IntegrationBranchRefresher, IssueLifecycleWriter, PlanRunPhaseError, RefreshedBaseline,
 };
-use crate::create_assignment_worktree;
 
 fn command_output(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -91,11 +91,7 @@ impl IntegrationBranchRefresher for GitIntegrationBranchRefresher {
 pub struct GitIntegrationBranchPusher;
 
 impl IntegrationBranchPusher for GitIntegrationBranchPusher {
-    fn push(
-        &self,
-        project_path: &Path,
-        integration_branch: &str,
-    ) -> Result<(), PlanRunPhaseError> {
+    fn push(&self, project_path: &Path, integration_branch: &str) -> Result<(), PlanRunPhaseError> {
         let output = Command::new("git")
             .current_dir(project_path)
             .args(["push", "origin", integration_branch])
@@ -281,12 +277,14 @@ mod tests {
         // Local repo identity is required for `git commit` to succeed in
         // sandbox environments where the global git config may be absent.
         for (key, val) in [("user.email", "test@example.com"), ("user.name", "Test")] {
-            assert!(Command::new("git")
-                .current_dir(path)
-                .args(["config", key, val])
-                .status()
-                .unwrap()
-                .success());
+            assert!(
+                Command::new("git")
+                    .current_dir(path)
+                    .args(["config", key, val])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
         }
     }
 
@@ -323,40 +321,61 @@ mod tests {
         let other = root.join("other");
 
         // Bare remote.
-        assert!(git(&root, &["init", "--bare", "-b", "main", remote.to_str().unwrap()])
+        assert!(
+            git(
+                &root,
+                &["init", "--bare", "-b", "main", remote.to_str().unwrap()]
+            )
             .status
-            .success());
+            .success()
+        );
 
         // Local clone, commit, push so the branch exists upstream.
-        assert!(git(
-            &root,
-            &["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
-        )
-        .status
-        .success());
+        assert!(
+            git(
+                &root,
+                &["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
+            )
+            .status
+            .success()
+        );
         git_init_user_config(&local);
         std::fs::write(local.join("README.md"), "hello\n").unwrap();
         assert!(git(&local, &["add", "."]).status.success());
         assert!(git(&local, &["commit", "-m", "base"]).status.success());
-        assert!(git(&local, &["push", "-u", "origin", "main"]).status.success());
+        assert!(
+            git(&local, &["push", "-u", "origin", "main"])
+                .status
+                .success()
+        );
 
         // Second clone advances `main` so the remote diverges from `local`.
-        assert!(git(
-            &root,
-            &["clone", remote.to_str().unwrap(), other.to_str().unwrap()],
-        )
-        .status
-        .success());
+        assert!(
+            git(
+                &root,
+                &["clone", remote.to_str().unwrap(), other.to_str().unwrap()],
+            )
+            .status
+            .success()
+        );
         git_init_user_config(&other);
         std::fs::write(other.join("OTHER.md"), "other\n").unwrap();
         assert!(git(&other, &["add", "."]).status.success());
-        assert!(git(&other, &["commit", "-m", "other-commit"]).status.success());
+        assert!(
+            git(&other, &["commit", "-m", "other-commit"])
+                .status
+                .success()
+        );
         assert!(git(&other, &["push", "origin", "main"]).status.success());
 
         // Local makes a divergent commit (does NOT pull first).
         std::fs::write(local.join("LOCAL.md"), "local\n").unwrap();
         assert!(git(&local, &["add", "."]).status.success());
-        assert!(git(&local, &["commit", "-m", "local-commit"]).status.success());
+        assert!(
+            git(&local, &["commit", "-m", "local-commit"])
+                .status
+                .success()
+        );
 
         // Drive the production pusher; expect `NonFastForward`.
         let pusher = GitIntegrationBranchPusher;
@@ -398,17 +417,19 @@ mod tests {
         assert!(git(&local, &["add", "."]).status.success());
         assert!(git(&local, &["commit", "-m", "init"]).status.success());
         // Point `origin` at a definitely-unreachable URL.
-        assert!(git(
-            &local,
-            &[
-                "remote",
-                "add",
-                "origin",
-                "file:///nonexistent/agentic-afk-unreachable.git",
-            ],
-        )
-        .status
-        .success());
+        assert!(
+            git(
+                &local,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "file:///nonexistent/agentic-afk-unreachable.git",
+                ],
+            )
+            .status
+            .success()
+        );
 
         let pusher = GitIntegrationBranchPusher;
         let result = pusher.push(&local, "main");
@@ -433,8 +454,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let project_path = std::env::temp_dir()
-            .join(format!("agentic-afk-lifecycle-{}-{nonce}", std::process::id()));
+        let project_path = std::env::temp_dir().join(format!(
+            "agentic-afk-lifecycle-{}-{nonce}",
+            std::process::id()
+        ));
         let issues_dir = project_path.join("issues");
         std::fs::create_dir_all(&issues_dir).unwrap();
         let issue_path = issues_dir.join("42.md");

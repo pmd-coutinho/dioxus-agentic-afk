@@ -19,8 +19,8 @@ use agentic_afk_contracts::ProjectResponse;
 use agentic_afk_persistence::{self as persistence, Db};
 
 use crate::coordinator::{CoordinatorError, EventPublisher};
-use crate::plan_run::LifecycleStatus;
 use crate::plan_run::IssueLifecycleWriter;
+use crate::plan_run::LifecycleStatus;
 
 /// Typed result of a [`re_enable_source_issue`] call. The HTTP handler
 /// maps this directly into the wire response so the Dashboard can show
@@ -80,10 +80,9 @@ pub async fn re_enable_source_issue(
     let mut local_cleared = false;
     let mut cleared_assignment = None;
     if let Some(assignment) = latest {
-        let updated =
-            persistence::re_enable_blocked_assignment(db, &assignment.id)
-                .await
-                .map_err(CoordinatorError::from_persistence)?;
+        let updated = persistence::re_enable_blocked_assignment(db, &assignment.id)
+            .await
+            .map_err(CoordinatorError::from_persistence)?;
         local_cleared = true;
         cleared_assignment = Some(updated);
     }
@@ -290,8 +289,7 @@ mod tests {
         assert!(outcome.writeback.is_ok(), "writeback succeeded");
 
         // The persisted Issue Assignment row should be cleared.
-        let refreshed =
-            persistence::get_assignment(&db, &blocked.id).await.unwrap();
+        let refreshed = persistence::get_assignment(&db, &blocked.id).await.unwrap();
         assert_ne!(refreshed.status, "blocked");
         assert!(refreshed.block_reason.is_none());
 
@@ -333,8 +331,7 @@ mod tests {
 
         // The local Issue Assignment row was still cleared (ADR-0035:
         // best-effort write-back does not gate local recovery).
-        let refreshed =
-            persistence::get_assignment(&db, &blocked.id).await.unwrap();
+        let refreshed = persistence::get_assignment(&db, &blocked.id).await.unwrap();
         assert_ne!(refreshed.status, "blocked");
 
         // An Activity entry was recorded so the failure is visible in the
@@ -360,10 +357,9 @@ mod tests {
         let writer_for_use_case: Arc<dyn IssueLifecycleWriter> = writer.clone();
         let events: Arc<dyn EventPublisher> = Arc::new(RecordingPublisher::default());
 
-        let outcome =
-            re_enable_source_issue(&db, &events, &writer_for_use_case, &project, "ghost")
-                .await
-                .expect("use case Ok for missing local row");
+        let outcome = re_enable_source_issue(&db, &events, &writer_for_use_case, &project, "ghost")
+            .await
+            .expect("use case Ok for missing local row");
 
         assert!(
             !outcome.local_cleared,

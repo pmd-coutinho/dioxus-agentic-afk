@@ -151,11 +151,7 @@ pub async fn record_assignment_phase_output_typed(
 /// `outcome="failed"` always routes through [`PhaseOutputBody::Failed`] so
 /// the chokepoint validation can guard the pairing; other phases stay in
 /// their stub variants until subsequent ADR-0038 slices tighten them.
-fn wrap_legacy_body(
-    phase: &str,
-    outcome: &str,
-    body_json: &serde_json::Value,
-) -> PhaseOutputBody {
+fn wrap_legacy_body(phase: &str, outcome: &str, body_json: &serde_json::Value) -> PhaseOutputBody {
     // Push records structured bodies for both success and failure
     // outcomes (ADR-0038 push slice). Inject the `phase` discriminator
     // so serde can route the legacy free-form body into the typed
@@ -225,10 +221,7 @@ fn parse_planning_body(body_json: &serde_json::Value) -> PhaseOutputBody {
                 .iter()
                 .filter_map(|issue| {
                     Some(PlanningSelection {
-                        source_issue_id: issue
-                            .get("source_issue_id")?
-                            .as_str()?
-                            .to_string(),
+                        source_issue_id: issue.get("source_issue_id")?.as_str()?.to_string(),
                         title: issue
                             .get("title")
                             .and_then(serde_json::Value::as_str)
@@ -261,10 +254,7 @@ fn parse_planning_body(body_json: &serde_json::Value) -> PhaseOutputBody {
             rows.iter()
                 .filter_map(|row| {
                     Some(RejectedPlanningCandidate {
-                        source_issue_id: row
-                            .get("source_issue_id")?
-                            .as_str()?
-                            .to_string(),
+                        source_issue_id: row.get("source_issue_id")?.as_str()?.to_string(),
                         reason: row
                             .get("reason")
                             .and_then(serde_json::Value::as_str)
@@ -416,9 +406,7 @@ fn validate_outcome_body(outcome: &str, body: &PhaseOutputBody) -> Result<(), Pe
     // Push body pairs with `succeeded` (fast-forward accepted) or
     // `failed` (non-fast-forward / network / auth). Other outcomes would
     // corrupt the audit log (ADR-0038 push slice).
-    if matches!(body, PhaseOutputBody::Push { .. })
-        && !matches!(outcome, "succeeded" | "failed")
-    {
+    if matches!(body, PhaseOutputBody::Push { .. }) && !matches!(outcome, "succeeded" | "failed") {
         return Err(PersistenceError::PhaseOutputMismatch {
             body_phase: body.phase_tag(),
             outcome: outcome.to_string(),
@@ -434,8 +422,7 @@ fn validate_outcome_body(outcome: &str, body: &PhaseOutputBody) -> Result<(), Pe
     }
     // Review body pairs with `approved` or `rejected`. Other outcomes
     // (e.g. `ready_for_review`, `merged`) would corrupt the audit log.
-    if matches!(body, PhaseOutputBody::Review { .. })
-        && !matches!(outcome, "approved" | "rejected")
+    if matches!(body, PhaseOutputBody::Review { .. }) && !matches!(outcome, "approved" | "rejected")
     {
         return Err(PersistenceError::PhaseOutputMismatch {
             body_phase: body.phase_tag(),
@@ -461,9 +448,7 @@ fn validate_outcome_body(outcome: &str, body: &PhaseOutputBody) -> Result<(), Pe
     // `blocked` (merge could not finish safely; `block_reason` carries
     // the reason). Runner/parse failures land as `Failed` with
     // `outcome = "failed"` via the failure path above.
-    if matches!(body, PhaseOutputBody::Merge { .. })
-        && !matches!(outcome, "merged" | "blocked")
-    {
+    if matches!(body, PhaseOutputBody::Merge { .. }) && !matches!(outcome, "merged" | "blocked") {
         return Err(PersistenceError::PhaseOutputMismatch {
             body_phase: body.phase_tag(),
             outcome: outcome.to_string(),
@@ -475,9 +460,7 @@ fn validate_outcome_body(outcome: &str, body: &PhaseOutputBody) -> Result<(), Pe
 /// Serialize `body` and, if the JSON exceeds the 64 KB ceiling, replace it
 /// with a marker object so the on-disk row stays bounded. Returns the
 /// `serde_json::Value` that will land in the `body_json` column.
-fn truncate_body_if_needed(
-    body: &PhaseOutputBody,
-) -> Result<serde_json::Value, PersistenceError> {
+fn truncate_body_if_needed(body: &PhaseOutputBody) -> Result<serde_json::Value, PersistenceError> {
     let raw = serde_json::to_value(body)
         .map_err(|e| PersistenceError::Database(sqlx::Error::Decode(Box::new(e))))?;
     let serialized = serde_json::to_string(&raw)
@@ -553,7 +536,18 @@ pub async fn finish_plan_run(
 }
 
 pub async fn get_plan_run(db: &Db, plan_run_id: &str) -> Result<PlanRunResponse, PersistenceError> {
-    let row = sqlx::query_as::<_, (String, String, String, String, String, String, Option<String>)>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+        ),
+    >(
         r#"
         SELECT id, project_id, integration_branch, baseline_commit, state, started_at, finished_at
         FROM plan_runs
@@ -796,10 +790,7 @@ pub async fn list_in_flight_phase_rows(
 /// transitions (block-this-assignment, leave-this-merge-staged, etc.)
 /// can land row-by-row rather than via the batch
 /// [`mark_in_flight_rows_interrupted`] sweep.
-pub async fn mark_phase_row_interrupted(
-    db: &Db,
-    row_id: &str,
-) -> Result<(), PersistenceError> {
+pub async fn mark_phase_row_interrupted(db: &Db, row_id: &str) -> Result<(), PersistenceError> {
     sqlx::query(
         r#"
         UPDATE plan_run_phase_outputs

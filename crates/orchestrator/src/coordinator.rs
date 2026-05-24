@@ -21,28 +21,27 @@ use crate::in_flight_phase_tracker::{self as tracker, PhaseLocator, TrackedPhase
 use crate::merge_phase::{
     AssignmentMergeOutcome, MergeRejection, decide_merge_outcome, render_merge_prompt,
 };
-use crate::plan_run_finalize::{PlanRunFinalize, decide_plan_run_terminal};
-use crate::plan_run_status::{AssignmentStatus, transition_assignment};
-use crate::planning_phase::{PlannedClaim, render_planning_prompt, validate_planner_selection};
-use crate::push_attempt::{PushOutcome, classify_push_result};
-use crate::review_loop::{ReviewLoopStep, decide_review_loop_step, render_review_prompt};
 use crate::plan_run::{
     AssignmentWorktreeCleaner, AssignmentWorktreeProvisioner, FakeAssignmentWorktreeCleaner,
     FakeImplementationPhaseRunner, FakeIntegrationBranchPusher, FakeLifecycleWriter,
-    FakeMergePhaseRunner, FakePlanningPhaseRunner, FakeReviewPhaseRunner,
-    FakeWorktreeProvisioner, ImplementationPhaseRunner, IntegrationBranchPusher,
-    IntegrationBranchRefresher, IssueLifecycleWriter, MergePhaseRunner, PlanningPhaseRunner,
-    RefreshedBaseline, ReviewPhaseRunner, StaticIntegrationBranchRefresher,
-    UnimplementedAssignmentWorktreeCleaner, UnimplementedImplementationPhaseRunner,
-    UnimplementedIntegrationBranchPusher, UnimplementedIntegrationBranchRefresher,
-    UnimplementedLifecycleWriter, UnimplementedMergePhaseRunner,
-    UnimplementedPlanningPhaseRunner, UnimplementedReviewPhaseRunner,
-    UnimplementedWorktreeProvisioner,
+    FakeMergePhaseRunner, FakePlanningPhaseRunner, FakeReviewPhaseRunner, FakeWorktreeProvisioner,
+    ImplementationPhaseRunner, IntegrationBranchPusher, IntegrationBranchRefresher,
+    IssueLifecycleWriter, MergePhaseRunner, PlanningPhaseRunner, RefreshedBaseline,
+    ReviewPhaseRunner, StaticIntegrationBranchRefresher, UnimplementedAssignmentWorktreeCleaner,
+    UnimplementedImplementationPhaseRunner, UnimplementedIntegrationBranchPusher,
+    UnimplementedIntegrationBranchRefresher, UnimplementedLifecycleWriter,
+    UnimplementedMergePhaseRunner, UnimplementedPlanningPhaseRunner,
+    UnimplementedReviewPhaseRunner, UnimplementedWorktreeProvisioner,
 };
+use crate::plan_run_finalize::{PlanRunFinalize, decide_plan_run_terminal};
+use crate::plan_run_status::{AssignmentStatus, transition_assignment};
+use crate::planning_phase::{PlannedClaim, render_planning_prompt, validate_planner_selection};
 use crate::production::{
     GhLifecycleWriter, GitAssignmentWorktreeCleaner, GitIntegrationBranchPusher,
     GitIntegrationBranchRefresher, WorktrunkAssignmentWorktreeProvisioner,
 };
+use crate::push_attempt::{PushOutcome, classify_push_result};
+use crate::review_loop::{ReviewLoopStep, decide_review_loop_step, render_review_prompt};
 
 /// Plan Run phase dependencies wired into the router. Tests inject fakes;
 /// production wires real-git / Codex implementations.
@@ -191,10 +190,9 @@ pub fn resolve_deps_for_project(
     let mut resolved = deps.clone();
     if let Some(sandbox) = deps.production_sandbox.clone() {
         let project_path = std::path::PathBuf::from(&project.path);
-        let launcher: Arc<dyn crate::sandbox::SandboxLauncher> =
-            Arc::new(crate::sandbox::DockerSandboxLauncher::new(
-                sandbox.docker_binary.clone(),
-            ));
+        let launcher: Arc<dyn crate::sandbox::SandboxLauncher> = Arc::new(
+            crate::sandbox::DockerSandboxLauncher::new(sandbox.docker_binary.clone()),
+        );
         let make = |phase: crate::sandbox::SandboxPhase| {
             Arc::new(crate::codex_runner::DockerCodexRunner::new(
                 Arc::clone(&launcher),
@@ -528,23 +526,22 @@ async fn finalize_selection_planning(
         }
     };
 
-    let exec_config_lookup =
-        match persistence::get_project_execution_config(db, project_id).await {
-            Ok(Some(config)) => config,
-            Ok(None) => {
-                return Err(fail_planning_phase(
-                    db,
-                    events,
-                    project_id,
-                    &plan_run.id,
-                    "Project Execution Config disappeared during Planning Phase",
-                    "urn:agentic-afk:execution-config-missing",
-                    phase_handle.take().expect("planning row not yet finalized"),
-                )
-                .await);
-            }
-            Err(error) => return Err(CoordinatorError::from_persistence(error)),
-        };
+    let exec_config_lookup = match persistence::get_project_execution_config(db, project_id).await {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            return Err(fail_planning_phase(
+                db,
+                events,
+                project_id,
+                &plan_run.id,
+                "Project Execution Config disappeared during Planning Phase",
+                "urn:agentic-afk:execution-config-missing",
+                phase_handle.take().expect("planning row not yet finalized"),
+            )
+            .await);
+        }
+        Err(error) => return Err(CoordinatorError::from_persistence(error)),
+    };
 
     // Apply the pure `validate_planner_selection` decision. Typed
     // rejections (Unparseable / ExceedsMaxParallel / IneligibleSelection /
@@ -606,30 +603,31 @@ async fn finalize_selection_planning(
         .await
         .map_err(CoordinatorError::from_persistence)?;
 
-        let worktree_path = match deps.worktree.provision(
-            project_path,
-            &baseline.commit_sha,
-            &selection.branch,
-        ) {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = persistence::release_issue_assignment(db, &assignment.id).await;
-                return Err(fail_planning_phase(
-                    db,
-                    events,
-                    project_id,
-                    &plan_run.id,
-                    &error.to_string(),
-                    "urn:agentic-afk:assignment-worktree-failed",
-                    phase_handle.take().expect("planning row not yet finalized"),
-                )
-                .await);
-            }
-        };
+        let worktree_path =
+            match deps
+                .worktree
+                .provision(project_path, &baseline.commit_sha, &selection.branch)
+            {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = persistence::release_issue_assignment(db, &assignment.id).await;
+                    return Err(fail_planning_phase(
+                        db,
+                        events,
+                        project_id,
+                        &plan_run.id,
+                        &error.to_string(),
+                        "urn:agentic-afk:assignment-worktree-failed",
+                        phase_handle.take().expect("planning row not yet finalized"),
+                    )
+                    .await);
+                }
+            };
         let worktree_path_str = worktree_path.to_string_lossy().into_owned();
-        let assignment = persistence::set_assignment_worktree(db, &assignment.id, &worktree_path_str)
-            .await
-            .map_err(CoordinatorError::from_persistence)?;
+        let assignment =
+            persistence::set_assignment_worktree(db, &assignment.id, &worktree_path_str)
+                .await
+                .map_err(CoordinatorError::from_persistence)?;
 
         if let Err(error) = deps
             .lifecycle
@@ -875,7 +873,9 @@ async fn run_assignment_implement_review(
                     assignment,
                     &error.to_string(),
                     "urn:agentic-afk:implementation-phase-failed",
-                    impl_handle.take().expect("implementation row not finalized"),
+                    impl_handle
+                        .take()
+                        .expect("implementation row not finalized"),
                 )
                 .await);
             }
@@ -890,7 +890,9 @@ async fn run_assignment_implement_review(
                     assignment,
                     &error,
                     "urn:agentic-afk:implementation-output-unparseable",
-                    impl_handle.take().expect("implementation row not finalized"),
+                    impl_handle
+                        .take()
+                        .expect("implementation row not finalized"),
                 )
                 .await);
             }
@@ -904,7 +906,9 @@ async fn run_assignment_implement_review(
                 assignment,
                 &err.detail,
                 &err.problem_type,
-                impl_handle.take().expect("implementation row not finalized"),
+                impl_handle
+                    .take()
+                    .expect("implementation row not finalized"),
             )
             .await);
         }
@@ -1023,13 +1027,7 @@ async fn run_assignment_implement_review(
             }
             ReviewLoopStep::Block { reason } => {
                 block_assignment_for_loop(
-                    db,
-                    events,
-                    deps,
-                    project,
-                    project_id,
-                    assignment,
-                    &reason,
+                    db, events, deps, project, project_id, assignment, &reason,
                 )
                 .await?;
                 return Ok(None);
@@ -1295,9 +1293,7 @@ async fn finalize_parallel_plan_run(
                 Err(error) => {
                     let failed_body = agentic_afk_contracts::PhaseOutputBody::Failed {
                         error: error.clone(),
-                        problem_type: Some(
-                            "urn:agentic-afk:merge-output-unparseable".to_string(),
-                        ),
+                        problem_type: Some("urn:agentic-afk:merge-output-unparseable".to_string()),
                     };
                     let _ = merge_handle.complete("failed", failed_body).await;
                     let err = CoordinatorError::from(MergeRejection::Unparseable(error));
@@ -1362,9 +1358,9 @@ async fn finalize_parallel_plan_run(
                 }
                 blocked_assignments.push(blocked);
             }
-            AssignmentMergeOutcome::NotAttempted => unreachable!(
-                "NotAttempted is only produced by the no-review-body branch above"
-            ),
+            AssignmentMergeOutcome::NotAttempted => {
+                unreachable!("NotAttempted is only produced by the no-review-body branch above")
+            }
         }
 
         merge_outcomes.push(merge_outcome);
@@ -1440,8 +1436,7 @@ async fn finalize_parallel_plan_run(
                     }
                 }
             }
-            PushOutcome::NonFastForward { detail: _ }
-            | PushOutcome::Other { detail: _ } => {
+            PushOutcome::NonFastForward { detail: _ } | PushOutcome::Other { detail: _ } => {
                 // Push failure (ADR-0037): leave each staged assignment
                 // at `merge_staged` (no transition), defer worktree
                 // cleanup, and finish the Plan Run as `failed`. The
@@ -1472,9 +1467,9 @@ async fn finalize_parallel_plan_run(
             continue;
         }
         let worktree_path = std::path::Path::new(&assignment.worktree_path);
-        if let Err(error) =
-            deps.cleaner
-                .cleanup(project_path, worktree_path, &assignment.branch)
+        if let Err(error) = deps
+            .cleaner
+            .cleanup(project_path, worktree_path, &assignment.branch)
         {
             eprintln!(
                 "warning: failed to clean up Assignment Worktree for {} after Plan Run finish: {error}",
@@ -1524,9 +1519,7 @@ fn planning_body_from_parsed(
     claims: &[PlannedClaim],
     parsed_body: &serde_json::Value,
 ) -> agentic_afk_contracts::PhaseOutputBody {
-    use agentic_afk_contracts::{
-        PhaseOutputBody, PlanningSelection, RejectedPlanningCandidate,
-    };
+    use agentic_afk_contracts::{PhaseOutputBody, PlanningSelection, RejectedPlanningCandidate};
     let selections = claims
         .iter()
         .map(|claim| PlanningSelection {
@@ -1548,10 +1541,7 @@ fn planning_body_from_parsed(
             rows.iter()
                 .filter_map(|row| {
                     Some(RejectedPlanningCandidate {
-                        source_issue_id: row
-                            .get("source_issue_id")?
-                            .as_str()?
-                            .to_string(),
+                        source_issue_id: row.get("source_issue_id")?.as_str()?.to_string(),
                         reason: row
                             .get("reason")
                             .and_then(serde_json::Value::as_str)
@@ -1762,10 +1752,7 @@ pub fn update_markdown_lifecycle_status(raw_text: String, lifecycle_status: &str
 /// Minimal `SourceIssueSnapshot` constructor used after a lifecycle write
 /// completes. Coordinator callers only need the basic identity for the
 /// optional return value; full parsing remains in the server.
-fn parse_local_markdown_issue_minimal(
-    source_id: String,
-    raw_text: String,
-) -> SourceIssueSnapshot {
+fn parse_local_markdown_issue_minimal(source_id: String, raw_text: String) -> SourceIssueSnapshot {
     SourceIssueSnapshot {
         source_id: source_id.clone(),
         title: source_id,
@@ -1786,12 +1773,7 @@ pub type GhBinaryPath = PathBuf;
 /// `push` Phase Output (ADR-0038). Used by both the Merge Phase first
 /// push and the operator-initiated Retry Push action so the audit log
 /// has one append-only history of pushes for the Plan Run.
-async fn record_push_phase_output(
-    db: &Db,
-    plan_run_id: &str,
-    outcome: &PushOutcome,
-    attempt: u32,
-) {
+async fn record_push_phase_output(db: &Db, plan_run_id: &str, outcome: &PushOutcome, attempt: u32) {
     let stderr = match outcome {
         PushOutcome::Success => String::new(),
         PushOutcome::NonFastForward { detail } | PushOutcome::Other { detail } => detail.clone(),
@@ -1883,21 +1865,22 @@ pub async fn retry_push(
             ));
         }
     };
-    let plan_run_id = assignment
-        .plan_run_id
-        .clone()
-        .ok_or_else(|| CoordinatorError::new(
+    let plan_run_id = assignment.plan_run_id.clone().ok_or_else(|| {
+        CoordinatorError::new(
             422,
             "urn:agentic-afk:assignment-missing-plan-run",
             "Issue Assignment is not nested under a Plan Run".to_string(),
-        ))?;
+        )
+    })?;
 
     // Determine the attempt count for the body's `attempt` field by
     // counting prior `push` Phase Outputs for the Plan Run. Persistence
     // does not surface a dedicated counter so we read what we already
     // wrote. Failure to count defaults to `1` — the body is best-effort
     // metadata and we never want to fail Retry Push for it.
-    let attempt = count_push_attempts(db, &plan_run_id).await.saturating_add(1);
+    let attempt = count_push_attempts(db, &plan_run_id)
+        .await
+        .saturating_add(1);
 
     let project_path = std::path::Path::new(&project.path);
     let push_result = deps
@@ -2084,9 +2067,9 @@ pub async fn abandon_staged(
     let project_path = std::path::Path::new(&project.path);
     if !blocked.worktree_path.is_empty() {
         let worktree_path = std::path::Path::new(&blocked.worktree_path);
-        if let Err(error) =
-            deps.cleaner
-                .cleanup(project_path, worktree_path, &blocked.branch)
+        if let Err(error) = deps
+            .cleaner
+            .cleanup(project_path, worktree_path, &blocked.branch)
         {
             eprintln!(
                 "warning: failed to clean Assignment Worktree after Abandon Staged for {}: {error}",

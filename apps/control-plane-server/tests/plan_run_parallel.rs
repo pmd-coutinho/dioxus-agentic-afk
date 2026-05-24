@@ -300,7 +300,12 @@ async fn two_eligible_assignments_merge_together_inside_one_plan_run() {
     .await;
     let pid = fixture.project.id.0.clone();
     let resp = start(&fixture.router, &pid).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{}",
+        read_text(resp).await
+    );
 
     let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 10)
         .await
@@ -343,8 +348,7 @@ async fn two_eligible_assignments_merge_together_inside_one_plan_run() {
 
     // Both merged worktrees were cleaned up at Plan Run finish.
     assert_eq!(fixture.cleaner.call_count(), 2);
-    let cleaned_branches: Vec<String> =
-        fixture.cleaner.calls().into_iter().map(|c| c.2).collect();
+    let cleaned_branches: Vec<String> = fixture.cleaner.calls().into_iter().map(|c| c.2).collect();
     assert!(cleaned_branches.contains(&"agent/issue-42".to_string()));
     assert!(cleaned_branches.contains(&"agent/issue-43".to_string()));
 
@@ -362,8 +366,7 @@ async fn partial_success_merges_reviewed_work_and_keeps_blocked_assignment_block
         PerSourceReviewPhaseRunner::new()
             .with_source("42", REVIEW_APPROVED_42)
             .with_source("43", REVIEW_REJECTED_43),
-        PerSourceMergePhaseRunner::new()
-            .with_source("42", MERGE_OK_42),
+        PerSourceMergePhaseRunner::new().with_source("42", MERGE_OK_42),
         &[issue("42"), issue("43")],
         TWO_ISSUE_PLAN,
         2,
@@ -372,7 +375,12 @@ async fn partial_success_merges_reviewed_work_and_keeps_blocked_assignment_block
     .await;
     let pid = fixture.project.id.0.clone();
     let resp = start(&fixture.router, &pid).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{}",
+        read_text(resp).await
+    );
 
     let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 10)
         .await
@@ -396,7 +404,10 @@ async fn partial_success_merges_reviewed_work_and_keeps_blocked_assignment_block
         .unwrap();
     assert_eq!(a42.status, "merged");
     assert_eq!(a43.status, "blocked");
-    assert!(a43.block_reason.is_some(), "blocked assignment carries reason");
+    assert!(
+        a43.block_reason.is_some(),
+        "blocked assignment carries reason"
+    );
     assert!(a43.review_rejection_count >= 1);
 
     // Merge Phase only ran for the reviewed assignment.
@@ -413,8 +424,7 @@ async fn partial_success_merges_reviewed_work_and_keeps_blocked_assignment_block
     // Cleanup runs for both the merged AND the blocked assignment so the
     // blocked branch/worktree doesn't linger past Plan Run finish.
     assert_eq!(fixture.cleaner.call_count(), 2);
-    let cleaned_branches: Vec<String> =
-        fixture.cleaner.calls().into_iter().map(|c| c.2).collect();
+    let cleaned_branches: Vec<String> = fixture.cleaner.calls().into_iter().map(|c| c.2).collect();
     assert!(cleaned_branches.contains(&"agent/issue-42".to_string()));
     assert!(cleaned_branches.contains(&"agent/issue-43".to_string()));
 
@@ -439,7 +449,12 @@ async fn all_blocked_plan_run_finishes_as_failed_without_pushing() {
     .await;
     let pid = fixture.project.id.0.clone();
     let resp = start(&fixture.router, &pid).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{}",
+        read_text(resp).await
+    );
 
     let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 10)
         .await
@@ -524,7 +539,12 @@ async fn second_plan_run_excludes_dormant_blocked_assignment_from_capacity() {
     .await;
     let pid = fixture.project.id.0.clone();
     let resp = start(&fixture.router, &pid).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{}", read_text(resp).await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{}",
+        read_text(resp).await
+    );
 
     // The blocked assignment is dormant: it survives Plan Run finish in
     // the persistence layer (so the Dashboard still shows it), but the

@@ -70,7 +70,10 @@ impl DockerCodexRunner {
         attempt_id: Option<&str>,
     ) -> Vec<(String, String)> {
         let mut labels = vec![
-            ("agentic-afk.plan-run-id".to_string(), plan_run_id.to_string()),
+            (
+                "agentic-afk.plan-run-id".to_string(),
+                plan_run_id.to_string(),
+            ),
             ("agentic-afk.project-id".to_string(), project_id.to_string()),
             (
                 "agentic-afk.phase".to_string(),

@@ -13,11 +13,10 @@ use ui::{
 
 use agentic_afk_contracts::{
     AppInfoResponse, AutoReplanState, EnableIssueSourceRequest, GitSummary,
-    IssueAssignmentResponse, IssueSourceCandidate, IssueSourceSyncResponse, PlanRunResponse,
-    PlanningSnapshotResponse, ProjectActivityEntryResponse, ProjectEvent,
+    IssueAssignmentResponse, IssueSourceCandidate, IssueSourceSyncResponse, PauseReason,
+    PlanRunResponse, PlanningSnapshotResponse, ProjectActivityEntryResponse, ProjectEvent,
     ProjectExecutionConfigResponse, ProjectId, ProjectResponse, ProjectSnapshotResponse,
-    SetProjectExecutionConfigRequest,
-    SourceIssueSnapshot,
+    SetProjectExecutionConfigRequest, SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
 use std::cell::RefCell;
@@ -474,6 +473,7 @@ fn ProjectOverview(id: String) -> Element {
     rsx! {
         match project {
             Some(project) => rsx! {
+                AutoReplanPausedBanner { project: project.clone() }
                 div { class: "grid gap-6 lg:grid-cols-2",
                     ProjectMetaCard { project: project.clone() }
                 }
@@ -507,6 +507,82 @@ fn ProjectOverview(id: String) -> Element {
                     }
                 }
             },
+        }
+    }
+}
+
+#[component]
+fn AutoReplanPausedBanner(project: ProjectResponse) -> Element {
+    if project.auto_replan_state != AutoReplanState::Paused {
+        return rsx! {};
+    }
+
+    let store = use_context::<ProjectStore>();
+    let project_id = project.id.0.clone();
+    let reason = project
+        .auto_replan_pause_reason
+        .unwrap_or(PauseReason::PlanningFailed);
+    let copy = auto_replan_pause_copy(reason);
+    let resume_key = MutationKey::ResumeAutoReplan(project.id.clone());
+    let disarm_key = MutationKey::DisarmAutoReplan(project.id.clone());
+
+    rsx! {
+        div {
+            class: "flex flex-col gap-3 border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-950 sm:flex-row sm:items-center sm:justify-between",
+            "data-testid": "auto-replan-paused-banner",
+            div { class: "flex min-w-0 flex-col gap-1",
+                div { class: "flex flex-wrap items-center gap-2",
+                    StatusPill { tone: PillTone::Failed, label: "Paused".to_string() }
+                    p { class: "font-semibold", "Auto-Replan paused" }
+                }
+                p { class: "text-red-900", "{copy}" }
+            }
+            div { class: "flex shrink-0 flex-wrap items-center gap-2",
+                ActionButton {
+                    mutation_key: resume_key.clone(),
+                    variant: ButtonVariant::Primary,
+                    testid: Some("auto-replan-banner-resume".to_string()),
+                    error_marker: Some("auto-replan".to_string()),
+                    on_press: {
+                        let store = store.clone();
+                        let key = resume_key.clone();
+                        let project_id = project_id.clone();
+                        move |_| {
+                            let store = store.clone();
+                            let key = key.clone();
+                            let project_id = project_id.clone();
+                            spawn(async move {
+                                let _ = store
+                                    .mutate(key, auto_replan_api(project_id, "resume".to_string()))
+                                    .await;
+                            });
+                        }
+                    },
+                    "Resume"
+                }
+                ActionButton {
+                    mutation_key: disarm_key.clone(),
+                    variant: ButtonVariant::Default,
+                    testid: Some("auto-replan-banner-disarm".to_string()),
+                    error_marker: Some("auto-replan".to_string()),
+                    on_press: {
+                        let store = store.clone();
+                        let key = disarm_key.clone();
+                        let project_id = project_id.clone();
+                        move |_| {
+                            let store = store.clone();
+                            let key = key.clone();
+                            let project_id = project_id.clone();
+                            spawn(async move {
+                                let _ = store
+                                    .mutate(key, auto_replan_api(project_id, "disarm".to_string()))
+                                    .await;
+                            });
+                        }
+                    },
+                    "Disarm"
+                }
+            }
         }
     }
 }
@@ -1052,7 +1128,10 @@ fn PhaseOutputRow(phase_output: agentic_afk_contracts::PhaseOutputResponse) -> E
 fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element {
     use agentic_afk_contracts::PhaseOutputBody;
     match body {
-        PhaseOutputBody::Failed { error, problem_type } => rsx! {
+        PhaseOutputBody::Failed {
+            error,
+            problem_type,
+        } => rsx! {
             div { class: "flex flex-col gap-1",
                 p { class: "font-mono text-[12px] text-coral",
                     "data-testid": "phase-output-error",
@@ -1066,7 +1145,12 @@ fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element 
                 }
             }
         },
-        PhaseOutputBody::Implementation { commits, verification, gaps, summary } => rsx! {
+        PhaseOutputBody::Implementation {
+            commits,
+            verification,
+            gaps,
+            summary,
+        } => rsx! {
             div { class: "flex flex-col gap-2",
                 "data-testid": "phase-output-implementation",
                 if !summary.is_empty() {
@@ -1099,7 +1183,12 @@ fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element 
                 }
             }
         },
-        PhaseOutputBody::Review { findings, verification, gaps, summary } => rsx! {
+        PhaseOutputBody::Review {
+            findings,
+            verification,
+            gaps,
+            summary,
+        } => rsx! {
             div { class: "flex flex-col gap-2",
                 "data-testid": "phase-output-review",
                 if !summary.is_empty() {
@@ -1144,7 +1233,13 @@ fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element 
                 }
             }
         },
-        PhaseOutputBody::Merge { merged_source_ids, verification, gaps, summary, block_reason } => rsx! {
+        PhaseOutputBody::Merge {
+            merged_source_ids,
+            verification,
+            gaps,
+            summary,
+            block_reason,
+        } => rsx! {
             div { class: "flex flex-col gap-2",
                 "data-testid": "phase-output-merge",
                 if !summary.is_empty() {
@@ -1183,7 +1278,11 @@ fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element 
                 }
             }
         },
-        PhaseOutputBody::Push { stderr, fast_forward, attempt } => rsx! {
+        PhaseOutputBody::Push {
+            stderr,
+            fast_forward,
+            attempt,
+        } => rsx! {
             div { class: "flex flex-col gap-2",
                 "data-testid": "phase-output-push",
                 p { class: "font-mono text-[11px] text-ink-2",
@@ -1198,7 +1297,11 @@ fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element 
                 }
             }
         },
-        PhaseOutputBody::Planning { selections, summary, rejected_candidates } => {
+        PhaseOutputBody::Planning {
+            selections,
+            summary,
+            rejected_candidates,
+        } => {
             let is_empty = selections.is_empty() && rejected_candidates.is_empty();
             rsx! {
                 div { class: "flex flex-col gap-2",
@@ -1593,6 +1696,25 @@ fn derive_auto_replan_pill(state: AutoReplanState) -> (PillTone, &'static str) {
     }
 }
 
+fn auto_replan_pause_copy(reason: PauseReason) -> &'static str {
+    match reason {
+        PauseReason::EmptyBacklog => "Backlog drained. No Ready Issues left to plan.",
+        PauseReason::AssignmentBlocked => {
+            "Plan Run finished with blocked Issue Assignment(s). Resolve via Re-Enable."
+        }
+        PauseReason::PushNonFastForward => {
+            "Integration Branch push diverged. Retry Push or Abandon Staged on the affected Issue Assignment."
+        }
+        PauseReason::MergeStagedLeft => {
+            "Plan Run finished with merge_staged work. Decide Retry Push or Abandon Staged."
+        }
+        PauseReason::PlanningFailed => {
+            "Planning Phase failed. See latest Plan Run for diagnostics."
+        }
+        PauseReason::SyncFailed => "Issue Source sync failed. Check GitHub auth or network.",
+    }
+}
+
 fn derive_git_pill(summary: Option<&GitSummary>) -> (PillTone, String) {
     match summary {
         None => (PillTone::Idle, "No Git".to_string()),
@@ -1913,11 +2035,7 @@ fn PlanningGroup(
 }
 
 #[component]
-fn PlanningIssue(
-    project_id: String,
-    issue: SourceIssueSnapshot,
-    allow_mark_prd: bool,
-) -> Element {
+fn PlanningIssue(project_id: String, issue: SourceIssueSnapshot, allow_mark_prd: bool) -> Element {
     let dependencies = if issue.issue_dependencies.is_empty() {
         "No dependencies".to_string()
     } else {

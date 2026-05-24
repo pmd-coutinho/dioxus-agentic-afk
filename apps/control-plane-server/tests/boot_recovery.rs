@@ -16,12 +16,12 @@ use agentic_afk_orchestrator::boot_recovery_scanner::{
     self, ACTIVITY_KIND_ASSIGNMENT_BLOCKED_ON_RESTART, NoopEventPublisher,
     PLAN_RUN_TERMINAL_FINISHED,
 };
-use futures_util::StreamExt;
 use agentic_afk_persistence::{
     self as persistence, connect_in_memory, create_plan_run, create_plan_run_assignment,
     create_project, insert_in_flight_phase_output, list_project_activity, migrate,
     set_assignment_status,
 };
+use futures_util::StreamExt;
 
 #[tokio::test]
 async fn killed_mid_implementation_recovers_to_blocked_finished_with_activity() {
@@ -68,14 +68,10 @@ async fn killed_mid_implementation_recovers_to_blocked_finished_with_activity() 
         .unwrap();
     // Pre-spawn `in_flight` row, simulating the moment between
     // InFlightPhaseTracker::start() and the killed Codex child's exit.
-    let _ = insert_in_flight_phase_output(
-        &db,
-        &plan_run.id,
-        Some(&assignment.id),
-        "implementation",
-    )
-    .await
-    .unwrap();
+    let _ =
+        insert_in_flight_phase_output(&db, &plan_run.id, Some(&assignment.id), "implementation")
+            .await
+            .unwrap();
 
     // Run the scanner — emulating what serve() does between migrate()
     // and TcpListener::bind() on the next boot.
@@ -105,7 +101,10 @@ async fn killed_mid_implementation_recovers_to_blocked_finished_with_activity() 
         1,
         "exactly one AssignmentBlockedOnRestart Activity entry per recovered assignment"
     );
-    assert_eq!(matching[0].assignment_id.as_deref(), Some(assignment.id.as_str()));
+    assert_eq!(
+        matching[0].assignment_id.as_deref(),
+        Some(assignment.id.as_str())
+    );
 
     let finished_run = persistence::get_plan_run(&db, &plan_run.id).await.unwrap();
     assert_eq!(finished_run.state, PLAN_RUN_TERMINAL_FINISHED);
@@ -165,14 +164,9 @@ async fn boot_recovery_publisher_emits_sse_deltas_for_dashboard_during_window() 
     set_assignment_status(&db, &assignment.id, "implemented", None)
         .await
         .unwrap();
-    let _ = insert_in_flight_phase_output(
-        &db,
-        &plan_run.id,
-        Some(&assignment.id),
-        "review",
-    )
-    .await
-    .unwrap();
+    let _ = insert_in_flight_phase_output(&db, &plan_run.id, Some(&assignment.id), "review")
+        .await
+        .unwrap();
 
     let bus = EventBus::new();
     // Subscribe BEFORE the scanner publishes so the broadcast channel
@@ -187,13 +181,10 @@ async fn boot_recovery_publisher_emits_sse_deltas_for_dashboard_during_window() 
     let mut saw_status_change = false;
     let mut saw_activity = false;
     let mut saw_plan_run_completed = false;
-    while let Some(seq) = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        stream.next(),
-    )
-    .await
-    .ok()
-    .flatten()
+    while let Some(seq) = tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
+        .await
+        .ok()
+        .flatten()
     {
         match seq.event {
             ProjectEvent::AssignmentStatusChanged(a) => {
@@ -215,7 +206,16 @@ async fn boot_recovery_publisher_emits_sse_deltas_for_dashboard_during_window() 
             _ => {}
         }
     }
-    assert!(saw_status_change, "AssignmentStatusChanged delta with OrchestratorRestart kind expected");
-    assert!(saw_activity, "AssignmentBlockedOnRestart Activity delta expected");
-    assert!(saw_plan_run_completed, "PlanRunCompleted (finished) delta expected");
+    assert!(
+        saw_status_change,
+        "AssignmentStatusChanged delta with OrchestratorRestart kind expected"
+    );
+    assert!(
+        saw_activity,
+        "AssignmentBlockedOnRestart Activity delta expected"
+    );
+    assert!(
+        saw_plan_run_completed,
+        "PlanRunCompleted (finished) delta expected"
+    );
 }

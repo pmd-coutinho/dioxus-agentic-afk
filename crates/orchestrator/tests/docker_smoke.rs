@@ -64,10 +64,7 @@ fn smoke_build_and_mise_install_against_repo_mise_toml() {
         phase: SandboxPhase::Planning,
         labels: vec![
             ("agentic-afk.phase".to_string(), "planning".to_string()),
-            (
-                "agentic-afk.smoke-test".to_string(),
-                "issue-72".to_string(),
-            ),
+            ("agentic-afk.smoke-test".to_string(), "issue-72".to_string()),
         ],
         mounts: vec![
             SandboxMount::Bind {
@@ -96,7 +93,10 @@ fn smoke_build_and_mise_install_against_repo_mise_toml() {
             "agentic-afk-smoke-mise-version",
         ))
         .expect("mise --version succeeds in container");
-    assert!(!version_out.trim().is_empty(), "mise --version produced output");
+    assert!(
+        !version_out.trim().is_empty(),
+        "mise --version produced output"
+    );
 
     // First mise install — primes the named cache volume.
     let t0 = std::time::Instant::now();

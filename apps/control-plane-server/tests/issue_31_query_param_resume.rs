@@ -79,7 +79,10 @@ async fn events_endpoint_honors_last_event_id_query_param_when_header_absent() {
     let body = read_until_frame(&mut stream, std::time::Duration::from_secs(2)).await;
     let frames = parse_sse_events(&body);
 
-    assert!(!frames.is_empty(), "expected replay frames, body was: {body}");
+    assert!(
+        !frames.is_empty(),
+        "expected replay frames, body was: {body}"
+    );
     assert_eq!(frames[0].id, "2", "expected replay to start at seq=2");
     let event: ProjectEvent = serde_json::from_str(&frames[0].data).unwrap();
     match event {
@@ -175,7 +178,10 @@ fn parse_sse_events(raw: &str) -> Vec<SseFrame> {
     frames
 }
 
-async fn read_until_frame(stream: &mut tokio::net::TcpStream, timeout: std::time::Duration) -> String {
+async fn read_until_frame(
+    stream: &mut tokio::net::TcpStream,
+    timeout: std::time::Duration,
+) -> String {
     let mut buffer = vec![0u8; 8192];
     let mut accumulated = String::new();
     let deadline = tokio::time::Instant::now() + timeout;

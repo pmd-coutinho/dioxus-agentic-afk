@@ -5,11 +5,13 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod auto_replan;
+pub mod boot_container_sweeper;
+pub mod boot_recovery_scanner;
+pub mod codex_runner;
 pub mod coordinator;
 pub mod implementation_phase;
-pub mod boot_recovery_scanner;
 pub mod in_flight_phase_tracker;
-pub mod shutdown_coordinator;
 pub mod merge_phase;
 pub mod plan_run;
 pub mod plan_run_finalize;
@@ -19,9 +21,8 @@ pub mod production;
 pub mod push_attempt;
 pub mod re_enable_source_issue;
 pub mod review_loop;
-pub mod boot_container_sweeper;
-pub mod codex_runner;
 pub mod sandbox;
+pub mod shutdown_coordinator;
 
 pub use codex_runner::DockerCodexRunner;
 pub use sandbox::{
@@ -33,14 +34,18 @@ pub use sandbox::{
     runtime_image_tag,
 };
 
+pub use auto_replan::{
+    AutoReplanCurrent, AutoReplanDecision, AutoReplanDriver, CycleOutcome, CycleTrigger,
+    SyncOutcome, classify_plan_run_for_auto_replan,
+};
 pub use coordinator::{
     CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs,
     SandboxProductionConfig, abandon_staged, retry_push, run_plan_run,
     update_markdown_lifecycle_status,
 };
-pub use re_enable_source_issue::{ReEnableOutcome, WritebackError, re_enable_source_issue};
-pub use push_attempt::{PushOutcome, classify_push_result};
 pub use planning_phase::{PlannedClaim, PlanningRejection, render_planning_prompt};
+pub use push_attempt::{PushOutcome, classify_push_result};
+pub use re_enable_source_issue::{ReEnableOutcome, WritebackError, re_enable_source_issue};
 
 pub use plan_run_status::{AssignmentStatus, transition_assignment};
 
@@ -57,14 +62,13 @@ pub use plan_run::{
     IntegrationBranchRefresher, IssueLifecycleWriter, LifecycleStatus, MergePhaseRunner,
     ParsedImplementationOutput, ParsedMergeOutput, ParsedPlanningOutput, ParsedReviewOutput,
     PerSourceImplementationPhaseRunner, PerSourceMergePhaseRunner, PerSourceReviewPhaseRunner,
-    PlanRunPhaseError, PlannerSelection, PlanningPhaseRunner, RefreshedBaseline,
-    ReviewPhaseRunner, StaticIntegrationBranchRefresher,
-    UnimplementedAssignmentWorktreeCleaner, UnimplementedImplementationPhaseRunner,
-    UnimplementedIntegrationBranchPusher, UnimplementedIntegrationBranchRefresher,
-    UnimplementedLifecycleWriter, UnimplementedMergePhaseRunner,
-    UnimplementedPlanningPhaseRunner, UnimplementedReviewPhaseRunner,
-    UnimplementedWorktreeProvisioner, extract_planner_selections, parse_implementation_output,
-    parse_merge_output, parse_planning_output, parse_review_output,
+    PlanRunPhaseError, PlannerSelection, PlanningPhaseRunner, RefreshedBaseline, ReviewPhaseRunner,
+    StaticIntegrationBranchRefresher, UnimplementedAssignmentWorktreeCleaner,
+    UnimplementedImplementationPhaseRunner, UnimplementedIntegrationBranchPusher,
+    UnimplementedIntegrationBranchRefresher, UnimplementedLifecycleWriter,
+    UnimplementedMergePhaseRunner, UnimplementedPlanningPhaseRunner,
+    UnimplementedReviewPhaseRunner, UnimplementedWorktreeProvisioner, extract_planner_selections,
+    parse_implementation_output, parse_merge_output, parse_planning_output, parse_review_output,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

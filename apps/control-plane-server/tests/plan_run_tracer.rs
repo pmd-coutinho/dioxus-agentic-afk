@@ -7,8 +7,8 @@ use agentic_afk_contracts::{
     SetProjectExecutionConfigRequest,
 };
 use agentic_afk_control_plane_server::{
-    ControlPlaneConfig, FakePlanningPhaseRunner, RefreshedBaseline, StaticIntegrationBranchRefresher,
-    router_with_plan_run_deps,
+    ControlPlaneConfig, FakePlanningPhaseRunner, RefreshedBaseline,
+    StaticIntegrationBranchRefresher, router_with_plan_run_deps,
 };
 use agentic_afk_persistence::{self as persistence};
 use axum::body::Body;
@@ -164,7 +164,10 @@ async fn empty_plan_run_succeeds_and_appears_in_snapshot() {
     assert!(snapshot.snapshot.active_plan_run.is_none());
     assert_eq!(snapshot.snapshot.recent_plan_runs.len(), 1);
     assert_eq!(snapshot.snapshot.recent_plan_runs[0].id, plan_run.id);
-    assert_eq!(snapshot.snapshot.recent_plan_runs[0].state, "succeeded_empty");
+    assert_eq!(
+        snapshot.snapshot.recent_plan_runs[0].state,
+        "succeeded_empty"
+    );
     let cfg = snapshot.snapshot.execution_config.as_ref().unwrap();
     assert_eq!(cfg.integration_branch, "main");
     assert_eq!(cfg.max_parallel_tasks, 4);

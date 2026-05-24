@@ -75,10 +75,7 @@ struct Fixture {
     lifecycle: Arc<FakeLifecycleWriter>,
 }
 
-async fn build_fixture(
-    planner_stdout: &str,
-    eligible: Vec<SourceIssueSnapshot>,
-) -> Fixture {
+async fn build_fixture(planner_stdout: &str, eligible: Vec<SourceIssueSnapshot>) -> Fixture {
     let db = persistence::connect_in_memory().await.unwrap();
     persistence::migrate(&db).await.unwrap();
 
@@ -364,9 +361,15 @@ async fn lifecycle_write_failure_releases_provisional_assignment() {
         kind: "github".into(),
         locator: "owner/repo".into(),
     };
-    persistence::replace_planning_snapshot(&db, &pid, &source, &[issue("42", "ready", vec![])], "unix:1")
-        .await
-        .unwrap();
+    persistence::replace_planning_snapshot(
+        &db,
+        &pid,
+        &source,
+        &[issue("42", "ready", vec![])],
+        "unix:1",
+    )
+    .await
+    .unwrap();
     router
         .clone()
         .oneshot(
@@ -651,9 +654,15 @@ async fn worktree_provision_failure_releases_provisional_assignment() {
         kind: "github".into(),
         locator: "owner/repo".into(),
     };
-    persistence::replace_planning_snapshot(&db, &pid, &source, &[issue("42", "ready", vec![])], "unix:1")
-        .await
-        .unwrap();
+    persistence::replace_planning_snapshot(
+        &db,
+        &pid,
+        &source,
+        &[issue("42", "ready", vec![])],
+        "unix:1",
+    )
+    .await
+    .unwrap();
     router
         .clone()
         .oneshot(

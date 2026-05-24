@@ -125,17 +125,13 @@ impl EventBus {
             (replay, receiver)
         };
 
-        let live = BroadcastStream::new(receiver)
-            .filter_map(move |item| async move { item.ok() });
+        let live = BroadcastStream::new(receiver).filter_map(move |item| async move { item.ok() });
 
         futures_util::stream::iter(replay).chain(live)
     }
 }
 
-fn compute_replay(
-    channel: &ProjectChannel,
-    last_seen_seq: Option<u64>,
-) -> Vec<SequencedEvent> {
+fn compute_replay(channel: &ProjectChannel, last_seen_seq: Option<u64>) -> Vec<SequencedEvent> {
     let Some(last_seen) = last_seen_seq else {
         return Vec::new();
     };

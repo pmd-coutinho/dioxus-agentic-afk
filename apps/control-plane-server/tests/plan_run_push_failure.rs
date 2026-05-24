@@ -109,7 +109,10 @@ struct ScriptedPusher {
 
 impl ScriptedPusher {
     fn new(responses: Vec<Result<(), PlanRunPhaseError>>) -> Self {
-        assert!(!responses.is_empty(), "ScriptedPusher needs at least one response");
+        assert!(
+            !responses.is_empty(),
+            "ScriptedPusher needs at least one response"
+        );
         Self {
             responses: Mutex::new(responses),
             calls: Mutex::new(Vec::new()),
@@ -274,8 +277,7 @@ async fn push_failure_then_retry_push_succeeds_round_trip_smoke() {
         lifecycle.clone() as Arc<dyn IssueLifecycleWriter>,
         Arc::new(FakeImplementationPhaseRunner::with_stdout(IMPL_OK))
             as Arc<dyn ImplementationPhaseRunner>,
-        Arc::new(FakeReviewPhaseRunner::with_stdout(REVIEW_APPROVED))
-            as Arc<dyn ReviewPhaseRunner>,
+        Arc::new(FakeReviewPhaseRunner::with_stdout(REVIEW_APPROVED)) as Arc<dyn ReviewPhaseRunner>,
         Arc::new(FakeMergePhaseRunner::with_stdout(MERGE_OK)) as Arc<dyn MergePhaseRunner>,
         pusher.clone() as Arc<dyn IntegrationBranchPusher>,
         cleaner.clone() as Arc<dyn AssignmentWorktreeCleaner>,
@@ -293,7 +295,9 @@ async fn push_failure_then_retry_push_succeeds_round_trip_smoke() {
         "first plan run finished gracefully: {}",
         read_text(resp).await
     );
-    let runs = persistence::list_recent_plan_runs(&db, &pid, 5).await.unwrap();
+    let runs = persistence::list_recent_plan_runs(&db, &pid, 5)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].state, "failed", "push failure fails the Plan Run");
     let assignment_id = runs[0].assignments[0].id.clone();
@@ -326,17 +330,20 @@ async fn push_failure_then_retry_push_succeeds_round_trip_smoke() {
     assert_eq!(pusher.call_count(), 2);
 
     // Assignment now terminal: cleanup ran, lifecycle Completed written.
-    let after = persistence::get_assignment(&db, &assignment_id).await.unwrap();
+    let after = persistence::get_assignment(&db, &assignment_id)
+        .await
+        .unwrap();
     assert_eq!(after.status, "merged");
-    assert_eq!(cleaner.call_count(), 1, "worktree cleaned at terminal status");
+    assert_eq!(
+        cleaner.call_count(),
+        1,
+        "worktree cleaned at terminal status"
+    );
     let completed: Vec<_> = lifecycle
         .calls()
         .into_iter()
         .filter(|(_, status)| {
-            matches!(
-                status,
-                agentic_afk_orchestrator::LifecycleStatus::Completed
-            )
+            matches!(status, agentic_afk_orchestrator::LifecycleStatus::Completed)
         })
         .collect();
     assert_eq!(
@@ -346,7 +353,9 @@ async fn push_failure_then_retry_push_succeeds_round_trip_smoke() {
     );
 
     // Plan Run terminal status preserved (ADR-0037).
-    let runs = persistence::list_recent_plan_runs(&db, &pid, 5).await.unwrap();
+    let runs = persistence::list_recent_plan_runs(&db, &pid, 5)
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(
         runs[0].state, "failed",
@@ -395,8 +404,7 @@ async fn abandon_staged_round_trip_smoke() {
         lifecycle.clone() as Arc<dyn IssueLifecycleWriter>,
         Arc::new(FakeImplementationPhaseRunner::with_stdout(IMPL_OK))
             as Arc<dyn ImplementationPhaseRunner>,
-        Arc::new(FakeReviewPhaseRunner::with_stdout(REVIEW_APPROVED))
-            as Arc<dyn ReviewPhaseRunner>,
+        Arc::new(FakeReviewPhaseRunner::with_stdout(REVIEW_APPROVED)) as Arc<dyn ReviewPhaseRunner>,
         Arc::new(FakeMergePhaseRunner::with_stdout(MERGE_OK)) as Arc<dyn MergePhaseRunner>,
         pusher.clone() as Arc<dyn IntegrationBranchPusher>,
         cleaner.clone() as Arc<dyn AssignmentWorktreeCleaner>,
@@ -407,7 +415,9 @@ async fn abandon_staged_round_trip_smoke() {
     let pid = build_project(&router, &db, &project_dir).await;
 
     let _ = start_plan_run(&router, &pid).await;
-    let runs = persistence::list_recent_plan_runs(&db, &pid, 5).await.unwrap();
+    let runs = persistence::list_recent_plan_runs(&db, &pid, 5)
+        .await
+        .unwrap();
     let assignment_id = runs[0].assignments[0].id.clone();
     assert_eq!(runs[0].assignments[0].status, "merge_staged");
     let pushes_before = pusher.call_count();
@@ -431,7 +441,9 @@ async fn abandon_staged_round_trip_smoke() {
     assert_eq!(resp.status(), StatusCode::OK);
     let outcome: agentic_afk_contracts::AbandonStagedResponse = read_json(resp).await;
     assert_eq!(outcome.status, "blocked");
-    let reason = outcome.block_reason.expect("abandon must carry block_reason");
+    let reason = outcome
+        .block_reason
+        .expect("abandon must carry block_reason");
     assert_eq!(
         reason.kind,
         agentic_afk_contracts::BlockReason::AbandonedStaged
@@ -450,16 +462,15 @@ async fn abandon_staged_round_trip_smoke() {
         .calls()
         .into_iter()
         .filter(|(_, status)| {
-            matches!(
-                status,
-                agentic_afk_orchestrator::LifecycleStatus::Completed
-            )
+            matches!(status, agentic_afk_orchestrator::LifecycleStatus::Completed)
         })
         .collect();
     assert!(completed.is_empty());
 
     // Plan Run terminal status remains failed.
-    let runs = persistence::list_recent_plan_runs(&db, &pid, 5).await.unwrap();
+    let runs = persistence::list_recent_plan_runs(&db, &pid, 5)
+        .await
+        .unwrap();
     assert_eq!(runs[0].state, "failed");
 
     drop(project_dir);

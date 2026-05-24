@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use agentic_afk_contracts::{
     AppInfoResponse, AssignmentAttemptResponse, AssignmentTerminalOutcome, AutoReplanState,
@@ -19,8 +21,7 @@ pub use agentic_afk_orchestrator::{
     GitIntegrationBranchRefresher, ImplementationPhaseRunner, IntegrationBranchPusher,
     IntegrationBranchRefresher, IssueLifecycleWriter, LifecycleStatus, MergePhaseRunner,
     PerSourceImplementationPhaseRunner, PerSourceMergePhaseRunner, PerSourceReviewPhaseRunner,
-    PlanRunDeps, PlanRunPhaseError, PlannerSelection,
-    PlanningPhaseRunner, RefreshedBaseline,
+    PlanRunDeps, PlanRunPhaseError, PlannerSelection, PlanningPhaseRunner, RefreshedBaseline,
     ReviewPhaseRunner, StaticIntegrationBranchRefresher, UnimplementedAssignmentWorktreeCleaner,
     UnimplementedImplementationPhaseRunner, UnimplementedIntegrationBranchPusher,
     UnimplementedIntegrationBranchRefresher, UnimplementedLifecycleWriter,
@@ -42,6 +43,8 @@ use utoipa::ToSchema;
 
 pub mod control_plane_events;
 pub mod event_bus;
+
+const AUTO_REPLAN_COOLDOWN: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlPlaneConfig {
@@ -65,9 +68,7 @@ impl ControlPlaneConfig {
             .unwrap_or_else(|_| "127.0.0.1:3637".to_string())
             .parse()?;
         let dashboard_asset_dir = std::env::var("AGENTIC_AFK_DASHBOARD_ASSET_DIR")
-            .unwrap_or_else(|_| {
-                "target/dx/agentic-afk-dashboard/release/web/public".to_string()
-            })
+            .unwrap_or_else(|_| "target/dx/agentic-afk-dashboard/release/web/public".to_string())
             .into();
         let database_url = std::env::var("AGENTIC_AFK_DATABASE_URL")
             .unwrap_or_else(|_| "sqlite://agentic-afk.db".to_string());
@@ -111,7 +112,6 @@ impl ControlPlaneConfig {
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) config: ControlPlaneConfig,
     pub(crate) db: Db,
@@ -121,6 +121,137 @@ pub(crate) struct AppState {
     /// wires `SandboxPreflight`; tests inject `AlwaysOkSandboxPreflight`
     /// or `RejectingSandboxPreflight` to drive the 422 + URN path.
     pub(crate) sandbox_preflight: Arc<dyn agentic_afk_orchestrator::SandboxPreflightCheck>,
+    pub(crate) auto_replan_last_started: tokio::sync::Mutex<HashMap<String, Instant>>,
+}
+
+#[derive(Clone)]
+pub struct AutoReplanTick {
+    state: Arc<AppState>,
+    cooldown: Duration,
+}
+
+impl AutoReplanTick {
+    pub(crate) fn new(state: Arc<AppState>) -> Self {
+        Self {
+            state,
+            cooldown: AUTO_REPLAN_COOLDOWN,
+        }
+    }
+
+    pub(crate) async fn tick(&self, now: Instant) {
+        let projects = match persistence::list_projects(&self.state.db).await {
+            Ok(projects) => projects,
+            Err(error) => {
+                eprintln!("warning: Auto-Replan tick failed to list Projects: {error}");
+                return;
+            }
+        };
+
+        for project in projects {
+            if project.auto_replan_state != AutoReplanState::Armed {
+                continue;
+            }
+            let project_id = project.id.0.clone();
+            if matches!(
+                persistence::get_active_plan_run(&self.state.db, &project_id).await,
+                Ok(Some(_))
+            ) {
+                continue;
+            }
+            if self.within_cooldown(&project_id, now).await {
+                continue;
+            }
+
+            let sync_result = match sync_issue_source_for_project(&self.state, &project).await {
+                Ok(_) => agentic_afk_orchestrator::SyncOutcome::Succeeded,
+                Err(error) => {
+                    eprintln!(
+                        "warning: Auto-Replan sync failed for Project {project_id}: {error:?}"
+                    );
+                    agentic_afk_orchestrator::SyncOutcome::Failed
+                }
+            };
+
+            let decision = agentic_afk_orchestrator::AutoReplanDriver::decide(
+                agentic_afk_orchestrator::AutoReplanCurrent {
+                    state: AutoReplanState::Armed,
+                    has_active_plan_run: false,
+                },
+                None,
+                Some(sync_result),
+            );
+
+            if decision.next_state == AutoReplanState::Paused {
+                if let Some(reason) = decision.pause_reason {
+                    let _ = persist_auto_replan_transition(
+                        &self.state,
+                        &project_id,
+                        AutoReplanState::Paused,
+                        Some(reason),
+                        "AutoReplanPaused",
+                    )
+                    .await;
+                }
+                continue;
+            }
+
+            if decision.trigger != Some(agentic_afk_orchestrator::CycleTrigger::StartPlanRun) {
+                continue;
+            }
+            self.mark_started(&project_id, now).await;
+
+            let outcome = match start_plan_run_for_project(&self.state, &project_id, project).await
+            {
+                Ok(finished) => Some(agentic_afk_orchestrator::classify_plan_run_for_auto_replan(
+                    &finished,
+                )),
+                Err(error) => error.finished_plan_run.as_ref().map(|finished| {
+                    agentic_afk_orchestrator::classify_plan_run_for_auto_replan(finished)
+                }),
+            };
+
+            let Some(outcome) = outcome else {
+                continue;
+            };
+            let decision = agentic_afk_orchestrator::AutoReplanDriver::decide(
+                agentic_afk_orchestrator::AutoReplanCurrent {
+                    state: AutoReplanState::Armed,
+                    has_active_plan_run: false,
+                },
+                Some(outcome),
+                None,
+            );
+            if decision.next_state == AutoReplanState::Paused {
+                if let Some(reason) = decision.pause_reason {
+                    let _ = persist_auto_replan_transition(
+                        &self.state,
+                        &project_id,
+                        AutoReplanState::Paused,
+                        Some(reason),
+                        "AutoReplanPaused",
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    async fn within_cooldown(&self, project_id: &str, now: Instant) -> bool {
+        self.state
+            .auto_replan_last_started
+            .lock()
+            .await
+            .get(project_id)
+            .is_some_and(|last| now.duration_since(*last) < self.cooldown)
+    }
+
+    async fn mark_started(&self, project_id: &str, now: Instant) {
+        self.state
+            .auto_replan_last_started
+            .lock()
+            .await
+            .insert(project_id.to_string(), now);
+    }
 }
 
 // `PlanRunDeps` lives in the orchestrator crate (issue #48). Tests and
@@ -196,14 +327,13 @@ fn plan_run_deps_from_env(config: &ControlPlaneConfig) -> PlanRunDeps {
         // The runtime image is built lazily on first Plan Run by
         // `RuntimeImageBuilder`; here we record the content-hash tag
         // alongside the bind-mount paths and host UID/GID.
-        deps.production_sandbox =
-            Some(agentic_afk_orchestrator::SandboxProductionConfig {
-                docker_binary: config.docker_binary_path.clone(),
-                image_tag: agentic_afk_orchestrator::runtime_image_tag(),
-                codex_auth_path: config.codex_auth_path.clone(),
-                codex_config_path: config.codex_auth_path.with_file_name("config.toml"),
-                user: current_uid_gid(),
-            });
+        deps.production_sandbox = Some(agentic_afk_orchestrator::SandboxProductionConfig {
+            docker_binary: config.docker_binary_path.clone(),
+            image_tag: agentic_afk_orchestrator::runtime_image_tag(),
+            codex_auth_path: config.codex_auth_path.clone(),
+            codex_config_path: config.codex_auth_path.with_file_name("config.toml"),
+            user: current_uid_gid(),
+        });
         return deps;
     };
     let stdout = match mode.as_str() {
@@ -241,7 +371,11 @@ fn default_test_deps() -> PlanRunDeps {
 /// Build a router that shares a caller-provided `EventBus`. Useful for
 /// tests that need to publish activity through the same bus the SSE
 /// endpoint subscribes from.
-pub fn router_with_bus(config: ControlPlaneConfig, db: Db, event_bus: event_bus::EventBus) -> Router {
+pub fn router_with_bus(
+    config: ControlPlaneConfig,
+    db: Db,
+    event_bus: event_bus::EventBus,
+) -> Router {
     let deps = plan_run_deps_from_env(&config);
     let preflight = production_sandbox_preflight(&config);
     router_with_full_deps_and_preflight(config, db, event_bus, deps, preflight)
@@ -484,16 +618,35 @@ pub fn router_with_full_deps_and_preflight(
     plan_run_deps: PlanRunDeps,
     sandbox_preflight: Arc<dyn agentic_afk_orchestrator::SandboxPreflightCheck>,
 ) -> Router {
-    let asset_dir = config.dashboard_asset_dir.clone();
-    let index = asset_dir.join("index.html");
-    let state = Arc::new(AppState {
+    router_from_state(build_app_state(
         config,
         db,
         event_bus,
         plan_run_deps,
         sandbox_preflight,
-    });
+    ))
+}
 
+fn build_app_state(
+    config: ControlPlaneConfig,
+    db: Db,
+    event_bus: event_bus::EventBus,
+    plan_run_deps: PlanRunDeps,
+    sandbox_preflight: Arc<dyn agentic_afk_orchestrator::SandboxPreflightCheck>,
+) -> Arc<AppState> {
+    Arc::new(AppState {
+        config,
+        db,
+        event_bus,
+        plan_run_deps,
+        sandbox_preflight,
+        auto_replan_last_started: tokio::sync::Mutex::new(HashMap::new()),
+    })
+}
+
+fn router_from_state(state: Arc<AppState>) -> Router {
+    let asset_dir = state.config.dashboard_asset_dir.clone();
+    let index = asset_dir.join("index.html");
     Router::new()
         .route("/health", get(health))
         .route("/api/app-info", get(app_info))
@@ -605,6 +758,18 @@ pub async fn serve(config: ControlPlaneConfig) -> anyhow::Result<()> {
     )
     .await?;
 
+    let plan_run_deps = plan_run_deps_from_env(&config);
+    let preflight = production_sandbox_preflight(&config);
+    let app_state = build_app_state(config.clone(), db, bus, plan_run_deps, preflight);
+    let tick = AutoReplanTick::new(app_state.clone());
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(AUTO_REPLAN_COOLDOWN);
+        loop {
+            interval.tick().await;
+            tick.tick(Instant::now()).await;
+        }
+    });
+
     let listener = tokio::net::TcpListener::bind(config.bind_address).await?;
     let local_addr = listener.local_addr()?;
     eprintln!("agentic-afk Local Control Plane listening on http://{local_addr}");
@@ -613,13 +778,11 @@ pub async fn serve(config: ControlPlaneConfig) -> anyhow::Result<()> {
     // phase row to `interrupted`, SIGTERMs the captured child PIDs, and
     // sleeps the configured grace window before axum tears down the
     // listener — leaving a clean recovery surface for the next boot.
-    let shutdown_db = db.clone();
-    axum::serve(listener, router_with_bus(config, db, bus))
+    let shutdown_db = app_state.db.clone();
+    axum::serve(listener, router_from_state(app_state))
         .with_graceful_shutdown(async move {
-            let report = agentic_afk_orchestrator::shutdown_coordinator::await_shutdown(
-                shutdown_db,
-            )
-            .await;
+            let report =
+                agentic_afk_orchestrator::shutdown_coordinator::await_shutdown(shutdown_db).await;
             if report.rows_marked_interrupted > 0 {
                 eprintln!(
                     "shutdown: marked {} in-flight phase row(s) interrupted; signalled {} PID(s)",
@@ -831,70 +994,16 @@ async fn sync_issue_source(State(state): State<Arc<AppState>>, Path(id): Path<St
         Ok(project) => project,
         Err(e) => return persistence_error_to_response(e),
     };
-
-    let Some(source) = project.enabled_issue_source.clone() else {
+    if project.enabled_issue_source.is_none() {
         return sync_problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "urn:agentic-afk:issue-source-not-enabled",
             "Unprocessable Entity",
             "Project has no enabled Issue Source".to_string(),
         );
-    };
+    }
 
-    let result =
-        crate::control_plane_events::during_issue_source_sync(&state.event_bus, &id, || async {
-            let issues = match match source.kind.as_str() {
-                "local_markdown" => read_local_markdown_issues(&project.path, &source.locator),
-                "github" => read_github_issues(&state.config.gh_binary_path, &source.locator),
-                _ => Err(format!(
-                    "manual sync is not supported for {} Issue Sources yet",
-                    source.kind
-                )),
-            } {
-                Ok(issues) => issues,
-                Err(detail) => {
-                    let _ =
-                        persistence::record_sync_failure(&state.db, &id, &source, &detail).await;
-                    return Err(crate::control_plane_events::SyncErr::Source(detail));
-                }
-            };
-
-            let synced_at = current_sync_timestamp();
-            let response = match persistence::replace_planning_snapshot(
-                &state.db, &id, &source, &issues, &synced_at,
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(e) => {
-                    // Best-effort mirror the failure into the sync-status row
-                    // so the Dashboard "last failure" surface matches the
-                    // source-fetch failure path.
-                    let _ = persistence::record_sync_failure(
-                        &state.db,
-                        &id,
-                        &source,
-                        &format!("failed to persist Planning Snapshot: {e}"),
-                    )
-                    .await;
-                    return Err(crate::control_plane_events::SyncErr::Persistence(e));
-                }
-            };
-
-            let planning = persistence::get_planning_snapshot(&state.db, &id)
-                .await
-                .ok()
-                .map(agentic_afk_planning_snapshot::normalize);
-            crate::control_plane_events::publish_planning_snapshot_changed(
-                &state.event_bus,
-                &id,
-                planning,
-            );
-            Ok(response)
-        })
-        .await;
-
-    match result {
+    match sync_issue_source_for_project(&state, &project).await {
         Ok(response) => Json(response).into_response(),
         Err(crate::control_plane_events::SyncErr::Source(detail)) => sync_problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -906,6 +1015,66 @@ async fn sync_issue_source(State(state): State<Arc<AppState>>, Path(id): Path<St
             persistence_error_to_response(e)
         }
     }
+}
+
+async fn sync_issue_source_for_project(
+    state: &Arc<AppState>,
+    project: &ProjectResponse,
+) -> Result<IssueSourceSyncResponse, crate::control_plane_events::SyncErr> {
+    let Some(source) = project.enabled_issue_source.clone() else {
+        return Err(crate::control_plane_events::SyncErr::Source(
+            "Project has no enabled Issue Source".to_string(),
+        ));
+    };
+    let id = project.id.0.clone();
+
+    crate::control_plane_events::during_issue_source_sync(&state.event_bus, &id, || async {
+        let issues = match match source.kind.as_str() {
+            "local_markdown" => read_local_markdown_issues(&project.path, &source.locator),
+            "github" => read_github_issues(&state.config.gh_binary_path, &source.locator),
+            _ => Err(format!(
+                "manual sync is not supported for {} Issue Sources yet",
+                source.kind
+            )),
+        } {
+            Ok(issues) => issues,
+            Err(detail) => {
+                let _ = persistence::record_sync_failure(&state.db, &id, &source, &detail).await;
+                return Err(crate::control_plane_events::SyncErr::Source(detail));
+            }
+        };
+
+        let synced_at = current_sync_timestamp();
+        let response = match persistence::replace_planning_snapshot(
+            &state.db, &id, &source, &issues, &synced_at,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                let _ = persistence::record_sync_failure(
+                    &state.db,
+                    &id,
+                    &source,
+                    &format!("failed to persist Planning Snapshot: {e}"),
+                )
+                .await;
+                return Err(crate::control_plane_events::SyncErr::Persistence(e));
+            }
+        };
+
+        let planning = persistence::get_planning_snapshot(&state.db, &id)
+            .await
+            .ok()
+            .map(agentic_afk_planning_snapshot::normalize);
+        crate::control_plane_events::publish_planning_snapshot_changed(
+            &state.event_bus,
+            &id,
+            planning,
+        );
+        Ok(response)
+    })
+    .await
 }
 
 #[utoipa::path(
@@ -1087,12 +1256,22 @@ async fn auto_replan_transition(
     reason: Option<PauseReason>,
     activity_kind: &str,
 ) -> Response {
+    match persist_auto_replan_transition(state, project_id, next, reason, activity_kind).await {
+        Ok(project) => Json(with_git_summary(project)).into_response(),
+        Err(error) => persistence_error_to_response(error),
+    }
+}
+
+async fn persist_auto_replan_transition(
+    state: &Arc<AppState>,
+    project_id: &str,
+    next: AutoReplanState,
+    reason: Option<PauseReason>,
+    activity_kind: &str,
+) -> Result<ProjectResponse, PersistenceError> {
     let store = persistence::AutoReplanStateStore::new(&state.db);
-    let status = match store.set(project_id, next, reason).await {
-        Ok(status) => status,
-        Err(error) => return persistence_error_to_response(error),
-    };
-    if let Err(error) = crate::control_plane_events::record_activity(
+    let status = store.set(project_id, next, reason).await?;
+    crate::control_plane_events::record_activity(
         &state.db,
         &state.event_bus,
         project_id,
@@ -1100,20 +1279,14 @@ async fn auto_replan_transition(
         activity_kind,
         reason.map(PauseReason::as_wire),
     )
-    .await
-    {
-        return persistence_error_to_response(error);
-    }
+    .await?;
     crate::control_plane_events::publish_auto_replan_state_changed(
         &state.event_bus,
         project_id,
         status.state,
         status.pause_reason,
     );
-    match persistence::get_project(&state.db, project_id).await {
-        Ok(project) => Json(with_git_summary(project)).into_response(),
-        Err(error) => persistence_error_to_response(error),
-    }
+    persistence::get_project(&state.db, project_id).await
 }
 
 fn auto_replan_conflict(title: &str, detail: String) -> Response {
@@ -1255,6 +1428,7 @@ fn test_endpoints_router() -> Router<Arc<AppState>> {
             "/api/_test/projects/{id}/auto-replan/pause",
             post(pause_auto_replan_for_test),
         )
+        .route("/api/_test/auto-replan/tick", post(test_auto_replan_tick))
 }
 
 /// Test-only request body: a list of fully-formed Source Issue rows the
@@ -1307,6 +1481,11 @@ async fn test_seed_planning_snapshot(
         }
         Err(error) => persistence_error_to_response(error),
     }
+}
+
+async fn test_auto_replan_tick(State(state): State<Arc<AppState>>) -> Response {
+    AutoReplanTick::new(state).tick(Instant::now()).await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Test-only: publish an arbitrary `ProjectEvent` for `id` so Playwright can
@@ -1485,8 +1664,10 @@ async fn update_lifecycle_status(
         }
     };
 
-    let updated_text =
-        agentic_afk_orchestrator::update_markdown_lifecycle_status(raw_text, &request.lifecycle_status);
+    let updated_text = agentic_afk_orchestrator::update_markdown_lifecycle_status(
+        raw_text,
+        &request.lifecycle_status,
+    );
 
     if let Err(error) = std::fs::write(&issue_path, updated_text) {
         return sync_problem_response(
@@ -1512,7 +1693,6 @@ async fn update_lifecycle_status(
     let snapshot = parse_local_markdown_issue(source_id, updated_raw, 0);
     Json(snapshot).into_response()
 }
-
 
 fn read_local_markdown_issues(
     project_path: &str,
@@ -1971,12 +2151,9 @@ async fn re_enable_source_issue(
         &state.plan_run_deps,
         &project,
     );
-    let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> =
-        Arc::new(EventBusPublisher::new(
-            state.event_bus.clone(),
-            id.clone(),
-            state.db.clone(),
-        ));
+    let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> = Arc::new(
+        EventBusPublisher::new(state.event_bus.clone(), id.to_string(), state.db.clone()),
+    );
 
     match agentic_afk_orchestrator::re_enable_source_issue(
         &state.db,
@@ -2026,12 +2203,9 @@ async fn retry_push_assignment(
         Err(error) => return persistence_error_to_response(error),
     };
 
-    let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> =
-        Arc::new(EventBusPublisher::new(
-            state.event_bus.clone(),
-            id.clone(),
-            state.db.clone(),
-        ));
+    let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> = Arc::new(
+        EventBusPublisher::new(state.event_bus.clone(), id.to_string(), state.db.clone()),
+    );
     let resolved_deps = agentic_afk_orchestrator::coordinator::resolve_deps_for_project(
         &state.plan_run_deps,
         &project,
@@ -2085,12 +2259,9 @@ async fn abandon_staged_assignment(
         }
     });
 
-    let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> =
-        Arc::new(EventBusPublisher::new(
-            state.event_bus.clone(),
-            id.clone(),
-            state.db.clone(),
-        ));
+    let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> = Arc::new(
+        EventBusPublisher::new(state.event_bus.clone(), id.to_string(), state.db.clone()),
+    );
     let resolved_deps = agentic_afk_orchestrator::coordinator::resolve_deps_for_project(
         &state.plan_run_deps,
         &project,
@@ -2179,27 +2350,49 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
         Ok(project) => project,
         Err(error) => return persistence_error_to_response(error),
     };
+    match start_plan_run_for_project(&state, &id, project).await {
+        Ok(finished) => (StatusCode::CREATED, Json(finished)).into_response(),
+        Err(error) => error.response,
+    }
+}
+
+struct StartPlanRunFailure {
+    response: Response,
+    finished_plan_run: Option<agentic_afk_contracts::PlanRunResponse>,
+}
+
+async fn start_plan_run_for_project(
+    state: &Arc<AppState>,
+    id: &str,
+    project: ProjectResponse,
+) -> Result<agentic_afk_contracts::PlanRunResponse, StartPlanRunFailure> {
     if !project.trusted {
-        return sync_problem_response(
-            StatusCode::FORBIDDEN,
-            "urn:agentic-afk:project-untrusted",
-            "Forbidden",
-            "Project must be trusted before starting a Plan Run".to_string(),
-        );
+        return Err(StartPlanRunFailure {
+            response: sync_problem_response(
+                StatusCode::FORBIDDEN,
+                "urn:agentic-afk:project-untrusted",
+                "Forbidden",
+                "Project must be trusted before starting a Plan Run".to_string(),
+            ),
+            finished_plan_run: None,
+        });
     }
 
     if state.plan_run_deps.production_sandbox.is_some()
         && !command_available(&state.config.worktrunk_binary_path)
     {
-        return sync_problem_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "urn:agentic-afk:worktrunk-unavailable",
-            "Unprocessable Entity",
-            format!(
-                "Worktrunk binary `{}` was not found. Install Worktrunk or set AGENTIC_AFK_WORKTRUNK_BIN to its executable path before starting a Plan Run.",
-                state.config.worktrunk_binary_path.display()
+        return Err(StartPlanRunFailure {
+            response: sync_problem_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "urn:agentic-afk:worktrunk-unavailable",
+                "Unprocessable Entity",
+                format!(
+                    "Worktrunk binary `{}` was not found. Install Worktrunk or set AGENTIC_AFK_WORKTRUNK_BIN to its executable path before starting a Plan Run.",
+                    state.config.worktrunk_binary_path.display()
+                ),
             ),
-        );
+            finished_plan_run: None,
+        });
     }
 
     // Codex Sandbox preflight (issue #73). Runs before any Plan Run row,
@@ -2212,7 +2405,10 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
         .check(std::path::Path::new(&project.path))
     {
         let err: agentic_afk_orchestrator::CoordinatorError = failure.into();
-        return coordinator_error_to_response(err);
+        return Err(StartPlanRunFailure {
+            response: coordinator_error_to_response(err),
+            finished_plan_run: None,
+        });
     }
 
     let execution_config = match persistence::get_project_execution_config(&state.db, &id).await {
@@ -2243,22 +2439,40 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
                     );
                     config
                 }
-                Err(error) => return persistence_error_to_response(error),
+                Err(error) => {
+                    return Err(StartPlanRunFailure {
+                        response: persistence_error_to_response(error),
+                        finished_plan_run: None,
+                    });
+                }
             }
         }
-        Err(error) => return persistence_error_to_response(error),
+        Err(error) => {
+            return Err(StartPlanRunFailure {
+                response: persistence_error_to_response(error),
+                finished_plan_run: None,
+            });
+        }
     };
     match persistence::get_active_plan_run(&state.db, &id).await {
         Ok(Some(_)) => {
-            return sync_problem_response(
-                StatusCode::CONFLICT,
-                "urn:agentic-afk:active-plan-run",
-                "Conflict",
-                "Project already has an active Plan Run".to_string(),
-            );
+            return Err(StartPlanRunFailure {
+                response: sync_problem_response(
+                    StatusCode::CONFLICT,
+                    "urn:agentic-afk:active-plan-run",
+                    "Conflict",
+                    "Project already has an active Plan Run".to_string(),
+                ),
+                finished_plan_run: None,
+            });
         }
         Ok(None) => {}
-        Err(error) => return persistence_error_to_response(error),
+        Err(error) => {
+            return Err(StartPlanRunFailure {
+                response: persistence_error_to_response(error),
+                finished_plan_run: None,
+            });
+        }
     }
 
     let project_path = std::path::Path::new(&project.path);
@@ -2269,12 +2483,15 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     {
         Ok(baseline) => baseline,
         Err(error) => {
-            return sync_problem_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "urn:agentic-afk:integration-branch-refresh-failed",
-                "Internal Server Error",
-                error.to_string(),
-            );
+            return Err(StartPlanRunFailure {
+                response: sync_problem_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "urn:agentic-afk:integration-branch-refresh-failed",
+                    "Internal Server Error",
+                    error.to_string(),
+                ),
+                finished_plan_run: None,
+            });
         }
     };
 
@@ -2287,25 +2504,23 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     .await
     {
         Ok(run) => run,
-        Err(error) => return persistence_error_to_response(error),
+        Err(error) => {
+            return Err(StartPlanRunFailure {
+                response: persistence_error_to_response(error),
+                finished_plan_run: None,
+            });
+        }
     };
-    crate::control_plane_events::publish_plan_run_started(
-        &state.event_bus,
-        &id,
-        plan_run.clone(),
-    );
+    crate::control_plane_events::publish_plan_run_started(&state.event_bus, &id, plan_run.clone());
 
     // Delegate phase orchestration to the coordinator in the orchestrator
     // crate (issue #48). The handler keeps responsibility for request
     // validation, baseline refresh, row creation, and response mapping; the
     // coordinator owns planning, parallel implementation+review, merge,
     // push, cleanup, and source lifecycle transitions.
-    let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> =
-        Arc::new(EventBusPublisher::new(
-            state.event_bus.clone(),
-            id.clone(),
-            state.db.clone(),
-        ));
+    let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> = Arc::new(
+        EventBusPublisher::new(state.event_bus.clone(), id.to_string(), state.db.clone()),
+    );
     let inputs = agentic_afk_orchestrator::PlanRunInputs::new(
         project.clone(),
         plan_run.clone(),
@@ -2318,10 +2533,17 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
         deps: state.plan_run_deps.clone(),
         gh_binary_path: state.config.gh_binary_path.clone(),
     };
-    match agentic_afk_orchestrator::run_plan_run(&inputs, &effects).await
-    {
-        Ok(finished) => (StatusCode::CREATED, Json(finished)).into_response(),
-        Err(error) => coordinator_error_to_response(error),
+    match agentic_afk_orchestrator::run_plan_run(&inputs, &effects).await {
+        Ok(finished) => Ok(finished),
+        Err(error) => {
+            let finished_plan_run = persistence::get_plan_run(&state.db, &plan_run.id)
+                .await
+                .ok();
+            Err(StartPlanRunFailure {
+                response: coordinator_error_to_response(error),
+                finished_plan_run,
+            })
+        }
     }
 }
 
@@ -2465,9 +2687,7 @@ impl agentic_afk_orchestrator::EventPublisher for EventBusPublisher {
             )
             .await
             {
-                eprintln!(
-                    "warning: failed to record Project Activity entry ({kind}): {error}"
-                );
+                eprintln!("warning: failed to record Project Activity entry ({kind}): {error}");
             }
         });
     }
@@ -2502,11 +2722,7 @@ impl agentic_afk_orchestrator::EventPublisher for BootRecoveryEventBusPublisher 
         project_id: &str,
         plan_run: agentic_afk_contracts::PlanRunResponse,
     ) {
-        crate::control_plane_events::publish_plan_run_completed(
-            &self.bus,
-            project_id,
-            plan_run,
-        );
+        crate::control_plane_events::publish_plan_run_completed(&self.bus, project_id, plan_run);
     }
     fn plan_run_phase_completed(
         &self,
@@ -2527,9 +2743,7 @@ impl agentic_afk_orchestrator::EventPublisher for BootRecoveryEventBusPublisher 
         assignment: agentic_afk_contracts::IssueAssignmentResponse,
     ) {
         crate::control_plane_events::publish_assignment_status_changed(
-            &self.bus,
-            project_id,
-            assignment,
+            &self.bus, project_id, assignment,
         );
     }
     fn record_activity(
@@ -2565,8 +2779,7 @@ impl agentic_afk_orchestrator::EventPublisher for BootRecoveryEventBusPublisher 
 /// Map a `CoordinatorError` from the orchestrator crate back to an
 /// RFC-7807 HTTP response.
 fn coordinator_error_to_response(error: agentic_afk_orchestrator::CoordinatorError) -> Response {
-    let status =
-        StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let title = status.canonical_reason().unwrap_or("Error").to_string();
     sync_problem_response(status, &error.problem_type, &title, error.detail)
 }

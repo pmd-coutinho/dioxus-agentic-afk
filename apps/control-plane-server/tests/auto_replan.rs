@@ -1,7 +1,12 @@
 use agentic_afk_contracts::{
-    AutoReplanState, CreateProjectRequest, PauseReason, ProjectEvent, ProjectId, ProjectResponse,
+    AutoReplanState, CreateProjectRequest, EnableIssueSourceRequest, PauseReason, PlanRunResponse,
+    ProjectEvent, ProjectId, ProjectResponse,
 };
-use agentic_afk_control_plane_server::{ControlPlaneConfig, event_bus::EventBus, router_with_bus};
+use agentic_afk_control_plane_server::{
+    ControlPlaneConfig, FakePlanningPhaseRunner, RefreshedBaseline,
+    StaticIntegrationBranchRefresher, event_bus::EventBus, router_with_bus,
+    router_with_plan_run_deps_and_bus,
+};
 use agentic_afk_persistence as persistence;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -51,6 +56,29 @@ async fn test_router_with_test_endpoints() -> (axum::Router, persistence::Db, Ev
     test_router().await
 }
 
+async fn test_router_with_tick_deps() -> (axum::Router, persistence::Db, EventBus) {
+    unsafe {
+        std::env::set_var("AGENTIC_AFK_TEST_ENDPOINTS", "1");
+    }
+    let db = persistence::connect_in_memory().await.unwrap();
+    persistence::migrate(&db).await.unwrap();
+    let bus = EventBus::new();
+    let refresher = std::sync::Arc::new(StaticIntegrationBranchRefresher::new(RefreshedBaseline {
+        commit_sha: "test-baseline".into(),
+    }));
+    let planner = std::sync::Arc::new(FakePlanningPhaseRunner::with_stdout(
+        r#"<plan>{"issues":[],"summary":"none"}</plan>"#,
+    ));
+    let app = router_with_plan_run_deps_and_bus(
+        config("sqlite::memory:"),
+        db.clone(),
+        bus.clone(),
+        refresher,
+        planner,
+    );
+    (app, db, bus)
+}
+
 async fn read_json<T: DeserializeOwned>(response: axum::response::Response) -> T {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
@@ -98,6 +126,58 @@ async fn trust_project(app: &axum::Router, project_id: &str) {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn enable_local_markdown_issue_source(
+    app: &axum::Router,
+    project: &ProjectResponse,
+    locator: &str,
+) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/projects/{}/issue-source", project.id.0))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&EnableIssueSourceRequest {
+                        kind: "local_markdown".into(),
+                        locator: locator.into(),
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn arm(app: &axum::Router, project_id: &str) {
+    let response = post(app, format!("/api/projects/{project_id}/auto-replan/arm")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn tick(app: &axum::Router) {
+    let response = post(app, "/api/_test/auto-replan/tick".to_string()).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+async fn plan_runs(app: &axum::Router, project_id: &str) -> Vec<PlanRunResponse> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/projects/{project_id}/plan-runs"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    read_json(response).await
 }
 
 async fn post(app: &axum::Router, uri: String) -> axum::response::Response {
@@ -348,4 +428,95 @@ async fn paused_state_survives_database_reconnect_with_reason() {
         project.auto_replan_pause_reason,
         Some(PauseReason::SyncFailed)
     );
+}
+
+#[tokio::test]
+async fn auto_replan_tick_skips_armed_project_with_active_plan_run() {
+    let (app, db, _bus) = test_router_with_tick_deps().await;
+    let project = create_project(&app).await;
+    trust_project(&app, &project.id.0).await;
+    let issues_dir = PathBuf::from(&project.path).join("issues");
+    std::fs::create_dir_all(&issues_dir).unwrap();
+    enable_local_markdown_issue_source(&app, &project, "issues").await;
+    arm(&app, &project.id.0).await;
+    persistence::create_plan_run(&db, &project.id.0, "main", "abc")
+        .await
+        .unwrap();
+
+    tick(&app).await;
+
+    assert!(
+        persistence::get_active_plan_run(&db, &project.id.0)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(plan_runs(&app, &project.id.0).await.is_empty());
+}
+
+#[tokio::test]
+async fn auto_replan_tick_empty_success_pauses_empty_backlog() {
+    let (app, db, _bus) = test_router_with_tick_deps().await;
+    let project = create_project(&app).await;
+    trust_project(&app, &project.id.0).await;
+    let issues_dir = PathBuf::from(&project.path).join("issues");
+    std::fs::create_dir_all(&issues_dir).unwrap();
+    enable_local_markdown_issue_source(&app, &project, "issues").await;
+    arm(&app, &project.id.0).await;
+
+    tick(&app).await;
+
+    let project = persistence::get_project(&db, &project.id.0).await.unwrap();
+    assert_eq!(project.auto_replan_state, AutoReplanState::Paused);
+    assert_eq!(
+        project.auto_replan_pause_reason,
+        Some(PauseReason::EmptyBacklog)
+    );
+    assert_eq!(plan_runs(&app, &project.id.0).await.len(), 1);
+}
+
+#[tokio::test]
+async fn auto_replan_tick_sync_failure_pauses_without_plan_run() {
+    let (app, db, _bus) = test_router_with_tick_deps().await;
+    let project = create_project(&app).await;
+    trust_project(&app, &project.id.0).await;
+    enable_local_markdown_issue_source(&app, &project, "missing-issues").await;
+    arm(&app, &project.id.0).await;
+
+    tick(&app).await;
+
+    let project = persistence::get_project(&db, &project.id.0).await.unwrap();
+    assert_eq!(project.auto_replan_state, AutoReplanState::Paused);
+    assert_eq!(
+        project.auto_replan_pause_reason,
+        Some(PauseReason::SyncFailed)
+    );
+    assert!(plan_runs(&app, &project.id.0).await.is_empty());
+    let activity = persistence::list_project_activity(&db, &project.id.0, 10)
+        .await
+        .unwrap();
+    assert!(activity.iter().any(|entry| {
+        entry.kind == "AutoReplanPaused" && entry.detail.as_deref() == Some("sync_failed")
+    }));
+}
+
+#[tokio::test]
+async fn auto_replan_tick_honors_sixty_second_cooldown() {
+    let (app, _db, _bus) = test_router_with_tick_deps().await;
+    let project = create_project(&app).await;
+    trust_project(&app, &project.id.0).await;
+    let issues_dir = PathBuf::from(&project.path).join("issues");
+    std::fs::create_dir_all(&issues_dir).unwrap();
+    enable_local_markdown_issue_source(&app, &project, "issues").await;
+    arm(&app, &project.id.0).await;
+
+    tick(&app).await;
+    post(
+        &app,
+        format!("/api/projects/{}/auto-replan/resume", project.id.0),
+    )
+    .await;
+    tick(&app).await;
+
+    assert_eq!(plan_runs(&app, &project.id.0).await.len(), 1);
 }
