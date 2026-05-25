@@ -1363,6 +1363,13 @@ async fn get_project_snapshot(
         Err(error) => return persistence_error_to_response(error),
     };
 
+    let project_instructions = agentic_afk_orchestrator::load_project_instructions(&project.path);
+    let project_instructions = if project_instructions.is_empty() {
+        None
+    } else {
+        Some(project_instructions)
+    };
+
     let sequence = state.event_bus.latest_sequence(&ProjectId(id.clone()));
     Json(ProjectSnapshotResponse {
         snapshot: ProjectSnapshot {
@@ -1373,6 +1380,7 @@ async fn get_project_snapshot(
             execution_config,
             active_plan_run,
             recent_plan_runs,
+            project_instructions,
         },
         sequence,
     })

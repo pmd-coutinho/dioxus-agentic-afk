@@ -40,7 +40,7 @@ pub use auto_replan::{
 };
 pub use coordinator::{
     CoordinatorError, EventPublisher, PlanRunDeps, PlanRunEffects, PlanRunInputs,
-    SandboxProductionConfig, abandon_staged, retry_push, run_plan_run,
+    SandboxProductionConfig, abandon_staged, load_project_instructions, retry_push, run_plan_run,
     update_markdown_lifecycle_status,
 };
 pub use planning_phase::{PlannedClaim, PlanningRejection, render_planning_prompt};

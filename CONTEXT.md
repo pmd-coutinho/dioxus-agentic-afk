@@ -32,6 +32,10 @@ _Avoid_: Database row ID, path slug
 Read-only Git metadata derived from a **Project** path for dashboard display.
 _Avoid_: Project state, repository identity
 
+**Project Instructions**:
+The text read from the **Project** path's `AGENTS.md`, `CLAUDE.md`, or `PROJECT.md` file that is included in every **Phase Prompt** to guide agent behavior.
+_Avoid_: Agent config, system prompt, project rules
+
 **Issue Source**:
 The configured place where the **Control Plane** discovers candidate work for a **Project**. An **Issue Source** may be a hosted issue tracker, local markdown files, or another explicit work source.
 _Avoid_: Repository, project, task list

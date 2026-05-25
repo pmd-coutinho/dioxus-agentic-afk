@@ -1621,7 +1621,7 @@ async fn fail_planning_phase(
     CoordinatorError::new(500, problem_type, error)
 }
 
-pub(crate) fn load_project_instructions(project_path: &str) -> String {
+pub fn load_project_instructions(project_path: &str) -> String {
     for candidate in ["AGENTS.md", "CLAUDE.md", "PROJECT.md"] {
         if let Ok(text) =
             std::fs::read_to_string(std::path::Path::new(project_path).join(candidate))

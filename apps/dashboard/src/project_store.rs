@@ -32,6 +32,7 @@ pub struct ProjectStoreState {
     pub execution_config: Option<ProjectExecutionConfigResponse>,
     pub active_plan_run: Option<PlanRunResponse>,
     pub recent_plan_runs: Vec<PlanRunResponse>,
+    pub project_instructions: Option<String>,
     pub sync_in_progress: bool,
     pub last_seen_seq: u64,
     pub needs_rehydrate: bool,
@@ -51,6 +52,7 @@ impl ProjectStoreState {
         self.recent_plan_runs = snapshot.recent_plan_runs;
         self.planning_snapshot = snapshot.planning_snapshot;
         self.issue_source_candidates = snapshot.issue_source_candidates;
+        self.project_instructions = snapshot.project_instructions;
         self.sync_in_progress = false;
         self.last_seen_seq = sequence;
         self.needs_rehydrate = false;

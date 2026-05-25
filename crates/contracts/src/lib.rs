@@ -929,6 +929,10 @@ pub struct ProjectSnapshot {
     /// Recent finished Plan Runs, newest first.
     #[serde(default)]
     pub recent_plan_runs: Vec<PlanRunResponse>,
+    /// Project Instructions text read from the Project path's AGENTS.md,
+    /// CLAUDE.md, or PROJECT.md file. `None` when none of those files exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_instructions: Option<String>,
 }
 
 /// HTTP response body for `GET /api/projects/{id}/snapshot`. Carries the

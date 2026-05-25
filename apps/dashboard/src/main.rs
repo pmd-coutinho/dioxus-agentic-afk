@@ -468,6 +468,7 @@ fn ProjectOverview(id: String) -> Element {
     let execution_config = s.execution_config.clone();
     let active_plan_run = s.active_plan_run.clone();
     let recent_plan_runs = s.recent_plan_runs.clone();
+    let project_instructions = s.project_instructions.clone();
     drop(s);
 
     rsx! {
@@ -475,7 +476,7 @@ fn ProjectOverview(id: String) -> Element {
             Some(project) => rsx! {
                 AutoReplanPausedBanner { project: project.clone() }
                 div { class: "grid gap-6 lg:grid-cols-2",
-                    ProjectMetaCard { project: project.clone() }
+                    ProjectMetaCard { project: project.clone(), project_instructions }
                 }
                 ExecutionConfigCard {
                     project_id: project.id.0.clone(),
@@ -1414,13 +1415,14 @@ fn derive_plan_run_history_pill(plan_run: &PlanRunResponse) -> (PillTone, &'stat
 }
 
 #[component]
-fn ProjectMetaCard(project: ProjectResponse) -> Element {
+fn ProjectMetaCard(project: ProjectResponse, project_instructions: Option<String>) -> Element {
     let (trust_tone, trust_label) = derive_trust_pill(project.trusted);
     let issue_source_label = project
         .enabled_issue_source
         .clone()
         .map(|s| format!("{} {}", s.kind, s.locator))
         .unwrap_or_else(|| "Not enabled".to_string());
+    let mut instructions_expanded = use_signal(|| false);
     rsx! {
         Card {
             CardHead {
@@ -1442,6 +1444,27 @@ fn ProjectMetaCard(project: ProjectResponse) -> Element {
                         KeyValueRow {
                             label: "Issue Source".to_string(),
                             value: issue_source_label,
+                        }
+                    }
+                    if let Some(instructions) = project_instructions {
+                        div { class: "flex flex-col gap-2",
+                            button {
+                                r#type: "button",
+                                class: "flex items-center gap-2 text-left",
+                                onclick: move |_| {
+                                    instructions_expanded.set(!instructions_expanded());
+                                },
+                                span { class: "font-display text-[11px] uppercase tracking-[0.22em] text-ink-2 hover:text-cyan",
+                                    if instructions_expanded() { "▼ Hide Project Instructions" } else { "▶ Show Project Instructions" }
+                                }
+                            }
+                            if instructions_expanded() {
+                                div { class: "max-h-64 overflow-y-auto rounded border border-line/40 bg-surface-2/60 p-3",
+                                    pre { class: "whitespace-pre-wrap font-mono text-[11px] text-ink-2",
+                                        "{instructions}"
+                                    }
+                                }
+                            }
                         }
                     }
                 }
