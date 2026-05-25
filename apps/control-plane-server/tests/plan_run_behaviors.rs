@@ -307,7 +307,7 @@ async fn planner_failure_records_failed_phase_output_and_failed_state() {
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
     assert_eq!(runs[0].phase_outputs.len(), 1);
     assert_eq!(runs[0].phase_outputs[0].phase, "planning");
     assert_eq!(runs[0].phase_outputs[0].outcome, "failed");

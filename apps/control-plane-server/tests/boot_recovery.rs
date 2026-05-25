@@ -9,12 +9,13 @@
 //!   3. Transition the owning Plan Run to `finished` because every
 //!      assignment under it is now terminal.
 
-use agentic_afk_contracts::{BlockReason, CreateProjectRequest, IssueSource, SourceIssueSnapshot};
-use agentic_afk_contracts::{ProjectEvent, ProjectId};
+use agentic_afk_contracts::{
+    BlockReason, CreateProjectRequest, IssueSource, PlanRunState, ProjectEvent, ProjectId,
+    SourceIssueSnapshot,
+};
 use agentic_afk_control_plane_server::{BootRecoveryEventBusPublisher, event_bus::EventBus};
 use agentic_afk_orchestrator::boot_recovery_scanner::{
     self, ACTIVITY_KIND_ASSIGNMENT_BLOCKED_ON_RESTART, NoopEventPublisher,
-    PLAN_RUN_TERMINAL_FINISHED,
 };
 use agentic_afk_persistence::{
     self as persistence, connect_in_memory, create_plan_run, create_plan_run_assignment,
@@ -107,7 +108,7 @@ async fn killed_mid_implementation_recovers_to_blocked_finished_with_activity() 
     );
 
     let finished_run = persistence::get_plan_run(&db, &plan_run.id).await.unwrap();
-    assert_eq!(finished_run.state, PLAN_RUN_TERMINAL_FINISHED);
+    assert_eq!(finished_run.state, PlanRunState::Finished);
 
     // Idempotence: a second scan in the same process is a no-op.
     let second = boot_recovery_scanner::run(&db, &NoopEventPublisher)

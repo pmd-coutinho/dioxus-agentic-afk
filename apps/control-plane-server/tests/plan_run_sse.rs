@@ -159,11 +159,14 @@ async fn empty_plan_run_publishes_started_phase_completed_completed_in_order() {
     let (phase_plan_run_id, phase_output) = phase_completed.expect("PlanRunPhaseCompleted missing");
     let completed = completed.expect("PlanRunCompleted missing");
 
-    assert_eq!(started.state, "running");
+    assert_eq!(started.state, agentic_afk_contracts::PlanRunState::Running);
     assert_eq!(phase_plan_run_id, started.id);
     assert_eq!(phase_output.phase, "planning");
     assert_eq!(phase_output.outcome, "succeeded_empty");
     assert_eq!(completed.id, started.id);
-    assert_eq!(completed.state, "succeeded_empty");
+    assert_eq!(
+        completed.state,
+        agentic_afk_contracts::PlanRunState::Finished
+    );
     assert!(completed.finished_at.is_some());
 }

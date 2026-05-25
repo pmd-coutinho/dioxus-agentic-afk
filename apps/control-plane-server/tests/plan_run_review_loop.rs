@@ -255,7 +255,7 @@ async fn rejected_review_loops_back_into_another_implementation_pass_then_approv
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "succeeded");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
     let assignment = &runs[0].assignments[0];
     assert_eq!(assignment.status, "merged");
     assert_eq!(assignment.review_rejection_count, 1);
@@ -299,7 +299,7 @@ async fn exhausting_review_retry_limit_blocks_the_assignment() {
         .unwrap();
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
-    assert_eq!(run.state, "failed");
+    assert_eq!(run.state, agentic_afk_contracts::PlanRunState::Finished);
     let assignment = &run.assignments[0];
     assert_eq!(assignment.status, "blocked");
     assert_eq!(assignment.review_rejection_count, 1);

@@ -2052,7 +2052,8 @@ pub(crate) fn persistence_error_to_response(err: PersistenceError) -> Response {
         ),
         PersistenceError::InvalidAutoReplanState { .. }
         | PersistenceError::InvalidPauseReason { .. }
-        | PersistenceError::InvalidAutoReplanTransition(_) => (
+        | PersistenceError::InvalidAutoReplanTransition(_)
+        | PersistenceError::InvalidPlanRunState { .. } => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "urn:agentic-afk:auto-replan-persistence-error",
             "Internal Server Error",

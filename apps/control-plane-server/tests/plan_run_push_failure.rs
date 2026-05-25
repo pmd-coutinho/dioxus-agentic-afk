@@ -299,7 +299,11 @@ async fn push_failure_then_retry_push_succeeds_round_trip_smoke() {
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "failed", "push failure fails the Plan Run");
+    assert_eq!(
+        runs[0].state,
+        agentic_afk_contracts::PlanRunState::Finished,
+        "push failure finishes the Plan Run"
+    );
     let assignment_id = runs[0].assignments[0].id.clone();
     assert_eq!(
         runs[0].assignments[0].status, "merge_staged",
@@ -358,7 +362,8 @@ async fn push_failure_then_retry_push_succeeds_round_trip_smoke() {
         .unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(
-        runs[0].state, "failed",
+        runs[0].state,
+        agentic_afk_contracts::PlanRunState::Finished,
         "Plan Run stays failed even after successful Retry Push"
     );
 
@@ -471,7 +476,7 @@ async fn abandon_staged_round_trip_smoke() {
     let runs = persistence::list_recent_plan_runs(&db, &pid, 5)
         .await
         .unwrap();
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
 
     drop(project_dir);
 }

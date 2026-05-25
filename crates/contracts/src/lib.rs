@@ -417,6 +417,33 @@ pub struct SetProjectExecutionConfigRequest {
     pub review_retry_limit: i64,
 }
 
+/// Lifecycle state of a Plan Run. Outcome lives on derived projections,
+/// Phase Outputs, and Issue Assignments rather than in this persisted
+/// contract field (ADR-0043).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanRunState {
+    Running,
+    Finished,
+}
+
+impl PlanRunState {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Finished => "finished",
+        }
+    }
+
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "running" => Some(Self::Running),
+            "finished" | "succeeded" | "succeeded_empty" | "failed" => Some(Self::Finished),
+            _ => None,
+        }
+    }
+}
+
 /// One Plan Run: a manually started Planning Phase plus the parallel issue
 /// work it selects through Review and Merge. This slice only exercises the
 /// empty-selection planning outcome.
@@ -426,12 +453,12 @@ pub struct PlanRunResponse {
     pub project_id: ProjectId,
     pub integration_branch: String,
     pub baseline_commit: String,
-    pub state: String,
+    pub state: PlanRunState,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub phase_outputs: Vec<PhaseOutputResponse>,
     /// Issue Assignments selected and claimed by the Plan Run's Planning
-    /// Phase. Empty for `succeeded_empty` runs.
+    /// Phase. Empty for finished runs whose Planning Phase selected no work.
     #[serde(default)]
     pub assignments: Vec<IssueAssignmentResponse>,
 }

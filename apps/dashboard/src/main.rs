@@ -1374,12 +1374,7 @@ fn PhaseOutputBodyView(body: agentic_afk_contracts::PhaseOutputBody) -> Element 
 #[component]
 fn PlanRunHistoryRow(plan_run: PlanRunResponse) -> Element {
     let id_short = plan_run.id.chars().take(8).collect::<String>();
-    let (tone, label) = match plan_run.state.as_str() {
-        "succeeded_empty" => (PillTone::Verified, "Succeeded (empty)"),
-        "succeeded" => (PillTone::Verified, "Succeeded"),
-        "failed" => (PillTone::Failed, "Failed"),
-        _ => (PillTone::Pending, "Unknown"),
-    };
+    let (tone, label) = derive_plan_run_history_pill(&plan_run);
     rsx! {
         div { class: "flex items-center gap-2", "data-testid": "plan-run-history-row",
             StatusPill { tone, label: label.to_string() }
@@ -1389,6 +1384,32 @@ fn PlanRunHistoryRow(plan_run: PlanRunResponse) -> Element {
             }
         }
     }
+}
+
+fn derive_plan_run_history_pill(plan_run: &PlanRunResponse) -> (PillTone, &'static str) {
+    if plan_run.state == agentic_afk_contracts::PlanRunState::Running {
+        return (PillTone::Pending, "Running");
+    }
+    if plan_run
+        .phase_outputs
+        .iter()
+        .any(|output| output.phase == "planning" && output.outcome == "succeeded_empty")
+        && plan_run.assignments.is_empty()
+    {
+        return (PillTone::Verified, "Succeeded (empty)");
+    }
+    if plan_run
+        .assignments
+        .iter()
+        .any(|assignment| assignment.status == "blocked" || assignment.status == "merge_staged")
+        || plan_run
+            .phase_outputs
+            .iter()
+            .any(|output| output.phase == "planning" && output.outcome == "failed")
+    {
+        return (PillTone::Failed, "Finished");
+    }
+    (PillTone::Verified, "Finished")
 }
 
 #[component]

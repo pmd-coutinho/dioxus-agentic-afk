@@ -256,7 +256,7 @@ async fn successful_merge_completes_source_issue_and_finishes_plan_run() {
         .unwrap();
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
-    assert_eq!(run.state, "succeeded");
+    assert_eq!(run.state, agentic_afk_contracts::PlanRunState::Finished);
     assert!(run.finished_at.is_some());
 
     // The merged Issue Assignment transitions to `merged`.
@@ -331,7 +331,7 @@ async fn blocked_merge_does_not_push_and_fails_plan_run_with_block_reason() {
     let run = &runs[0];
     // Failed Plan Run: a blocked Merge Phase does not produce work that
     // can be completed.
-    assert_eq!(run.state, "failed");
+    assert_eq!(run.state, agentic_afk_contracts::PlanRunState::Finished);
 
     // The blocked Merge Phase pushes the assignment into the coarse
     // blocked lifecycle and persists the block reason for the Dashboard.
@@ -609,7 +609,7 @@ async fn merge_phase_failure_blocks_assignment_and_fails_plan_run() {
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
     assert_eq!(runs[0].assignments[0].status, "blocked");
 
     drop(dir);
@@ -643,10 +643,10 @@ async fn snapshot_route_exposes_merged_assignment_and_merge_phase_output() {
         body.contains("\"status\":\"merged\""),
         "snapshot must expose the merged assignment status: {body}"
     );
-    // Recent Plan Run history surfaces the succeeded run for Dashboard rendering.
+    // Recent Plan Run history surfaces the finished run for Dashboard rendering.
     assert!(
-        body.contains("\"state\":\"succeeded\""),
-        "snapshot must expose the succeeded Plan Run: {body}"
+        body.contains("\"state\":\"finished\""),
+        "snapshot must expose the finished Plan Run: {body}"
     );
 
     drop(fixture.project_dir);
@@ -790,7 +790,11 @@ async fn integration_push_failure_stages_assignment_and_fails_plan_run() {
         .unwrap();
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
-    assert_eq!(run.state, "failed", "push failure fails the Plan Run");
+    assert_eq!(
+        run.state,
+        agentic_afk_contracts::PlanRunState::Finished,
+        "push failure finishes the Plan Run"
+    );
 
     // ADR-0037: the assignment stays at `merge_staged` after a push
     // failure (dormant for Max Parallel Tasks, awaiting Retry Push /
@@ -979,7 +983,7 @@ async fn happy_path_push_passes_assignment_through_merge_staged_to_merged() {
         .unwrap();
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
-    assert_eq!(run.state, "succeeded");
+    assert_eq!(run.state, agentic_afk_contracts::PlanRunState::Finished);
     assert_eq!(run.assignments[0].status, "merged");
 
     // Push happened exactly once and cleanup ran for the merged
@@ -1208,7 +1212,11 @@ async fn build_staged_fixture(
         .await
         .unwrap();
     assert_eq!(runs.len(), 1, "fixture should have exactly one plan run");
-    assert_eq!(runs[0].state, "failed", "fixture push must have failed");
+    assert_eq!(
+        runs[0].state,
+        agentic_afk_contracts::PlanRunState::Finished,
+        "fixture push must have finished the Plan Run"
+    );
     let assignment = runs[0]
         .assignments
         .first()
@@ -1304,7 +1312,8 @@ async fn retry_push_success_advances_staged_to_merged_and_plan_run_stays_failed(
         .unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(
-        runs[0].state, "failed",
+        runs[0].state,
+        agentic_afk_contracts::PlanRunState::Finished,
         "Plan Run stays failed even after a successful Retry Push"
     );
 
@@ -1377,7 +1386,7 @@ async fn retry_push_non_fast_forward_blocks_assignment_with_push_non_fast_forwar
     let runs = persistence::list_recent_plan_runs(&fixture.db, &fixture.project_id, 10)
         .await
         .unwrap();
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
 
     // Push Phase Outputs: two failures (initial + non-fast-forward retry).
     let push_outputs: Vec<_> = runs[0]
@@ -1589,7 +1598,7 @@ async fn abandon_staged_transitions_to_blocked_abandoned_staged_with_note() {
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
 
     // No new push Phase Outputs were appended (only the original failure).
     let push_outputs: Vec<_> = runs[0]

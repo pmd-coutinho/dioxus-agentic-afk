@@ -226,7 +226,11 @@ async fn planning_phase_claims_one_eligible_issue() {
     let run: PlanRunResponse = read_json(resp).await;
     // With #45 the default deps also drive the accepting Merge Phase, so
     // the Plan Run finishes as `succeeded` and the assignment is `merged`.
-    assert_eq!(run.state, "succeeded", "Plan Run completes after merge");
+    assert_eq!(
+        run.state,
+        agentic_afk_contracts::PlanRunState::Finished,
+        "Plan Run completes after merge"
+    );
     assert_eq!(run.assignments.len(), 1);
     let assignment = &run.assignments[0];
     assert_eq!(assignment.source_id, "42");
@@ -288,7 +292,7 @@ async fn planner_selection_outside_eligible_set_fails_plan_run() {
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
     assert_eq!(runs[0].phase_outputs[0].outcome, "failed");
     assert!(runs[0].assignments.is_empty());
 }
@@ -404,7 +408,7 @@ async fn lifecycle_write_failure_releases_provisional_assignment() {
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
     assert!(runs[0].assignments.is_empty());
 }
 
@@ -442,7 +446,10 @@ async fn snapshot_exposes_claimed_assignment_inside_active_plan_run() {
     let recent = &snapshot.snapshot.recent_plan_runs;
     assert_eq!(recent.len(), 1);
     let recent_run = &recent[0];
-    assert_eq!(recent_run.state, "succeeded");
+    assert_eq!(
+        recent_run.state,
+        agentic_afk_contracts::PlanRunState::Finished
+    );
     assert_eq!(recent_run.assignments.len(), 1);
     assert_eq!(recent_run.assignments[0].source_id, "42");
     assert_eq!(recent_run.assignments[0].status, "merged");
@@ -698,6 +705,6 @@ async fn worktree_provision_failure_releases_provisional_assignment() {
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
     assert!(runs[0].assignments.is_empty());
 }

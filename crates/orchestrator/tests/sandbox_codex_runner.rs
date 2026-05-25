@@ -14,7 +14,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agentic_afk_contracts::{IssueAssignmentResponse, PlanRunResponse, ProjectId, ProjectResponse};
+use agentic_afk_contracts::{
+    IssueAssignmentResponse, PlanRunResponse, PlanRunState, ProjectId, ProjectResponse,
+};
 use agentic_afk_orchestrator::plan_run::{AssignmentContext, PlanningContext};
 use agentic_afk_orchestrator::{
     DockerCodexRunner, FakeSandboxLauncher, ImplementationPhaseRunner, MergePhaseRunner,
@@ -40,7 +42,7 @@ fn plan_run() -> PlanRunResponse {
         project_id: ProjectId("proj-42".to_string()),
         integration_branch: "main".to_string(),
         baseline_commit: "deadbeef".to_string(),
-        state: "running".to_string(),
+        state: PlanRunState::Running,
         started_at: "2026-05-23T00:00:00Z".to_string(),
         finished_at: None,
         phase_outputs: Vec::new(),

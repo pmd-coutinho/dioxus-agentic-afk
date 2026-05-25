@@ -31,9 +31,9 @@ pub use plan_run::{
     get_active_plan_run, get_plan_run, get_project_execution_config, insert_in_flight_phase_output,
     list_assignment_phase_outputs, list_in_flight_phase_rows, list_recent_plan_runs,
     mark_in_flight_rows_interrupted, mark_phase_row_interrupted, mark_phase_row_leaked,
-    record_assignment_phase_output,
-    record_assignment_phase_output_typed, record_in_flight_phase_process,
-    record_plan_run_phase_output, record_plan_run_phase_output_typed, set_project_execution_config,
+    record_assignment_phase_output, record_assignment_phase_output_typed,
+    record_in_flight_phase_process, record_plan_run_phase_output,
+    record_plan_run_phase_output_typed, set_project_execution_config,
 };
 pub use prd_overrides::{PrdOverride, list_prd_overrides, mark_prd, unmark_prd};
 
@@ -91,6 +91,8 @@ pub enum PersistenceError {
     InvalidPauseReason { project_id: String, value: String },
     #[error("invalid Auto-Replan transition: {0}")]
     InvalidAutoReplanTransition(String),
+    #[error("invalid Plan Run state for plan run {plan_run_id}: {value}")]
+    InvalidPlanRunState { plan_run_id: String, value: String },
 }
 
 /// Hard ceiling on the serialized JSON size of a single Phase Output body.
@@ -1554,6 +1556,135 @@ mod tests {
         assert_eq!(
             row.body_json.get("truncated_at"),
             Some(&serde_json::Value::from(bytes))
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_run_finish_persists_lifecycle_only_terminal_state() {
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+
+        let finished = finish_plan_run(
+            &db,
+            &plan_run.id,
+            agentic_afk_contracts::PlanRunState::Finished,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            finished.state,
+            agentic_afk_contracts::PlanRunState::Finished
+        );
+
+        let raw: (String,) = sqlx::query_as("SELECT state FROM plan_runs WHERE id = ?")
+            .bind(&plan_run.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(raw.0, "finished");
+    }
+
+    #[tokio::test]
+    async fn plan_run_read_normalizes_legacy_terminal_states() {
+        let db = setup_db().await;
+        let project = create_project(
+            &db,
+            &CreateProjectRequest {
+                path: "/tmp".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let plan_run = create_plan_run(&db, &project.id.0, "main", "deadbeef")
+            .await
+            .unwrap();
+
+        for legacy in ["succeeded", "succeeded_empty", "failed"] {
+            sqlx::query("UPDATE plan_runs SET state = ? WHERE id = ?")
+                .bind(legacy)
+                .bind(&plan_run.id)
+                .execute(&db)
+                .await
+                .unwrap();
+            let reloaded = get_plan_run(&db, &plan_run.id).await.unwrap();
+            assert_eq!(
+                reloaded.state,
+                agentic_afk_contracts::PlanRunState::Finished,
+                "{legacy}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_run_state_migration_rewrites_legacy_terminal_values_to_finished() {
+        let db = connect_in_memory().await.unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE plan_runs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                integration_branch TEXT NOT NULL,
+                baseline_commit TEXT NOT NULL,
+                state TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT
+            )
+            "#,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        for state in [
+            "running",
+            "finished",
+            "succeeded",
+            "succeeded_empty",
+            "failed",
+        ] {
+            sqlx::query(
+                "INSERT INTO plan_runs (id, project_id, integration_branch, baseline_commit, state, started_at, finished_at) VALUES (?, 'p', 'main', 'base', ?, 'unix:1', NULL)",
+            )
+            .bind(state)
+            .bind(state)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+
+        sqlx::query(include_str!(
+            "../migrations/0025_normalize_plan_run_state.sql"
+        ))
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, state FROM plan_runs ORDER BY id ASC",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("failed".to_string(), "finished".to_string()),
+                ("finished".to_string(), "finished".to_string()),
+                ("running".to_string(), "running".to_string()),
+                ("succeeded".to_string(), "finished".to_string()),
+                ("succeeded_empty".to_string(), "finished".to_string()),
+            ]
         );
     }
 

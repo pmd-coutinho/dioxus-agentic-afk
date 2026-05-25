@@ -219,7 +219,7 @@ async fn owner_already_terminal(
             Err(PersistenceError::NotFound(_)) => return Ok(true),
             Err(err) => return Err(err),
         };
-        Ok(plan_run.state != "running")
+        Ok(plan_run.state != agentic_afk_contracts::PlanRunState::Running)
     }
 }
 

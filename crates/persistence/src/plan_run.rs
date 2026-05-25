@@ -2,8 +2,8 @@
 
 use crate::{Db, PHASE_OUTPUT_BODY_MAX_BYTES, PersistenceError};
 use agentic_afk_contracts::{
-    PhaseOutputBody, PhaseOutputResponse, PlanRunResponse, ProjectExecutionConfigResponse,
-    ProjectId, SetProjectExecutionConfigRequest,
+    PhaseOutputBody, PhaseOutputResponse, PlanRunResponse, PlanRunState,
+    ProjectExecutionConfigResponse, ProjectId, SetProjectExecutionConfigRequest,
 };
 use uuid::Uuid;
 
@@ -76,13 +76,14 @@ pub async fn create_plan_run(
         INSERT INTO plan_runs (
             id, project_id, integration_branch, baseline_commit, state, started_at
         )
-        VALUES (?, ?, ?, ?, 'running', ?)
+        VALUES (?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
     .bind(project_id)
     .bind(integration_branch)
     .bind(baseline_commit)
+    .bind(PlanRunState::Running.as_wire())
     .bind(&started_at)
     .execute(db)
     .await?;
@@ -523,11 +524,11 @@ fn parse_optional_body_json(
 pub async fn finish_plan_run(
     db: &Db,
     plan_run_id: &str,
-    state: &str,
+    state: PlanRunState,
 ) -> Result<PlanRunResponse, PersistenceError> {
     let finished_at = current_unix_timestamp();
     sqlx::query("UPDATE plan_runs SET state = ?, finished_at = ? WHERE id = ?")
-        .bind(state)
+        .bind(state.as_wire())
         .bind(&finished_at)
         .bind(plan_run_id)
         .execute(db)
@@ -561,6 +562,11 @@ pub async fn get_plan_run(db: &Db, plan_run_id: &str) -> Result<PlanRunResponse,
     let (id, project_id, integration_branch, baseline_commit, state, started_at, finished_at) = row;
     let phase_outputs = list_phase_outputs(db, &id).await?;
     let assignments = crate::list_plan_run_assignments(db, &id).await?;
+    let state =
+        PlanRunState::from_wire(&state).ok_or_else(|| PersistenceError::InvalidPlanRunState {
+            plan_run_id: id.clone(),
+            value: state.clone(),
+        })?;
     Ok(PlanRunResponse {
         id,
         project_id: ProjectId(project_id),
@@ -611,12 +617,13 @@ pub async fn get_active_plan_run(
     let id = sqlx::query_as::<_, (String,)>(
         r#"
         SELECT id FROM plan_runs
-        WHERE project_id = ? AND state = 'running'
+        WHERE project_id = ? AND state = ?
         ORDER BY started_at DESC, rowid DESC
         LIMIT 1
         "#,
     )
     .bind(project_id)
+    .bind(PlanRunState::Running.as_wire())
     .fetch_optional(db)
     .await?
     .map(|row| row.0);
@@ -635,12 +642,13 @@ pub async fn list_recent_plan_runs(
     let rows = sqlx::query_as::<_, (String,)>(
         r#"
         SELECT id FROM plan_runs
-        WHERE project_id = ? AND state != 'running'
+        WHERE project_id = ? AND state != ?
         ORDER BY started_at DESC, rowid DESC
         LIMIT ?
         "#,
     )
     .bind(project_id)
+    .bind(PlanRunState::Running.as_wire())
     .bind(limit)
     .fetch_all(db)
     .await?;
