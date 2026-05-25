@@ -27,6 +27,7 @@ RUN apt-get update \
         xz-utils \
         nodejs \
         npm \
+        ripgrep \
         libatomic1 \
         build-essential \
         pkg-config \
