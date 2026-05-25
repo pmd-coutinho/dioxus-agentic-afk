@@ -577,7 +577,10 @@ pub async fn get_plan_run(db: &Db, plan_run_id: &str) -> Result<PlanRunResponse,
         finished_at,
         phase_outputs,
         assignments,
-    })
+        stage: None,
+        outcome: None,
+    }
+    .enrich())
 }
 
 async fn list_phase_outputs(

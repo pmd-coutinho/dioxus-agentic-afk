@@ -942,6 +942,8 @@ mod tests {
             finished_at: None,
             phase_outputs: vec![],
             assignments: vec![],
+            stage: None,
+            outcome: None,
         }
     }
 

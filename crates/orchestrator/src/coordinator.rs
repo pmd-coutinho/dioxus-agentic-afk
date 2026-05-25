@@ -2198,6 +2198,8 @@ mod tests {
             finished_at: None,
             phase_outputs: Vec::new(),
             assignments: Vec::new(),
+            stage: None,
+            outcome: None,
         };
         let context = crate::plan_run::PlanningContext {
             project: &project,

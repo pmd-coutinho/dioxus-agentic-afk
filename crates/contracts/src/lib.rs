@@ -444,6 +444,65 @@ impl PlanRunState {
     }
 }
 
+/// Derived stage of an active Plan Run (ADR-0043). Classified from Phase
+/// Outputs, Issue Assignment statuses, and push phase facts. `Pushing`
+/// covers both `merge_staged` assignments and in-flight push phases.
+/// Least-advanced active stage wins across parallel assignments.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanRunStage {
+    Planning,
+    Implementing,
+    Reviewing,
+    Merging,
+    Pushing,
+}
+
+impl PlanRunStage {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Planning => "planning",
+            Self::Implementing => "implementing",
+            Self::Reviewing => "reviewing",
+            Self::Merging => "merging",
+            Self::Pushing => "pushing",
+        }
+    }
+}
+
+/// Derived outcome of a finished Plan Run (ADR-0043). Classified from
+/// Phase Outputs and Issue Assignment terminal states.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanRunOutcome {
+    /// At least one assignment merged successfully.
+    MergedWork,
+    /// Planning Phase selected no eligible work.
+    EmptyBacklog,
+    /// Planning Phase failed (runner error, parse failure).
+    PlanningFailed,
+    /// One or more assignments blocked (non-push-non-fast-forward).
+    AssignmentBlocked,
+    /// A push was rejected because the Integration Branch diverged.
+    PushNonFastForward,
+    /// Merge completed locally (`merge_staged`) but push was never
+    /// attempted and the Plan Run finished without merging.
+    MergeStagedLeft,
+}
+
+impl PlanRunOutcome {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::MergedWork => "merged_work",
+            Self::EmptyBacklog => "empty_backlog",
+            Self::PlanningFailed => "planning_failed",
+            Self::AssignmentBlocked => "assignment_blocked",
+            Self::PushNonFastForward => "push_non_fast_forward",
+            Self::MergeStagedLeft => "merge_staged_left",
+        }
+    }
+}
+
 /// One Plan Run: a manually started Planning Phase plus the parallel issue
 /// work it selects through Review and Merge. This slice only exercises the
 /// empty-selection planning outcome.
@@ -461,6 +520,122 @@ pub struct PlanRunResponse {
     /// Phase. Empty for finished runs whose Planning Phase selected no work.
     #[serde(default)]
     pub assignments: Vec<IssueAssignmentResponse>,
+    /// Derived stage for active runs. `None` for finished runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<PlanRunStage>,
+    /// Derived outcome for finished runs. `None` for active runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<PlanRunOutcome>,
+}
+
+impl PlanRunResponse {
+    /// Enrich this response with derived `stage` (for active runs) or
+    /// `outcome` (for finished runs) based on Phase Outputs and Issue
+    /// Assignments.
+    pub fn enrich(mut self) -> Self {
+        self.stage = Self::classify_stage(&self);
+        self.outcome = Self::classify_outcome(&self);
+        self
+    }
+
+    fn classify_stage(response: &PlanRunResponse) -> Option<PlanRunStage> {
+        if response.state != PlanRunState::Running {
+            return None;
+        }
+
+        if response.assignments.iter().any(|a| {
+            a.status == "implementing" || a.status == "implemented"
+        }) {
+            return Some(PlanRunStage::Implementing);
+        }
+
+        if response
+            .assignments
+            .iter()
+            .any(|a| a.status == "reviewed")
+        {
+            return Some(PlanRunStage::Reviewing);
+        }
+
+        if response
+            .assignments
+            .iter()
+            .any(|a| a.status == "merging")
+        {
+            return Some(PlanRunStage::Merging);
+        }
+
+        if response
+            .phase_outputs
+            .iter()
+            .any(|o| o.phase == "push" && o.outcome == "in_flight")
+            || response
+                .assignments
+                .iter()
+                .any(|a| a.status == "merge_staged")
+        {
+            return Some(PlanRunStage::Pushing);
+        }
+
+        Some(PlanRunStage::Planning)
+    }
+
+    pub fn classify_outcome(response: &PlanRunResponse) -> Option<PlanRunOutcome> {
+        if response.state != PlanRunState::Finished {
+            return None;
+        }
+
+        if response
+            .phase_outputs
+            .iter()
+            .any(|o| o.phase == "planning" && o.outcome == "failed")
+        {
+            return Some(PlanRunOutcome::PlanningFailed);
+        }
+
+        if response.assignments.is_empty()
+            && response.phase_outputs.iter().any(|o| {
+                o.phase == "planning" && o.outcome == "succeeded_empty"
+            })
+        {
+            return Some(PlanRunOutcome::EmptyBacklog);
+        }
+
+        if response.assignments.iter().any(|a| {
+            a.status == "blocked"
+                && a.block_reason
+                    .as_ref()
+                    .is_some_and(|r| r.kind == BlockReason::PushNonFastForward)
+        }) {
+            return Some(PlanRunOutcome::PushNonFastForward);
+        }
+
+        if response
+            .assignments
+            .iter()
+            .any(|a| a.status == "blocked")
+        {
+            return Some(PlanRunOutcome::AssignmentBlocked);
+        }
+
+        if response
+            .assignments
+            .iter()
+            .any(|a| a.status == "merge_staged")
+        {
+            return Some(PlanRunOutcome::MergeStagedLeft);
+        }
+
+        if response
+            .assignments
+            .iter()
+            .any(|a| a.status == "merged")
+        {
+            return Some(PlanRunOutcome::MergedWork);
+        }
+
+        Some(PlanRunOutcome::PlanningFailed)
+    }
 }
 
 /// Typed Phase Output body recorded against a Plan Run or Issue Assignment
@@ -1249,5 +1424,304 @@ mod tests {
         assert!(json.contains(r#""status":422"#));
         let deserialized: ProblemDetail = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, problem);
+    }
+
+    // --- Plan Run stage + outcome classifier tests ---
+
+    fn plan_run(
+        state: PlanRunState,
+        phase_outputs: Vec<PhaseOutputResponse>,
+        assignments: Vec<IssueAssignmentResponse>,
+    ) -> PlanRunResponse {
+        PlanRunResponse {
+            id: "pr-1".into(),
+            project_id: ProjectId("p-1".into()),
+            integration_branch: "main".into(),
+            baseline_commit: "abc".into(),
+            state,
+            started_at: "unix:1".into(),
+            finished_at: if state == PlanRunState::Finished {
+                Some("unix:2".into())
+            } else {
+                None
+            },
+            phase_outputs,
+            assignments,
+            stage: None,
+            outcome: None,
+        }
+    }
+
+    fn assignment(status: &str, block_reason: Option<BlockReason>) -> IssueAssignmentResponse {
+        IssueAssignmentResponse {
+            id: format!("a-{status}"),
+            project_id: ProjectId("p-1".into()),
+            source_id: "1".into(),
+            source_title: "Issue".into(),
+            branch: "agent/issue-1".into(),
+            worktree_path: "/tmp/worktree".into(),
+            status: status.into(),
+            status_detail: None,
+            latest_attempt: None,
+            plan_run_id: Some("pr-1".into()),
+            selection_summary: None,
+            phase_outputs: vec![],
+            review_rejection_count: 0,
+            block_reason: block_reason.map(|kind| BlockReasonResponse { kind, detail: None }),
+        }
+    }
+
+    fn phase_output(phase: &str, outcome: &str) -> PhaseOutputResponse {
+        PhaseOutputResponse {
+            phase: phase.into(),
+            outcome: outcome.into(),
+            body_json: serde_json::json!({}),
+            recorded_at: "unix:1".into(),
+            assignment_id: None,
+        }
+    }
+
+    #[test]
+    fn active_run_without_planning_output_is_planning() {
+        let run = plan_run(PlanRunState::Running, vec![], vec![]);
+        let enriched = run.enrich();
+        assert_eq!(enriched.stage, Some(PlanRunStage::Planning));
+        assert_eq!(enriched.outcome, None);
+    }
+
+    #[test]
+    fn finished_run_has_no_stage() {
+        let run = plan_run(PlanRunState::Finished, vec![], vec![]);
+        let enriched = run.enrich();
+        assert_eq!(enriched.stage, None);
+    }
+
+    #[test]
+    fn active_run_with_implementing_assignment_is_implementing() {
+        let run = plan_run(
+            PlanRunState::Running,
+            vec![phase_output("planning", "succeeded")],
+            vec![assignment("implementing", None)],
+        );
+        let enriched = run.enrich();
+        assert_eq!(enriched.stage, Some(PlanRunStage::Implementing));
+    }
+
+    #[test]
+    fn active_run_with_implemented_assignment_is_implementing() {
+        let run = plan_run(
+            PlanRunState::Running,
+            vec![phase_output("planning", "succeeded")],
+            vec![assignment("implemented", None)],
+        );
+        let enriched = run.enrich();
+        assert_eq!(enriched.stage, Some(PlanRunStage::Implementing));
+    }
+
+    #[test]
+    fn active_run_with_reviewed_assignment_is_reviewing() {
+        let run = plan_run(
+            PlanRunState::Running,
+            vec![phase_output("planning", "succeeded")],
+            vec![assignment("reviewed", None)],
+        );
+        let enriched = run.enrich();
+        assert_eq!(enriched.stage, Some(PlanRunStage::Reviewing));
+    }
+
+    #[test]
+    fn active_run_with_merging_assignment_is_merging() {
+        let run = plan_run(
+            PlanRunState::Running,
+            vec![phase_output("planning", "succeeded")],
+            vec![assignment("merging", None)],
+        );
+        let enriched = run.enrich();
+        assert_eq!(enriched.stage, Some(PlanRunStage::Merging));
+    }
+
+    #[test]
+    fn active_run_with_merge_staged_is_pushing() {
+        let run = plan_run(
+            PlanRunState::Running,
+            vec![phase_output("planning", "succeeded")],
+            vec![assignment("merge_staged", None)],
+        );
+        let enriched = run.enrich();
+        assert_eq!(enriched.stage, Some(PlanRunStage::Pushing));
+    }
+
+    #[test]
+    fn active_run_with_in_flight_push_is_pushing() {
+        let run = plan_run(
+            PlanRunState::Running,
+            vec![
+                phase_output("planning", "succeeded"),
+                phase_output("push", "in_flight"),
+            ],
+            vec![],
+        );
+        let enriched = run.enrich();
+        assert_eq!(enriched.stage, Some(PlanRunStage::Pushing));
+    }
+
+    #[test]
+    fn mixed_parallel_stages_use_least_advanced() {
+        let run = plan_run(
+            PlanRunState::Running,
+            vec![phase_output("planning", "succeeded")],
+            vec![
+                assignment("implementing", None),
+                assignment("merge_staged", None),
+            ],
+        );
+        let enriched = run.enrich();
+        assert_eq!(enriched.stage, Some(PlanRunStage::Implementing));
+    }
+
+    #[test]
+    fn mixed_parallel_reviewed_and_implementing_is_implementing() {
+        let run = plan_run(
+            PlanRunState::Running,
+            vec![phase_output("planning", "succeeded")],
+            vec![
+                assignment("reviewed", None),
+                assignment("implementing", None),
+            ],
+        );
+        let enriched = run.enrich();
+        assert_eq!(enriched.stage, Some(PlanRunStage::Implementing));
+    }
+
+    #[test]
+    fn running_run_has_no_outcome() {
+        let run = plan_run(PlanRunState::Running, vec![], vec![]);
+        let enriched = run.enrich();
+        assert_eq!(enriched.outcome, None);
+    }
+
+    #[test]
+    fn finished_planning_failed_outcome() {
+        let mut run = plan_run(PlanRunState::Finished, vec![], vec![]);
+        run.phase_outputs.push(phase_output("planning", "failed"));
+        let enriched = run.enrich();
+        assert_eq!(enriched.outcome, Some(PlanRunOutcome::PlanningFailed));
+    }
+
+    #[test]
+    fn finished_empty_backlog_outcome() {
+        let mut run = plan_run(PlanRunState::Finished, vec![], vec![]);
+        run.phase_outputs
+            .push(phase_output("planning", "succeeded_empty"));
+        let enriched = run.enrich();
+        assert_eq!(enriched.outcome, Some(PlanRunOutcome::EmptyBacklog));
+    }
+
+    #[test]
+    fn finished_push_non_fast_forward_outcome() {
+        let run = plan_run(
+            PlanRunState::Finished,
+            vec![phase_output("planning", "succeeded")],
+            vec![assignment(
+                "blocked",
+                Some(BlockReason::PushNonFastForward),
+            )],
+        );
+        let enriched = run.enrich();
+        assert_eq!(
+            enriched.outcome,
+            Some(PlanRunOutcome::PushNonFastForward)
+        );
+    }
+
+    #[test]
+    fn finished_assignment_blocked_outcome() {
+        let run = plan_run(
+            PlanRunState::Finished,
+            vec![phase_output("planning", "succeeded")],
+            vec![assignment(
+                "blocked",
+                Some(BlockReason::MergePhaseFailed),
+            )],
+        );
+        let enriched = run.enrich();
+        assert_eq!(
+            enriched.outcome,
+            Some(PlanRunOutcome::AssignmentBlocked)
+        );
+    }
+
+    #[test]
+    fn finished_merge_staged_left_outcome() {
+        let run = plan_run(
+            PlanRunState::Finished,
+            vec![phase_output("planning", "succeeded")],
+            vec![assignment("merge_staged", None)],
+        );
+        let enriched = run.enrich();
+        assert_eq!(enriched.outcome, Some(PlanRunOutcome::MergeStagedLeft));
+    }
+
+    #[test]
+    fn finished_merged_work_outcome() {
+        let run = plan_run(
+            PlanRunState::Finished,
+            vec![phase_output("planning", "succeeded")],
+            vec![assignment("merged", None)],
+        );
+        let enriched = run.enrich();
+        assert_eq!(enriched.outcome, Some(PlanRunOutcome::MergedWork));
+    }
+
+    #[test]
+    fn finished_push_non_fast_forward_takes_precedence_over_blocked() {
+        let run = plan_run(
+            PlanRunState::Finished,
+            vec![phase_output("planning", "succeeded")],
+            vec![
+                assignment("blocked", Some(BlockReason::PushNonFastForward)),
+                assignment("blocked", Some(BlockReason::MergePhaseFailed)),
+            ],
+        );
+        let enriched = run.enrich();
+        assert_eq!(
+            enriched.outcome,
+            Some(PlanRunOutcome::PushNonFastForward)
+        );
+    }
+
+    #[test]
+    fn finished_blocked_takes_precedence_over_merge_staged() {
+        let run = plan_run(
+            PlanRunState::Finished,
+            vec![phase_output("planning", "succeeded")],
+            vec![
+                assignment("blocked", Some(BlockReason::MergePhaseFailed)),
+                assignment("merge_staged", None),
+            ],
+        );
+        let enriched = run.enrich();
+        assert_eq!(
+            enriched.outcome,
+            Some(PlanRunOutcome::AssignmentBlocked)
+        );
+    }
+
+    #[test]
+    fn stage_and_outcome_serialize_correctly() {
+        let running = plan_run(PlanRunState::Running, vec![], vec![]).enrich();
+        let json = serde_json::to_string(&running).unwrap();
+        assert!(json.contains("\"stage\":\"planning\""));
+        assert!(!json.contains("\"outcome\""));
+
+        let finished = plan_run(
+            PlanRunState::Finished,
+            vec![],
+            vec![assignment("merged", None)],
+        )
+        .enrich();
+        let json = serde_json::to_string(&finished).unwrap();
+        assert!(json.contains("\"outcome\":\"merged_work\""));
+        assert!(!json.contains("\"stage\""));
     }
 }

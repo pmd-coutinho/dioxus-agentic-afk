@@ -14,9 +14,9 @@ use ui::{
 use agentic_afk_contracts::{
     AppInfoResponse, AutoReplanState, EnableIssueSourceRequest, GitSummary,
     IssueAssignmentResponse, IssueSourceCandidate, IssueSourceSyncResponse, PauseReason,
-    PlanRunResponse, PlanningSnapshotResponse, ProjectActivityEntryResponse, ProjectEvent,
-    ProjectExecutionConfigResponse, ProjectId, ProjectResponse, ProjectSnapshotResponse,
-    SetProjectExecutionConfigRequest, SourceIssueSnapshot,
+    PlanRunOutcome, PlanRunResponse, PlanningSnapshotResponse, ProjectActivityEntryResponse,
+    ProjectEvent, ProjectExecutionConfigResponse, ProjectId, ProjectResponse,
+    ProjectSnapshotResponse, SetProjectExecutionConfigRequest, SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
 use std::cell::RefCell;
@@ -1390,26 +1390,17 @@ fn derive_plan_run_history_pill(plan_run: &PlanRunResponse) -> (PillTone, &'stat
     if plan_run.state == agentic_afk_contracts::PlanRunState::Running {
         return (PillTone::Pending, "Running");
     }
-    if plan_run
-        .phase_outputs
-        .iter()
-        .any(|output| output.phase == "planning" && output.outcome == "succeeded_empty")
-        && plan_run.assignments.is_empty()
-    {
-        return (PillTone::Verified, "Succeeded (empty)");
+    match PlanRunResponse::classify_outcome(plan_run) {
+        Some(PlanRunOutcome::EmptyBacklog) => (PillTone::Verified, "Succeeded (empty)"),
+        Some(PlanRunOutcome::MergedWork) => (PillTone::Verified, "Finished"),
+        Some(
+            PlanRunOutcome::PlanningFailed
+            | PlanRunOutcome::AssignmentBlocked
+            | PlanRunOutcome::PushNonFastForward
+            | PlanRunOutcome::MergeStagedLeft,
+        ) => (PillTone::Failed, "Finished"),
+        None => (PillTone::Verified, "Finished"),
     }
-    if plan_run
-        .assignments
-        .iter()
-        .any(|assignment| assignment.status == "blocked" || assignment.status == "merge_staged")
-        || plan_run
-            .phase_outputs
-            .iter()
-            .any(|output| output.phase == "planning" && output.outcome == "failed")
-    {
-        return (PillTone::Failed, "Finished");
-    }
-    (PillTone::Verified, "Finished")
 }
 
 #[component]

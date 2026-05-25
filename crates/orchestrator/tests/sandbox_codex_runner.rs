@@ -47,6 +47,8 @@ fn plan_run() -> PlanRunResponse {
         finished_at: None,
         phase_outputs: Vec::new(),
         assignments: Vec::new(),
+        stage: None,
+        outcome: None,
     }
 }
 

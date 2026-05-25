@@ -1,6 +1,4 @@
-use agentic_afk_contracts::{
-    AutoReplanState, BlockReason, PauseReason, PlanRunResponse, PlanRunState,
-};
+use agentic_afk_contracts::{AutoReplanState, PauseReason, PlanRunOutcome, PlanRunResponse};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CycleOutcome {
@@ -89,62 +87,18 @@ impl AutoReplanDriver {
 }
 
 pub fn classify_plan_run_for_auto_replan(plan_run: &PlanRunResponse) -> CycleOutcome {
-    if plan_run.state != PlanRunState::Finished {
-        return CycleOutcome::Pause(PauseReason::PlanningFailed);
-    }
-
-    if plan_run
-        .phase_outputs
-        .iter()
-        .any(|output| output.phase == "planning" && output.outcome == "failed")
-    {
-        return CycleOutcome::Pause(PauseReason::PlanningFailed);
-    }
-
-    if plan_run.assignments.is_empty()
-        && plan_run
-            .phase_outputs
-            .iter()
-            .any(|output| output.phase == "planning" && output.outcome == "succeeded_empty")
-    {
-        return CycleOutcome::Pause(PauseReason::EmptyBacklog);
-    }
-
-    if plan_run.assignments.iter().any(|assignment| {
-        assignment.status == "blocked"
-            && assignment
-                .block_reason
-                .as_ref()
-                .is_some_and(|reason| reason.kind == BlockReason::PushNonFastForward)
-    }) {
-        return CycleOutcome::Pause(PauseReason::PushNonFastForward);
-    }
-
-    if plan_run
-        .assignments
-        .iter()
-        .any(|assignment| assignment.status == "blocked")
-    {
-        return CycleOutcome::Pause(PauseReason::AssignmentBlocked);
-    }
-
-    if plan_run
-        .assignments
-        .iter()
-        .any(|assignment| assignment.status == "merge_staged")
-    {
-        return CycleOutcome::Pause(PauseReason::MergeStagedLeft);
-    }
-
-    let merged = plan_run
-        .assignments
-        .iter()
-        .filter(|assignment| assignment.status == "merged")
-        .count();
-    if merged > 0 {
-        CycleOutcome::Continue
-    } else {
-        CycleOutcome::Pause(PauseReason::PlanningFailed)
+    match PlanRunResponse::classify_outcome(plan_run) {
+        Some(PlanRunOutcome::MergedWork) => CycleOutcome::Continue,
+        Some(PlanRunOutcome::EmptyBacklog) => CycleOutcome::Pause(PauseReason::EmptyBacklog),
+        Some(PlanRunOutcome::PlanningFailed) => CycleOutcome::Pause(PauseReason::PlanningFailed),
+        Some(PlanRunOutcome::AssignmentBlocked) => {
+            CycleOutcome::Pause(PauseReason::AssignmentBlocked)
+        }
+        Some(PlanRunOutcome::PushNonFastForward) => {
+            CycleOutcome::Pause(PauseReason::PushNonFastForward)
+        }
+        Some(PlanRunOutcome::MergeStagedLeft) => CycleOutcome::Pause(PauseReason::MergeStagedLeft),
+        None => CycleOutcome::Pause(PauseReason::PlanningFailed),
     }
 }
 
@@ -152,7 +106,8 @@ pub fn classify_plan_run_for_auto_replan(plan_run: &PlanRunResponse) -> CycleOut
 mod tests {
     use super::*;
     use agentic_afk_contracts::{
-        BlockReasonResponse, IssueAssignmentResponse, PhaseOutputResponse, ProjectId,
+        BlockReason, BlockReasonResponse, IssueAssignmentResponse, PhaseOutputResponse, PlanRunState,
+        ProjectId,
     };
 
     fn decision(
@@ -276,6 +231,8 @@ mod tests {
             finished_at: Some("unix:2".into()),
             phase_outputs: vec![],
             assignments,
+            stage: None,
+            outcome: None,
         }
     }
 
