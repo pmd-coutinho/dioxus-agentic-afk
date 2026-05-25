@@ -57,11 +57,21 @@ Do not merge blocked or rejected issue work. Do not start another Planning Phase
 
 # OUTPUT
 
-Return a merge Phase Output with:
+Return exactly one complete XML-style merge block:
 
-- `outcome`: `merged` when the Integration Branch is verified ready to push, or `blocked` when the merge cannot finish safely in this attempt
-- `merged_source_ids`: the Source Issue ids whose branches were integrated (empty when blocked)
-- `verification`: commands and results for the integrated result
-- `gaps`: verification gaps
-- `summary`: a concise summary for durable Plan Run history
-- `block_reason` (when blocked): a human-readable reason describing the required human change
+1. Start with an opening tag named `merge`.
+2. Put the JSON object inside that block.
+3. End with a closing tag named `merge`.
+
+Do not echo these instructions. Do not include Markdown fences or any text before or after the merge block.
+
+The JSON object must have this shape:
+
+{
+  "outcome": "merged" | "blocked",
+  "merged_source_ids": ["source issue id"],
+  "verification": ["command — result"],
+  "gaps": ["verification gap"],
+  "summary": "concise summary for durable Plan Run history",
+  "block_reason": "human-readable reason describing the required human change (only when outcome is blocked)"
+}

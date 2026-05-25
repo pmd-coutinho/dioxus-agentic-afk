@@ -2350,9 +2350,33 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
         Ok(project) => project,
         Err(error) => return persistence_error_to_response(error),
     };
-    match start_plan_run_for_project(&state, &id, project).await {
-        Ok(finished) => (StatusCode::CREATED, Json(finished)).into_response(),
-        Err(error) => error.response,
+    // Plan Run orchestration takes minutes (Codex Sandbox + planning agent
+    // + parallel implementation/review/merge). Awaiting it directly inside
+    // the HTTP handler ties the run's lifetime to the browser fetch: the
+    // client times out with "NetworkError when attempting to fetch
+    // resource", axum drops the handler future, and `run_plan_run` is
+    // cancelled mid-flight — leaking the in-flight row and any orphan
+    // Codex container. Spawning detaches execution from the request
+    // future so client disconnect does not cancel it; awaiting the
+    // `JoinHandle` keeps the connected-client response semantics intact
+    // (still returns the terminal `PlanRunResponse`), but if the await
+    // itself is dropped the spawned task keeps running to completion and
+    // writes its terminal state + SSE events from there.
+    let prepared = match prepare_plan_run(&state, &id, project).await {
+        Ok(prepared) => prepared,
+        Err(error) => return error.response,
+    };
+    let db = state.db.clone();
+    let join = tokio::spawn(execute_prepared_plan_run(db, prepared));
+    match join.await {
+        Ok(Ok(finished)) => (StatusCode::CREATED, Json(finished)).into_response(),
+        Ok(Err(error)) => error.response,
+        Err(join_error) => sync_problem_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "urn:agentic-afk:plan-run-task-panicked",
+            "Internal Server Error",
+            format!("Plan Run background task failed: {join_error}"),
+        ),
     }
 }
 
@@ -2361,11 +2385,26 @@ struct StartPlanRunFailure {
     finished_plan_run: Option<agentic_afk_contracts::PlanRunResponse>,
 }
 
+struct PreparedPlanRun {
+    plan_run: agentic_afk_contracts::PlanRunResponse,
+    inputs: agentic_afk_orchestrator::PlanRunInputs,
+    effects: agentic_afk_orchestrator::PlanRunEffects,
+}
+
 async fn start_plan_run_for_project(
     state: &Arc<AppState>,
     id: &str,
     project: ProjectResponse,
 ) -> Result<agentic_afk_contracts::PlanRunResponse, StartPlanRunFailure> {
+    let prepared = prepare_plan_run(state, id, project).await?;
+    execute_prepared_plan_run(state.db.clone(), prepared).await
+}
+
+async fn prepare_plan_run(
+    state: &Arc<AppState>,
+    id: &str,
+    project: ProjectResponse,
+) -> Result<PreparedPlanRun, StartPlanRunFailure> {
     if !project.trusted {
         return Err(StartPlanRunFailure {
             response: sync_problem_response(
@@ -2514,8 +2553,8 @@ async fn start_plan_run_for_project(
     crate::control_plane_events::publish_plan_run_started(&state.event_bus, &id, plan_run.clone());
 
     // Delegate phase orchestration to the coordinator in the orchestrator
-    // crate (issue #48). The handler keeps responsibility for request
-    // validation, baseline refresh, row creation, and response mapping; the
+    // crate (issue #48). Preparation owns request validation, baseline
+    // refresh, row creation, and the `PlanRunStarted` event; the
     // coordinator owns planning, parallel implementation+review, merge,
     // push, cleanup, and source lifecycle transitions.
     let events: Arc<dyn agentic_afk_orchestrator::EventPublisher> = Arc::new(
@@ -2533,12 +2572,22 @@ async fn start_plan_run_for_project(
         deps: state.plan_run_deps.clone(),
         gh_binary_path: state.config.gh_binary_path.clone(),
     };
-    match agentic_afk_orchestrator::run_plan_run(&inputs, &effects).await {
+    Ok(PreparedPlanRun {
+        plan_run,
+        inputs,
+        effects,
+    })
+}
+
+async fn execute_prepared_plan_run(
+    db: Db,
+    prepared: PreparedPlanRun,
+) -> Result<agentic_afk_contracts::PlanRunResponse, StartPlanRunFailure> {
+    let plan_run_id = prepared.plan_run.id.clone();
+    match agentic_afk_orchestrator::run_plan_run(&prepared.inputs, &prepared.effects).await {
         Ok(finished) => Ok(finished),
         Err(error) => {
-            let finished_plan_run = persistence::get_plan_run(&state.db, &plan_run.id)
-                .await
-                .ok();
+            let finished_plan_run = persistence::get_plan_run(&db, &plan_run_id).await.ok();
             Err(StartPlanRunFailure {
                 response: coordinator_error_to_response(error),
                 finished_plan_run,

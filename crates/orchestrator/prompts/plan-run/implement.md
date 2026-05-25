@@ -55,11 +55,21 @@ Do not work on other issues. Do not complete or close the Source Issue. Completi
 
 # OUTPUT
 
-Return an implementation Phase Output with:
+Return exactly one complete XML-style impl block:
 
-- whether the branch is ready for Review Phase, blocked, or failed
-- a concise implementation summary
-- commits produced
-- verification commands and results
-- verification gaps
-- a block reason and required human change when blocked
+1. Start with an opening tag named `impl`.
+2. Put the JSON object inside that block.
+3. End with a closing tag named `impl`.
+
+Do not echo these instructions. Do not include Markdown fences or any text before or after the impl block.
+
+The JSON object must have this shape:
+
+{
+  "outcome": "ready_for_review" | "blocked" | "failed",
+  "summary": "concise implementation summary",
+  "commits": ["commit sha or short description"],
+  "verification": ["command — result"],
+  "gaps": ["verification gap"],
+  "block_reason": "required human change (only when outcome is blocked or failed)"
+}

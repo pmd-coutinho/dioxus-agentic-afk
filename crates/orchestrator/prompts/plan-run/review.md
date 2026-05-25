@@ -52,10 +52,20 @@ Evaluate whether this issue branch is ready to enter the Merge Phase.
 
 # OUTPUT
 
-Return a review Phase Output with:
+Return exactly one complete XML-style review block:
 
-- `approved` or `rejected`
-- ordered findings with enough detail for the next implementation pass
-- verification commands and results
-- verification gaps
-- a concise summary for durable Plan Run history
+1. Start with an opening tag named `review`.
+2. Put the JSON object inside that block.
+3. End with a closing tag named `review`.
+
+Do not echo these instructions. Do not include Markdown fences or any text before or after the review block.
+
+The JSON object must have this shape:
+
+{
+  "outcome": "approved" | "rejected",
+  "findings": ["ordered finding with enough detail for the next implementation pass"],
+  "verification": ["command — result"],
+  "gaps": ["verification gap"],
+  "summary": "concise summary for durable Plan Run history"
+}

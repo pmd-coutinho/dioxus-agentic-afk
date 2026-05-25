@@ -338,25 +338,27 @@ pub fn parse_review_output(stdout: &str) -> Result<ParsedReviewOutput, String> {
     })
 }
 
+/// Tolerant tag extraction for Codex phase outputs. Codex occasionally
+/// returns the JSON body without the `<tag>...</tag>` wrapper (especially
+/// when `--output-last-message` truncates the wrapper or the agent
+/// formats prose around bare JSON). Strict tag matching turned that into
+/// `urn:agentic-afk:*-output-unparseable` failures on otherwise-correct
+/// runs (real branch commits + a usable JSON payload), so the parser
+/// progressively falls back to looser slices when the wrapper is partial
+/// or absent. Tag-wrapped output remains the preferred shape; the prompt
+/// still asks for it.
 fn extract_tagged_json(stdout: &str, tag: &str) -> Result<serde_json::Value, String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
-    let body = if let Some(end) = stdout.rfind(&close) {
-        let start = stdout[..end]
-            .rfind(&open)
-            .ok_or_else(|| format!("output missing {open} opening tag"))?
-            + open.len();
-        if end < start {
-            return Err(format!("output has malformed {tag} tags"));
+    let body_raw = match (stdout.rfind(&open), stdout.rfind(&close)) {
+        (Some(open_pos), Some(close_pos)) if close_pos >= open_pos + open.len() => {
+            &stdout[open_pos + open.len()..close_pos]
         }
-        strip_json_code_fence(stdout[start..end].trim())
-    } else {
-        let start = stdout
-            .rfind(&open)
-            .ok_or_else(|| format!("output missing {open} opening tag"))?
-            + open.len();
-        strip_json_code_fence(stdout[start..].trim())
+        (Some(open_pos), _) => &stdout[open_pos + open.len()..],
+        (None, Some(close_pos)) => &stdout[..close_pos],
+        (None, None) => stdout,
     };
+    let body = strip_json_code_fence(body_raw.trim());
     serde_json::from_str(body).map_err(|error| {
         format!(
             "{tag} output is not valid JSON: {error}; body starts with: {}",
@@ -398,13 +400,23 @@ mod parse_tagged_phase_output_tests {
     }
 
     #[test]
-    fn tagged_phase_output_still_rejects_missing_opening_tag() {
-        let error = parse_implementation_output(r#"{"outcome":"ready_for_review"}"#).unwrap_err();
+    fn tagged_phase_output_accepts_bare_json_without_tags() {
+        let parsed = parse_implementation_output(r#"{"outcome":"ready_for_review","summary":"x"}"#)
+            .expect("bare JSON without tags parses (tolerant extraction)");
 
-        assert!(
-            error.contains("output missing <impl> opening tag"),
-            "{error}"
-        );
+        assert_eq!(parsed.outcome, "ready_for_review");
+        assert_eq!(parsed.body["summary"], "x");
+    }
+
+    #[test]
+    fn tagged_phase_output_accepts_closing_tag_only() {
+        let parsed = parse_implementation_output(
+            r#"{"outcome":"ready_for_review","summary":"y"}</impl>"#,
+        )
+        .expect("closing-only output parses (tolerant extraction)");
+
+        assert_eq!(parsed.outcome, "ready_for_review");
+        assert_eq!(parsed.body["summary"], "y");
     }
 }
 
@@ -486,27 +498,23 @@ pub fn parse_planning_output(stdout: &str) -> Result<ParsedPlanningOutput, Strin
     })
 }
 
+/// Tolerant tag extraction for the planning Phase Output, mirroring
+/// [`extract_tagged_json`]. The planner has its own helper because the
+/// JSON value is returned to a different caller pipeline, but the
+/// fallback policy is identical: prefer a fully-tagged body, then
+/// open-only, then close-only, then bare stdout. The prompt still asks
+/// for the wrapper; this just keeps a correct planner choice from being
+/// rejected when the wrapper is partial or missing.
 fn extract_planning_body(stdout: &str) -> Result<&str, String> {
-    if let Some(end) = stdout.rfind("</plan>") {
-        let start = stdout[..end].rfind("<plan>").ok_or_else(|| {
-            format!(
-                "planning output missing <plan> opening tag; output ends with: {}",
-                excerpt_for_error(stdout)
-            )
-        })? + "<plan>".len();
-        if end < start {
-            return Err("planning output has malformed <plan> tags".to_string());
+    let body_raw = match (stdout.rfind("<plan>"), stdout.rfind("</plan>")) {
+        (Some(open_pos), Some(close_pos)) if close_pos >= open_pos + "<plan>".len() => {
+            &stdout[open_pos + "<plan>".len()..close_pos]
         }
-        return Ok(strip_json_code_fence(stdout[start..end].trim()));
-    }
-
-    let start = stdout.rfind("<plan>").ok_or_else(|| {
-        format!(
-            "planning output missing <plan> opening tag; output ends with: {}",
-            excerpt_for_error(stdout)
-        )
-    })? + "<plan>".len();
-    Ok(strip_json_code_fence(stdout[start..].trim()))
+        (Some(open_pos), _) => &stdout[open_pos + "<plan>".len()..],
+        (None, Some(close_pos)) => &stdout[..close_pos],
+        (None, None) => stdout,
+    };
+    Ok(strip_json_code_fence(body_raw.trim()))
 }
 
 #[derive(Clone, Debug)]
@@ -1388,10 +1396,23 @@ mod parse_planning_output_tests {
     }
 
     #[test]
-    fn missing_plan_tag_error_includes_output_excerpt() {
+    fn missing_plan_tag_falls_back_to_bare_json() {
+        let parsed = parse_planning_output(r#"{"issues":[],"summary":"empty"}"#)
+            .expect("bare JSON without <plan> tag parses (tolerant extraction)");
+
+        assert!(parsed.is_empty);
+        assert_eq!(parsed.body["summary"], "empty");
+    }
+
+    #[test]
+    fn non_json_output_still_errors_with_excerpt() {
         let error = parse_planning_output("plain text").unwrap_err();
 
-        assert!(error.contains("output ends with: plain text"), "{error}");
+        assert!(
+            error.contains("planning output is not valid JSON"),
+            "{error}"
+        );
+        assert!(error.contains("plain text"), "{error}");
     }
 }
 
