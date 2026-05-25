@@ -489,7 +489,8 @@ mod tests {
     use super::*;
     use agentic_afk_contracts::{
         AssignmentAttemptResponse, AutoReplanState, IssueAssignmentResponse, IssueSource,
-        IssueSourceCandidate, IssueSourceSyncResponse, PlanningSnapshotResponse, ProjectResponse,
+        IssueSourceCandidate, IssueSourceSyncResponse, PauseReason, PlanningSnapshotResponse,
+        ProjectResponse,
     };
 
     fn planning_snapshot_with_source(locator: &str) -> PlanningSnapshotResponse {
@@ -1176,5 +1177,37 @@ mod tests {
         assert_eq!(cfg.integration_branch, "main");
         assert_eq!(cfg.max_parallel_tasks, 4);
         assert_eq!(cfg.review_retry_limit, 2);
+    }
+
+    #[test]
+    fn auto_replan_state_changed_preserves_pause_reason() {
+        let mut state = ProjectStoreState::new();
+        let mut snapshot = snapshot_with_activity(vec![]);
+        snapshot.project = ProjectResponse {
+            id: ProjectId("p".to_string()),
+            path: String::new(),
+            trusted: true,
+            git_summary: None,
+            enabled_issue_source: None,
+            auto_replan_state: AutoReplanState::Off,
+            auto_replan_pause_reason: None,
+        };
+        state.hydrate(snapshot, 0);
+        let outcome = state.apply_event(
+            1,
+            ProjectEvent::AutoReplanStateChanged {
+                state: AutoReplanState::Paused,
+                reason: Some(PauseReason::EmptyBacklog),
+            },
+        );
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert_eq!(
+            state.project.as_ref().unwrap().auto_replan_state,
+            AutoReplanState::Paused
+        );
+        assert_eq!(
+            state.project.as_ref().unwrap().auto_replan_pause_reason,
+            Some(PauseReason::EmptyBacklog)
+        );
     }
 }

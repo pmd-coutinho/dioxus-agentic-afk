@@ -1720,20 +1720,20 @@ fn derive_auto_replan_pill(state: AutoReplanState) -> (PillTone, &'static str) {
 
 fn auto_replan_pause_copy(reason: PauseReason) -> &'static str {
     match reason {
-        PauseReason::EmptyBacklog => "Backlog drained. No Ready Issues left to plan.",
+        PauseReason::EmptyBacklog => "Empty backlog: no Ready Issues left to plan.",
         PauseReason::AssignmentBlocked => {
-            "Plan Run finished with blocked Issue Assignment(s). Resolve via Re-Enable."
+            "Assignment blocked: resolve via Re-Enable."
         }
         PauseReason::PushNonFastForward => {
-            "Integration Branch push diverged. Retry Push or Abandon Staged on the affected Issue Assignment."
+            "Push failed: Integration Branch diverged. Retry Push or Abandon Staged."
         }
         PauseReason::MergeStagedLeft => {
-            "Plan Run finished with merge_staged work. Decide Retry Push or Abandon Staged."
+            "Merge staged: decide Retry Push or Abandon Staged."
         }
         PauseReason::PlanningFailed => {
-            "Planning Phase failed. See latest Plan Run for diagnostics."
+            "Planning failed: see latest Plan Run for diagnostics."
         }
-        PauseReason::SyncFailed => "Issue Source sync failed. Check GitHub auth or network.",
+        PauseReason::SyncFailed => "Issue Source sync failed: check GitHub auth or network.",
     }
 }
 
@@ -2819,6 +2819,44 @@ mod tests {
         let (tone, label) = derive_plan_run_history_pill(&finished_plan_run(None));
         assert_eq!(tone, PillTone::Verified);
         assert_eq!(label, "Finished");
+    }
+
+    // --- Auto-Replan pause copy (issue #84) ---
+
+    #[test]
+    fn pause_copy_empty_backlog_mentions_outcome_label() {
+        let copy = auto_replan_pause_copy(PauseReason::EmptyBacklog);
+        assert!(copy.contains("Empty backlog"), "copy: {copy}");
+    }
+
+    #[test]
+    fn pause_copy_planning_failed_mentions_outcome_label() {
+        let copy = auto_replan_pause_copy(PauseReason::PlanningFailed);
+        assert!(copy.contains("Planning failed"), "copy: {copy}");
+    }
+
+    #[test]
+    fn pause_copy_assignment_blocked_mentions_outcome_label() {
+        let copy = auto_replan_pause_copy(PauseReason::AssignmentBlocked);
+        assert!(copy.contains("Assignment blocked"), "copy: {copy}");
+    }
+
+    #[test]
+    fn pause_copy_push_non_fast_forward_mentions_outcome_label() {
+        let copy = auto_replan_pause_copy(PauseReason::PushNonFastForward);
+        assert!(copy.contains("Push failed"), "copy: {copy}");
+    }
+
+    #[test]
+    fn pause_copy_merge_staged_left_mentions_outcome_label() {
+        let copy = auto_replan_pause_copy(PauseReason::MergeStagedLeft);
+        assert!(copy.contains("Merge staged"), "copy: {copy}");
+    }
+
+    #[test]
+    fn pause_copy_sync_failed_is_preserved() {
+        let copy = auto_replan_pause_copy(PauseReason::SyncFailed);
+        assert!(copy.contains("sync"), "copy: {copy}");
     }
 
     #[test]

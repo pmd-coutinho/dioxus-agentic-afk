@@ -34,7 +34,7 @@ test('Auto-Replan empty and blocked pauses render banner copy with Resume', asyn
   const banner = page.getByTestId('auto-replan-paused-banner');
   await expect(banner).toBeVisible();
   await expect(banner).toContainText(
-    'Backlog drained. No Ready Issues left to plan.',
+    'Empty backlog: no Ready Issues left to plan.',
   );
   await expect(page.getByTestId('auto-replan-banner-resume')).toBeVisible();
   await expect(page.getByTestId('auto-replan-banner-disarm')).toBeVisible();
@@ -48,6 +48,6 @@ test('Auto-Replan empty and blocked pauses render banner copy with Resume', asyn
   );
   await expect(blocked).toBeOK();
   await expect(banner).toContainText(
-    'Plan Run finished with blocked Issue Assignment(s). Resolve via Re-Enable.',
+    'Assignment blocked: resolve via Re-Enable.',
   );
 });
