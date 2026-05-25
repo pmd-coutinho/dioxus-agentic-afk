@@ -344,6 +344,69 @@ async fn unparseable_implementation_output_blocks_the_assignment() {
 }
 
 #[tokio::test]
+async fn implementation_outcome_blocked_records_typed_block_reason_and_finishes_plan_run() {
+    // The Implementation Phase prompt explicitly invites the agent to
+    // return `outcome=blocked` with a `block_reason` text when human
+    // input is required. F2: surface that as the typed
+    // `BlockReason::ImplementationBlocked` carrying the agent's reason
+    // as detail, rather than synthesising the opaque
+    // "implementation outcome `blocked` does not enter Review Phase"
+    // string and dropping the agent's actual block_reason on the floor.
+    let fixture = build_fixture(
+        r#"<impl>{"outcome":"blocked","summary":"halted mid-migration","commits":[],"verification":["cargo check"],"gaps":[],"block_reason":"need ADR-0044 clarification on auth shape"}</impl>"#,
+        r#"<review>{"outcome":"approved","findings":[],"summary":"never","verification":[],"gaps":[]}</review>"#,
+        None,
+    )
+    .await;
+    let pid = fixture.project.id.0.clone();
+    let resp = start(&fixture.router, &pid).await;
+    // Implementation-blocked is a canonical Plan Run outcome (not an
+    // HTTP failure), matching the review-retry-limit pattern.
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 10)
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
+    assert_eq!(runs[0].assignments.len(), 1);
+    let assignment = &runs[0].assignments[0];
+    assert_eq!(assignment.status, "blocked");
+    let block_reason = assignment
+        .block_reason
+        .as_ref()
+        .expect("typed block reason is set");
+    assert_eq!(
+        block_reason.kind,
+        agentic_afk_contracts::BlockReason::ImplementationBlocked
+    );
+    assert_eq!(
+        block_reason.detail.as_deref(),
+        Some("need ADR-0044 clarification on auth shape")
+    );
+    // The implementation row lands as `failed` (Failed-body invariant)
+    // but the error text is the agent's reason, not the opaque marker.
+    let impl_output = assignment
+        .phase_outputs
+        .iter()
+        .find(|p| p.phase == "implementation")
+        .expect("implementation phase output recorded");
+    assert_eq!(impl_output.outcome, "failed");
+    let body_str = serde_json::to_string(&impl_output.body_json).unwrap();
+    assert!(
+        body_str.contains("need ADR-0044 clarification on auth shape"),
+        "implementation failure body should carry the agent's block_reason text: {body_str}"
+    );
+    // Review Phase did not run.
+    assert!(
+        assignment
+            .phase_outputs
+            .iter()
+            .all(|p| p.phase != "review"),
+        "review phase must not run after implementation self-block"
+    );
+}
+
+#[tokio::test]
 async fn rejected_review_with_exhausted_retry_limit_blocks_assignment_and_fails_plan_run() {
     // The Review Retry Limit defaults to 1 in `build_fixture`, so a single
     // rejection exhausts the Review Loop (issue #44) and blocks the

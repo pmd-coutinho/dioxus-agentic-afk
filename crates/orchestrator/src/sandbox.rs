@@ -382,22 +382,78 @@ impl SandboxLauncher for DockerSandboxLauncher {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| SandboxError::Spawn(format!("docker run: {e}")))?;
+        let child_pid = child.id();
         if let Some(recorder) = recorder {
             recorder
-                .record_blocking(child.id(), &child_started_at)
+                .record_blocking(child_pid, &child_started_at)
                 .map_err(|e| SandboxError::Spawn(format!("record docker process: {e}")))?;
         }
         let output = child
             .wait_with_output()
             .map_err(|e| SandboxError::Spawn(format!("docker run wait: {e}")))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        persist_agent_log(
+            recorder.map(PhaseProcessRecorder::row_id),
+            child_pid,
+            &child_started_at,
+            output.status.code(),
+            &stdout,
+            &stderr,
+        );
         if !output.status.success() {
             return Err(SandboxError::NonZero {
                 status: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                stderr,
             });
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(stdout)
     }
+}
+
+/// Resolve the directory under which agent stdout/stderr logs are written.
+/// Honors `AGENTIC_AFK_AGENT_LOG_DIR` when set; otherwise falls back to
+/// `<TMPDIR>/agentic-afk-agent-logs` so a clean machine still captures
+/// transcripts without requiring extra setup. The path is created lazily.
+fn agent_log_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("AGENTIC_AFK_AGENT_LOG_DIR") {
+        return PathBuf::from(dir);
+    }
+    std::env::temp_dir().join("agentic-afk-agent-logs")
+}
+
+/// Persist the post-completion stdout/stderr of one Codex Sandbox launch
+/// to disk so a failed implementation/review/merge phase can be debugged
+/// after the fact (F4 — sibling to F2 typed BlockReason). The filename is
+/// keyed on the `plan_run_phase_outputs.id` when a recorder is attached
+/// (the common path), falling back to `<pid>-<started_at>` when callers
+/// run without a recorder (preflight, fake-docker tests). Best-effort:
+/// any I/O error is swallowed so a full disk does not turn a successful
+/// phase into a `SandboxError`.
+fn persist_agent_log(
+    row_id: Option<&str>,
+    pid: u32,
+    started_at: &str,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) {
+    let dir = agent_log_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let basename = match row_id {
+        Some(id) => id.to_string(),
+        None => format!("{started_at}-{pid}"),
+    };
+    let path = dir.join(format!("{basename}.log"));
+    let exit = exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let body = format!(
+        "# pid={pid} started_at={started_at} exit={exit}\n--- STDOUT ---\n{stdout}\n--- STDERR ---\n{stderr}\n",
+    );
+    let _ = std::fs::write(&path, body);
 }
 
 fn current_unix_timestamp() -> String {

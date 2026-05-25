@@ -294,6 +294,13 @@ pub enum BlockReason {
     /// scanner marked the assignment blocked because the in-flight Codex
     /// child was killed and the lost work cannot be resumed (ADR-0042).
     OrchestratorRestart,
+    /// The Implementation Phase agent returned a non-`ready_for_review`
+    /// outcome (`blocked` or `failed`) and surfaced a `block_reason` text
+    /// describing what blocks progress. Distinguishes "agent self-blocked
+    /// mid-implementation" from infra failures (`PhaseFailed`,
+    /// `Unparseable`) which keep raising `CoordinatorError`. The agent's
+    /// freeform reason lands in `BlockReasonResponse::detail`.
+    ImplementationBlocked,
 }
 
 impl BlockReason {
@@ -306,6 +313,7 @@ impl BlockReason {
             Self::PushNonFastForward => "push_non_fast_forward",
             Self::AbandonedStaged => "abandoned_staged",
             Self::OrchestratorRestart => "orchestrator_restart",
+            Self::ImplementationBlocked => "implementation_blocked",
         }
     }
 
@@ -319,6 +327,7 @@ impl BlockReason {
             "push_non_fast_forward" => Some(Self::PushNonFastForward),
             "abandoned_staged" => Some(Self::AbandonedStaged),
             "orchestrator_restart" => Some(Self::OrchestratorRestart),
+            "implementation_blocked" => Some(Self::ImplementationBlocked),
             _ => None,
         }
     }
@@ -1141,6 +1150,20 @@ mod tests {
         assert_eq!(
             BlockReason::from_wire("orchestrator_restart"),
             Some(BlockReason::OrchestratorRestart)
+        );
+    }
+
+    #[test]
+    fn block_reason_round_trip_implementation_blocked() {
+        let reason = BlockReason::ImplementationBlocked;
+        assert_eq!(reason.as_wire(), "implementation_blocked");
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, "\"implementation_blocked\"");
+        let back: BlockReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, reason);
+        assert_eq!(
+            BlockReason::from_wire("implementation_blocked"),
+            Some(BlockReason::ImplementationBlocked)
         );
     }
 

@@ -61,6 +61,29 @@ pub fn check_implementation_outcome(outcome: &str) -> Result<(), ImplementationR
     }
 }
 
+/// Extract the agent's freeform `block_reason` from a parsed Implementation
+/// Phase body, with sensible fallbacks so the typed BlockReason always
+/// carries human-readable detail even when the agent omitted the field.
+/// Fallback order: `block_reason` → `summary` → synthetic outcome marker.
+pub fn extract_implementation_block_reason(
+    body: &serde_json::Value,
+    outcome: &str,
+) -> String {
+    if let Some(reason) = body.get("block_reason").and_then(serde_json::Value::as_str) {
+        let trimmed = reason.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Some(summary) = body.get("summary").and_then(serde_json::Value::as_str) {
+        let trimmed = summary.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    format!("implementation outcome `{outcome}` reported without block_reason")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_implementation_prompt(
     project_instructions: &str,
@@ -102,5 +125,41 @@ mod tests {
             err,
             ImplementationRejection::NotReadyForReview { outcome } if outcome == "blocked"
         ));
+    }
+
+    #[test]
+    fn extract_block_reason_prefers_explicit_field() {
+        let body = serde_json::json!({"block_reason": "needs ADR clarification", "summary": "x"});
+        assert_eq!(
+            extract_implementation_block_reason(&body, "blocked"),
+            "needs ADR clarification"
+        );
+    }
+
+    #[test]
+    fn extract_block_reason_falls_back_to_summary() {
+        let body = serde_json::json!({"summary": "stopped after migration"});
+        assert_eq!(
+            extract_implementation_block_reason(&body, "blocked"),
+            "stopped after migration"
+        );
+    }
+
+    #[test]
+    fn extract_block_reason_falls_back_to_synthetic_marker() {
+        let body = serde_json::json!({});
+        assert_eq!(
+            extract_implementation_block_reason(&body, "failed"),
+            "implementation outcome `failed` reported without block_reason"
+        );
+    }
+
+    #[test]
+    fn extract_block_reason_skips_empty_strings() {
+        let body = serde_json::json!({"block_reason": "   ", "summary": "real summary"});
+        assert_eq!(
+            extract_implementation_block_reason(&body, "blocked"),
+            "real summary"
+        );
     }
 }

@@ -16,7 +16,10 @@ use agentic_afk_contracts::{
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
 
-use crate::implementation_phase::{check_implementation_outcome, render_implementation_prompt};
+use crate::implementation_phase::{
+    ImplementationRejection, check_implementation_outcome, extract_implementation_block_reason,
+    render_implementation_prompt,
+};
 use crate::in_flight_phase_tracker::{self as tracker, PhaseLocator, TrackedPhase};
 use crate::merge_phase::{
     AssignmentMergeOutcome, MergeRejection, decide_merge_outcome, render_merge_prompt,
@@ -953,19 +956,40 @@ async fn run_assignment_implement_review(
             }
         };
         if let Err(rejection) = check_implementation_outcome(&impl_parsed.outcome) {
-            let err = CoordinatorError::from(rejection);
-            return Err(fail_assignment_phase(
-                db,
-                events,
-                project_id,
-                assignment,
-                &err.detail,
-                &err.problem_type,
-                impl_handle
-                    .take()
-                    .expect("implementation row not finalized"),
-            )
-            .await);
+            match rejection {
+                ImplementationRejection::NotReadyForReview { outcome } => {
+                    let reason = extract_implementation_block_reason(&impl_parsed.body, &outcome);
+                    block_assignment_for_implementation(
+                        db,
+                        events,
+                        deps,
+                        project,
+                        project_id,
+                        assignment,
+                        &reason,
+                        impl_handle
+                            .take()
+                            .expect("implementation row not finalized"),
+                    )
+                    .await?;
+                    return Ok(None);
+                }
+                other => {
+                    let err = CoordinatorError::from(other);
+                    return Err(fail_assignment_phase(
+                        db,
+                        events,
+                        project_id,
+                        assignment,
+                        &err.detail,
+                        &err.problem_type,
+                        impl_handle
+                            .take()
+                            .expect("implementation row not finalized"),
+                    )
+                    .await);
+                }
+            }
         }
         let impl_body = parse_implementation_phase_body(&impl_parsed.body);
         let impl_output = impl_handle
@@ -1123,6 +1147,59 @@ async fn block_assignment_for_loop(
             // Per ADR-0035, post-claim lifecycle write-back is
             // best-effort. Surface the failure as Project Activity so the
             // developer notices through the Dashboard rather than stderr.
+            events.record_activity(
+                project_id,
+                Some(&assignment.id),
+                "lifecycle_writeback_failed",
+                Some(&format!(
+                    "blocked Lifecycle Status write-back failed: {error}"
+                )),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Block an assignment whose Implementation Phase agent returned a
+/// non-`ready_for_review` outcome (`blocked` or `failed`) with a
+/// `block_reason` text. Records the implementation row as `failed`
+/// (Failed-body invariant — outcome `blocked` does not pair with the
+/// Implementation body shape), transitions the assignment to `blocked`
+/// with [`BlockReason::ImplementationBlocked`] carrying the agent's
+/// reason as detail, and best-effort writes the Source Issue lifecycle
+/// back to `Blocked`. Plan Run continues so peer assignments finish.
+#[allow(clippy::too_many_arguments)]
+async fn block_assignment_for_implementation(
+    db: &Db,
+    events: &Arc<dyn EventPublisher>,
+    deps: &PlanRunDeps,
+    project: &ProjectResponse,
+    project_id: &str,
+    assignment: &IssueAssignmentResponse,
+    reason: &str,
+    phase_handle: TrackedPhase,
+) -> Result<(), CoordinatorError> {
+    let body = agentic_afk_contracts::PhaseOutputBody::Failed {
+        error: reason.to_string(),
+        problem_type: Some("urn:agentic-afk:implementation-not-ready".to_string()),
+    };
+    let _ = phase_handle.complete("failed", body).await;
+    transition_assignment(
+        db,
+        events,
+        project_id,
+        &assignment.id,
+        AssignmentStatus::Blocked {
+            kind: agentic_afk_contracts::BlockReason::ImplementationBlocked,
+            detail: reason.to_string(),
+        },
+    )
+    .await?;
+    if project.enabled_issue_source.is_some() {
+        if let Err(error) = deps
+            .lifecycle
+            .write(&assignment.source_id, crate::LifecycleStatus::Blocked)
+        {
             events.record_activity(
                 project_id,
                 Some(&assignment.id),
