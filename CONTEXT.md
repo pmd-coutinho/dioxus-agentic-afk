@@ -60,9 +60,13 @@ _Avoid_: Shared issue work, automatic sub-agent split, pooled task
 The typed cause of a blocked **Issue Assignment**, paired with an optional freeform detail string for human context. Values are `ReviewRetryLimitExhausted`, `MergePhaseFailed`, `PushNonFastForward`, `AbandonedStaged`, and `OrchestratorRestart`. The typed kind drives **Control Plane** branching (badges, recovery affordances) while the detail carries cause-specific specifics like push stderr.
 _Avoid_: Freeform-only reason, dashboard-only label, agent narrative
 
-**Codex Sandbox**:
-The per-Codex-phase isolation boundary that wraps each Codex execution — **Planning Phase**, **Assignment Attempt** implementation, **Review Phase**, and **Merge Phase** — in an ephemeral Docker container. The container bind-mounts the developer's Codex auth and the relevant workspace (the **Project** path read-only for **Planning Phase**, the **Assignment Worktree** read-write for the **Assignment Attempt**, **Review Phase**, and **Merge Phase** of one **Issue Assignment**), and isolates agent-spawned ports from the host and sibling **Codex Sandboxes**. The **Codex Sandbox** is a Control Plane-owned execution detail; **Project** trust authorises agent autonomy within it, not outside it.
-_Avoid_: Assignment Sandbox, Project container, Plan Run container, agent VM
+**Agent Sandbox**:
+The per-phase isolation boundary that wraps each **Agent Backend** execution — **Planning Phase**, **Assignment Attempt** implementation, **Review Phase**, and **Merge Phase** — in an ephemeral Docker container. The container bind-mounts the backend-specific auth and the relevant workspace (the **Project** path read-only for **Planning Phase**, the **Assignment Worktree** read-write for the **Assignment Attempt**, **Review Phase**, and **Merge Phase** of one **Issue Assignment**), and isolates agent-spawned ports from the host and sibling **Agent Sandboxes**. The **Agent Sandbox** is a Control Plane-owned execution detail; **Project** trust authorises agent autonomy within it, not outside it.
+_Avoid_: Codex Sandbox, Assignment Sandbox, Project container, Plan Run container, agent VM
+
+**Agent Backend**:
+The concrete coding-agent CLI that runs inside an **Agent Sandbox** to execute a phase. The **Control Plane** supports multiple backends (e.g., Codex, OpenCode); a **Project** has a default backend and a **Plan Run** may override it.
+_Avoid_: Model, engine, provider, sandbox
 
 **Plan Run**:
 One manually started **Planning Phase** and the parallel issue work it selects through **Review Phase** and **Merge Phase**, all based on one refreshed **Integration Branch** baseline.
@@ -220,7 +224,7 @@ _Avoid_: afk, dioxus-agentic-afk
 - Finished **Plan Runs** clean up blocked **Issue Assignment** worktrees and issue branches
 - Human re-enable is keyed to the **Source Issue**, not its dead **Issue Assignment** row; it clears local blocked state for the latest blocked **Issue Assignment** of that **Source Issue** if one exists, writes Lifecycle `Ready` back to the **Issue Source** (best-effort per ADR-0035 — failure proceeds locally and surfaces an **Activity** entry), and does not redefine **Ready Issue** readiness
 - A blocked **Issue Assignment** carries a typed **Block Reason** plus optional human-readable detail; **Block Reasons** include `ReviewRetryLimitExhausted`, `MergePhaseFailed`, `PushNonFastForward`, `AbandonedStaged`, and `OrchestratorRestart`
-- Each Codex execution within a **Plan Run** — the **Planning Phase** and each **Assignment Attempt**, **Review Phase**, and **Merge Phase** — runs inside its own **Codex Sandbox**; mid-flight **Codex Sandboxes** are killed on orchestrator restart and any **Issue Assignment** carrying a killed sandbox transitions to `Blocked` with **Block Reason** `OrchestratorRestart`
+- Each **Agent Backend** execution within a **Plan Run** — the **Planning Phase** and each **Assignment Attempt**, **Review Phase**, and **Merge Phase** — runs inside its own **Agent Sandbox**; mid-flight **Agent Sandboxes** are killed on orchestrator restart and any **Issue Assignment** carrying a killed sandbox transitions to `Blocked` with **Block Reason** `OrchestratorRestart`
 - A **Plan Run** uses **Phase Prompts** for planning, implementation, review, and merge
 - A **Plan Run** preserves **Phase Outputs** after worktrees and issue branches are cleaned up
 - Finishing one **Plan Run** does not automatically start another **Planning Phase**
