@@ -30,7 +30,8 @@ pub use plan_run::{
     InFlightPhaseRowSummary, complete_in_flight_phase_output, create_plan_run, finish_plan_run,
     get_active_plan_run, get_plan_run, get_project_execution_config, insert_in_flight_phase_output,
     list_assignment_phase_outputs, list_in_flight_phase_rows, list_recent_plan_runs,
-    mark_in_flight_rows_interrupted, mark_phase_row_interrupted, record_assignment_phase_output,
+    mark_in_flight_rows_interrupted, mark_phase_row_interrupted, mark_phase_row_leaked,
+    record_assignment_phase_output,
     record_assignment_phase_output_typed, record_in_flight_phase_process,
     record_plan_run_phase_output, record_plan_run_phase_output_typed, set_project_execution_config,
 };

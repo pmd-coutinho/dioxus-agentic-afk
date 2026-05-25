@@ -736,6 +736,29 @@ pub async fn complete_in_flight_phase_output(
     Ok(())
 }
 
+/// Mark a single `in_flight` row as `failed` with a stable leak-guard
+/// problem-type URN in the body. Called from `TrackedPhase`'s Drop impl
+/// when the handle is abandoned without `complete` or `fail`, so leaked
+/// rows self-heal instead of stuck-forever blocking the dashboard. The
+/// `outcome='in_flight'` guard makes the update a no-op if the row was
+/// already finalised by another path (defensive — the Drop impl already
+/// checks its `finalized` flag).
+pub async fn mark_phase_row_leaked(db: &Db, row_id: &str) -> Result<(), PersistenceError> {
+    let body_text = r#"{"type":"Failed","error":"phase handle dropped without finalization (TrackedPhase leak guard)","problem_type":"urn:agentic-afk:phase-handle-leaked"}"#;
+    sqlx::query(
+        r#"
+        UPDATE plan_run_phase_outputs
+        SET outcome = 'failed', body_json = ?
+        WHERE id = ? AND outcome = 'in_flight'
+        "#,
+    )
+    .bind(body_text)
+    .bind(row_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Summary of one `in_flight` or `interrupted` row, returned by
 /// [`mark_in_flight_rows_interrupted`] and [`list_in_flight_phase_rows`]
 /// so callers (ShutdownCoordinator / BootRecoveryScanner) can SIGTERM

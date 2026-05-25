@@ -20,7 +20,7 @@ use std::sync::Arc;
 use agentic_afk_contracts::{PhaseOutputBody, PhaseOutputResponse};
 use agentic_afk_persistence::{
     Db, PersistenceError, complete_in_flight_phase_output, insert_in_flight_phase_output,
-    record_in_flight_phase_process,
+    mark_phase_row_leaked, record_in_flight_phase_process,
 };
 use tokio::sync::Mutex;
 
@@ -118,6 +118,14 @@ pub struct TrackedPhase {
     phase: &'static str,
     assignment_id: Option<String>,
     pub recorder: PhaseProcessRecorder,
+    /// Set true by `complete` / `fail` before the value is dropped at the
+    /// end of the method body. The Drop guard checks this flag to avoid a
+    /// second UPDATE clobbering the terminal outcome the method just
+    /// wrote. When the flag is false at Drop time the handle was abandoned
+    /// (early `?` return or panic between the in-flight INSERT and the
+    /// terminal UPDATE) and the row would otherwise leak at `in_flight`
+    /// forever, so the guard schedules a best-effort UPDATE to `failed`.
+    finalized: bool,
 }
 
 impl TrackedPhase {
@@ -131,11 +139,12 @@ impl TrackedPhase {
     /// pre-tracker `record_*_phase_output_typed` helpers returned, so
     /// callers can keep feeding the existing event publishers unchanged.
     pub async fn complete(
-        self,
+        mut self,
         outcome: &str,
         body: PhaseOutputBody,
     ) -> Result<PhaseOutputResponse, PersistenceError> {
         complete_in_flight_phase_output(&self.db, &self.row_id, outcome, &body).await?;
+        self.finalized = true;
         // PhaseOutputBody is a typed enum derived with serde — `to_value`
         // cannot fail. Unwrapping here is safer than introducing a sqlx
         // dep on the orchestrator crate solely to wrap the error.
@@ -146,7 +155,7 @@ impl TrackedPhase {
             outcome: outcome.to_string(),
             body_json,
             recorded_at: String::new(),
-            assignment_id: self.assignment_id,
+            assignment_id: self.assignment_id.clone(),
         })
     }
 
@@ -161,6 +170,36 @@ impl TrackedPhase {
             problem_type: None,
         };
         self.complete("failed", body).await
+    }
+}
+
+/// Self-heal in-flight row leaks. If `complete` / `fail` never ran (early
+/// `?` return, panic, future cancellation) the row would stay
+/// `outcome='in_flight'` forever — the dashboard surfaces it as a stuck
+/// phase and `BootRecoveryScanner` only runs at boot. The guard spawns a
+/// best-effort UPDATE on the current tokio runtime stamping the row as
+/// `failed` with a stable URN so operators can distinguish leak-recovered
+/// rows from rows the phase code finalised itself.
+impl Drop for TrackedPhase {
+    fn drop(&mut self) {
+        if self.finalized {
+            return;
+        }
+        let db = self.db.clone();
+        let row_id = self.row_id.clone();
+        let phase = self.phase;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                match mark_phase_row_leaked(&db, &row_id).await {
+                    Ok(()) => eprintln!(
+                        "[in_flight_phase_tracker] leak guard: swept abandoned in_flight row to failed (phase={phase} row_id={row_id})"
+                    ),
+                    Err(error) => eprintln!(
+                        "[in_flight_phase_tracker] leak guard: failed to mark row failed (phase={phase} row_id={row_id}): {error}"
+                    ),
+                }
+            });
+        }
     }
 }
 
@@ -188,6 +227,7 @@ pub async fn start(db: &Db, locator: PhaseLocator) -> Result<TrackedPhase, Persi
         phase: locator.phase,
         assignment_id: locator.assignment_id,
         recorder,
+        finalized: false,
     })
 }
 
@@ -211,7 +251,7 @@ where
     Fut: std::future::Future<Output = Result<PhaseRunResult<T>, E>>,
     E: std::fmt::Display,
 {
-    let handle = start(db, locator).await?;
+    let mut handle = start(db, locator).await?;
     let recorder = handle.recorder.clone();
     let row_id = handle.row_id.clone();
     match spawn_and_wait(recorder).await {
@@ -224,9 +264,10 @@ where
             // serialising the body just to return a discarded
             // PhaseOutputResponse.
             complete_in_flight_phase_output(db, &row_id, &outcome, &body).await?;
-            // The handle's destructor is a no-op; explicitly drop here
-            // so the row id is not accidentally reused later in this
-            // function.
+            // Mark finalized before dropping so the leak-guard Drop impl
+            // skips its UPDATE — the row already carries the terminal
+            // outcome from the helper above.
+            handle.finalized = true;
             drop(handle);
             Ok(value)
         }
@@ -349,6 +390,44 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_handle_self_heals_in_flight_row() {
+        // Regression: a `start`-style handle abandoned without `complete` /
+        // `fail` (e.g. an early `?` short-circuit between the in-flight
+        // INSERT and the terminal UPDATE) used to leave the row stuck at
+        // `outcome='in_flight'` forever, blocking the dashboard until the
+        // next orchestrator boot ran `BootRecoveryScanner`. The Drop guard
+        // now schedules an UPDATE to `failed` so the leak self-heals.
+        let (db, plan_run_id) = setup().await;
+        {
+            let handle = start(
+                &db,
+                PhaseLocator {
+                    plan_run_id: plan_run_id.clone(),
+                    assignment_id: None,
+                    phase: "planning",
+                },
+            )
+            .await
+            .unwrap();
+            // Row present + in_flight before drop.
+            let mid = list_in_flight_phase_rows(&db).await.unwrap();
+            assert_eq!(mid.len(), 1);
+            assert_eq!(mid[0].outcome, "in_flight");
+            drop(handle);
+        }
+        // Drop's tokio::spawn ran on the same runtime; give the spawned
+        // UPDATE a tick to land. Use a yield + short sleep so the test is
+        // not racy on slow CI.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let remaining = list_in_flight_phase_rows(&db).await.unwrap();
+        assert!(
+            remaining.is_empty(),
+            "leak guard should have swept the abandoned row out of in_flight"
+        );
     }
 
     #[tokio::test]

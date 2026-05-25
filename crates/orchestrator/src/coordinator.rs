@@ -545,7 +545,18 @@ async fn finalize_selection_planning(
             )
             .await);
         }
-        Err(error) => return Err(CoordinatorError::from_persistence(error)),
+        Err(error) => {
+            return Err(fail_planning_phase(
+                db,
+                events,
+                project_id,
+                &plan_run.id,
+                &error.to_string(),
+                "urn:agentic-afk:execution-config-load-failed",
+                phase_handle.take().expect("planning row not yet finalized"),
+            )
+            .await);
+        }
     };
 
     // Apply the pure `validate_planner_selection` decision. Typed
@@ -596,7 +607,7 @@ async fn finalize_selection_planning(
             selection,
             eligible_issue,
         } = claim;
-        let assignment = persistence::create_plan_run_assignment(
+        let assignment = match persistence::create_plan_run_assignment(
             db,
             &plan_run.id,
             project_id,
@@ -606,7 +617,21 @@ async fn finalize_selection_planning(
             &selection.selection_summary,
         )
         .await
-        .map_err(CoordinatorError::from_persistence)?;
+        {
+            Ok(row) => row,
+            Err(error) => {
+                return Err(fail_planning_phase(
+                    db,
+                    events,
+                    project_id,
+                    &plan_run.id,
+                    &error.to_string(),
+                    "urn:agentic-afk:assignment-create-failed",
+                    phase_handle.take().expect("planning row not yet finalized"),
+                )
+                .await);
+            }
+        };
 
         let worktree_path =
             match deps
@@ -629,10 +654,28 @@ async fn finalize_selection_planning(
                 }
             };
         let worktree_path_str = worktree_path.to_string_lossy().into_owned();
-        let assignment =
-            persistence::set_assignment_worktree(db, &assignment.id, &worktree_path_str)
-                .await
-                .map_err(CoordinatorError::from_persistence)?;
+        let assignment = match persistence::set_assignment_worktree(
+            db,
+            &assignment.id,
+            &worktree_path_str,
+        )
+        .await
+        {
+            Ok(row) => row,
+            Err(error) => {
+                let _ = persistence::release_issue_assignment(db, &assignment.id).await;
+                return Err(fail_planning_phase(
+                    db,
+                    events,
+                    project_id,
+                    &plan_run.id,
+                    &error.to_string(),
+                    "urn:agentic-afk:assignment-worktree-persist-failed",
+                    phase_handle.take().expect("planning row not yet finalized"),
+                )
+                .await);
+            }
+        };
 
         if let Err(error) = deps
             .lifecycle
