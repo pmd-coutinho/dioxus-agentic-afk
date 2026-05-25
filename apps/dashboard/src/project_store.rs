@@ -1001,6 +1001,55 @@ mod tests {
     }
 
     #[test]
+    fn plan_run_started_preserves_stage_from_event() {
+        let mut state = ProjectStoreState::new();
+        state.hydrate(snapshot_with_activity(vec![]), 0);
+        let mut started = plan_run_response("pr1", agentic_afk_contracts::PlanRunState::Running);
+        started.stage = Some(agentic_afk_contracts::PlanRunStage::Implementing);
+        let outcome = state.apply_event(1, ProjectEvent::PlanRunStarted(started));
+        assert_eq!(outcome, ApplyOutcome::Merged);
+        assert_eq!(
+            state.active_plan_run.as_ref().unwrap().stage,
+            Some(agentic_afk_contracts::PlanRunStage::Implementing)
+        );
+    }
+
+    #[test]
+    fn hydrate_preserves_stage_from_snapshot() {
+        let mut state = ProjectStoreState::new();
+        let mut snapshot = snapshot_with_activity(vec![]);
+        let mut plan_run = plan_run_response("pr1", agentic_afk_contracts::PlanRunState::Running);
+        plan_run.stage = Some(agentic_afk_contracts::PlanRunStage::Planning);
+        snapshot.active_plan_run = Some(plan_run);
+        state.hydrate(snapshot, 5);
+        assert_eq!(
+            state.active_plan_run.as_ref().unwrap().stage,
+            Some(agentic_afk_contracts::PlanRunStage::Planning)
+        );
+    }
+
+    #[test]
+    fn plan_run_completed_preserves_outcome_in_recent_runs() {
+        let mut state = ProjectStoreState::new();
+        state.hydrate(snapshot_with_activity(vec![]), 0);
+        state.apply_event(
+            1,
+            ProjectEvent::PlanRunStarted(plan_run_response(
+                "pr1",
+                agentic_afk_contracts::PlanRunState::Running,
+            )),
+        );
+        let mut completed = plan_run_response("pr1", agentic_afk_contracts::PlanRunState::Finished);
+        completed.finished_at = Some("1".to_string());
+        completed.outcome = Some(agentic_afk_contracts::PlanRunOutcome::MergedWork);
+        state.apply_event(2, ProjectEvent::PlanRunCompleted(completed));
+        assert_eq!(
+            state.recent_plan_runs[0].outcome,
+            Some(agentic_afk_contracts::PlanRunOutcome::MergedWork)
+        );
+    }
+
+    #[test]
     fn plan_run_phase_completed_appends_phase_output_to_matching_active_plan_run() {
         let mut state = ProjectStoreState::new();
         state.hydrate(snapshot_with_activity(vec![]), 0);

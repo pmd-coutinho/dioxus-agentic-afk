@@ -14,9 +14,9 @@ use ui::{
 use agentic_afk_contracts::{
     AppInfoResponse, AutoReplanState, EnableIssueSourceRequest, GitSummary,
     IssueAssignmentResponse, IssueSourceCandidate, IssueSourceSyncResponse, PauseReason,
-    PlanRunOutcome, PlanRunResponse, PlanningSnapshotResponse, ProjectActivityEntryResponse,
-    ProjectEvent, ProjectExecutionConfigResponse, ProjectId, ProjectResponse,
-    ProjectSnapshotResponse, SetProjectExecutionConfigRequest, SourceIssueSnapshot,
+    PlanRunOutcome, PlanRunResponse, PlanRunStage, PlanningSnapshotResponse,
+    ProjectActivityEntryResponse, ProjectEvent, ProjectExecutionConfigResponse, ProjectId,
+    ProjectResponse, ProjectSnapshotResponse, SetProjectExecutionConfigRequest, SourceIssueSnapshot,
 };
 use dioxus::prelude::*;
 use std::cell::RefCell;
@@ -728,6 +728,7 @@ fn PlanRunCard(
                     match active {
                         Some(active) => {
                             let id_short = active.id.chars().take(8).collect::<String>();
+                            let (stage_tone, stage_label) = derive_plan_run_stage_pill(active.stage);
                             let assignments = active.assignments.clone();
                             // Plan-Run-scoped Phase Output rows (assignment_id =
                             // None) — currently the typed `Push` rows recorded
@@ -743,7 +744,7 @@ fn PlanRunCard(
                             header_phase_outputs.sort_by(|a, b| a.recorded_at.cmp(&b.recorded_at));
                             rsx! {
                                 div { class: "flex flex-col gap-2", "data-testid": "plan-run-active",
-                                    StatusPill { tone: PillTone::Running, label: "Running".to_string() }
+                                    StatusPill { tone: stage_tone, label: stage_label.to_string() }
                                     p { class: "font-mono text-[12px] text-ink", "{id_short}" }
                                     p { class: "text-[12px] text-ink-2",
                                         "{active.integration_branch} @ {active.baseline_commit}"
@@ -1383,6 +1384,17 @@ fn PlanRunHistoryRow(plan_run: PlanRunResponse) -> Element {
                 "{plan_run.integration_branch} @ {plan_run.baseline_commit}"
             }
         }
+    }
+}
+
+fn derive_plan_run_stage_pill(stage: Option<PlanRunStage>) -> (PillTone, &'static str) {
+    match stage {
+        Some(PlanRunStage::Planning) => (PillTone::Pending, "Planning"),
+        Some(PlanRunStage::Implementing) => (PillTone::Running, "Implementing"),
+        Some(PlanRunStage::Reviewing) => (PillTone::Running, "Reviewing"),
+        Some(PlanRunStage::Merging) => (PillTone::Running, "Merging"),
+        Some(PlanRunStage::Pushing) => (PillTone::Running, "Pushing"),
+        None => (PillTone::Running, "Running"),
     }
 }
 
@@ -2690,6 +2702,49 @@ fn SandboxSection(heading: String, children: Element) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentic_afk_contracts::PlanRunStage;
+
+    #[test]
+    fn plan_run_stage_planning_maps_to_pending_pill() {
+        let (tone, label) = derive_plan_run_stage_pill(Some(PlanRunStage::Planning));
+        assert_eq!(tone, PillTone::Pending);
+        assert_eq!(label, "Planning");
+    }
+
+    #[test]
+    fn plan_run_stage_implementing_maps_to_running_pill() {
+        let (tone, label) = derive_plan_run_stage_pill(Some(PlanRunStage::Implementing));
+        assert_eq!(tone, PillTone::Running);
+        assert_eq!(label, "Implementing");
+    }
+
+    #[test]
+    fn plan_run_stage_reviewing_maps_to_running_pill() {
+        let (tone, label) = derive_plan_run_stage_pill(Some(PlanRunStage::Reviewing));
+        assert_eq!(tone, PillTone::Running);
+        assert_eq!(label, "Reviewing");
+    }
+
+    #[test]
+    fn plan_run_stage_merging_maps_to_running_pill() {
+        let (tone, label) = derive_plan_run_stage_pill(Some(PlanRunStage::Merging));
+        assert_eq!(tone, PillTone::Running);
+        assert_eq!(label, "Merging");
+    }
+
+    #[test]
+    fn plan_run_stage_pushing_maps_to_running_pill() {
+        let (tone, label) = derive_plan_run_stage_pill(Some(PlanRunStage::Pushing));
+        assert_eq!(tone, PillTone::Running);
+        assert_eq!(label, "Pushing");
+    }
+
+    #[test]
+    fn plan_run_stage_none_falls_back_to_running() {
+        let (tone, label) = derive_plan_run_stage_pill(None);
+        assert_eq!(tone, PillTone::Running);
+        assert_eq!(label, "Running");
+    }
 
     #[test]
     fn no_git_summary_maps_to_idle_pill() {
