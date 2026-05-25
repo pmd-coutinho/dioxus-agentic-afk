@@ -18,9 +18,7 @@
 //!
 //! After per-row processing every touched **Plan Run** is re-evaluated:
 //! if every assignment under it is terminal (`merged` / `blocked`), the
-//! Plan Run transitions to `finished` (a new fourth terminal alongside
-//! `succeeded` / `succeeded_empty` / `failed`; the dashboard surfaces it
-//! in S3).
+//! Plan Run transitions to `finished`.
 //!
 //! The scanner is **idempotent**: running it a second time on the same
 //! database is a no-op for assignments that already reached `blocked`
@@ -30,7 +28,7 @@
 
 use std::collections::BTreeSet;
 
-use agentic_afk_contracts::{BlockReason, IssueAssignmentResponse};
+use agentic_afk_contracts::{BlockReason, IssueAssignmentResponse, PlanRunState};
 use agentic_afk_persistence::{self as persistence, Db, InFlightPhaseRowSummary, PersistenceError};
 
 use crate::coordinator::EventPublisher;
@@ -39,12 +37,6 @@ use crate::coordinator::EventPublisher;
 /// scanner. Matches ADR-0040's pause/resume convention of one Activity
 /// per state transition. Surfaced in the Dashboard by S3.
 pub const ACTIVITY_KIND_ASSIGNMENT_BLOCKED_ON_RESTART: &str = "assignment_blocked_on_restart";
-
-/// Terminal label written to `plan_runs.state` when the scanner sweeps a
-/// previously-`running` Plan Run whose every assignment is now terminal.
-/// New value (ADR-0042) — the dashboard renders unknown states with a
-/// neutral pill until S3 maps it.
-pub const PLAN_RUN_TERMINAL_FINISHED: &str = "finished";
 
 /// Event-publisher shim used at server boot, when the event bus is
 /// either not yet wired or scoped per-Project and inappropriate for the
@@ -239,7 +231,7 @@ async fn maybe_finish_plan_run(
         Err(PersistenceError::NotFound(_)) => return Ok(false),
         Err(error) => return Err(error),
     };
-    if plan_run.state != "running" {
+    if plan_run.state != PlanRunState::Running {
         return Ok(false);
     }
     let all_terminal = plan_run
@@ -249,8 +241,7 @@ async fn maybe_finish_plan_run(
     if !all_terminal {
         return Ok(false);
     }
-    let finished =
-        persistence::finish_plan_run(db, plan_run_id, PLAN_RUN_TERMINAL_FINISHED).await?;
+    let finished = persistence::finish_plan_run(db, plan_run_id, PlanRunState::Finished).await?;
     events.plan_run_completed(&plan_run.project_id.0, finished);
     Ok(true)
 }
@@ -416,7 +407,7 @@ mod tests {
         );
 
         let plan_run = persistence::get_plan_run(&db, &plan_run_id).await.unwrap();
-        assert_eq!(plan_run.state, PLAN_RUN_TERMINAL_FINISHED);
+        assert_eq!(plan_run.state, PlanRunState::Finished);
     }
 
     #[tokio::test]
@@ -433,7 +424,7 @@ mod tests {
         assert_eq!(report.plan_runs_finished, 1);
 
         let plan_run = persistence::get_plan_run(&db, &plan_run_id).await.unwrap();
-        assert_eq!(plan_run.state, PLAN_RUN_TERMINAL_FINISHED);
+        assert_eq!(plan_run.state, PlanRunState::Finished);
         assert!(plan_run.assignments.is_empty());
         let _ = project_id; // capture for unused-warning silence
     }

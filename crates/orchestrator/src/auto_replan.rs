@@ -1,4 +1,6 @@
-use agentic_afk_contracts::{AutoReplanState, BlockReason, PauseReason, PlanRunResponse};
+use agentic_afk_contracts::{
+    AutoReplanState, BlockReason, PauseReason, PlanRunResponse, PlanRunState,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CycleOutcome {
@@ -87,16 +89,24 @@ impl AutoReplanDriver {
 }
 
 pub fn classify_plan_run_for_auto_replan(plan_run: &PlanRunResponse) -> CycleOutcome {
-    if plan_run.state == "failed"
-        && plan_run
-            .phase_outputs
-            .iter()
-            .any(|output| output.phase == "planning" && output.outcome == "failed")
+    if plan_run.state != PlanRunState::Finished {
+        return CycleOutcome::Pause(PauseReason::PlanningFailed);
+    }
+
+    if plan_run
+        .phase_outputs
+        .iter()
+        .any(|output| output.phase == "planning" && output.outcome == "failed")
     {
         return CycleOutcome::Pause(PauseReason::PlanningFailed);
     }
 
-    if plan_run.state == "succeeded_empty" && plan_run.assignments.is_empty() {
+    if plan_run.assignments.is_empty()
+        && plan_run
+            .phase_outputs
+            .iter()
+            .any(|output| output.phase == "planning" && output.outcome == "succeeded_empty")
+    {
         return CycleOutcome::Pause(PauseReason::EmptyBacklog);
     }
 
@@ -255,13 +265,13 @@ mod tests {
         }
     }
 
-    fn plan_run(state: &str, assignments: Vec<IssueAssignmentResponse>) -> PlanRunResponse {
+    fn plan_run(state: PlanRunState, assignments: Vec<IssueAssignmentResponse>) -> PlanRunResponse {
         PlanRunResponse {
             id: "pr".into(),
             project_id: ProjectId("p".into()),
             integration_branch: "main".into(),
             baseline_commit: "abc".into(),
-            state: state.into(),
+            state,
             started_at: "unix:1".into(),
             finished_at: Some("unix:2".into()),
             phase_outputs: vec![],
@@ -290,7 +300,7 @@ mod tests {
 
     #[test]
     fn classifier_maps_terminal_shapes() {
-        let mut planning_failed = plan_run("failed", vec![]);
+        let mut planning_failed = plan_run(PlanRunState::Finished, vec![]);
         planning_failed.phase_outputs.push(PhaseOutputResponse {
             phase: "planning".into(),
             outcome: "failed".into(),
@@ -302,31 +312,44 @@ mod tests {
         let cases = [
             (
                 "merged-only success",
-                plan_run("succeeded", vec![assignment("merged", None)]),
+                plan_run(PlanRunState::Finished, vec![assignment("merged", None)]),
                 CycleOutcome::Continue,
             ),
             (
                 "empty success",
-                plan_run("succeeded_empty", vec![]),
+                {
+                    let mut run = plan_run(PlanRunState::Finished, vec![]);
+                    run.phase_outputs.push(PhaseOutputResponse {
+                        phase: "planning".into(),
+                        outcome: "succeeded_empty".into(),
+                        body_json: serde_json::json!({}),
+                        recorded_at: "unix:1".into(),
+                        assignment_id: None,
+                    });
+                    run
+                },
                 CycleOutcome::Pause(PauseReason::EmptyBacklog),
             ),
             (
                 "blocked-only",
                 plan_run(
-                    "failed",
+                    PlanRunState::Finished,
                     vec![assignment("blocked", Some(BlockReason::MergePhaseFailed))],
                 ),
                 CycleOutcome::Pause(PauseReason::AssignmentBlocked),
             ),
             (
                 "merge-staged-only",
-                plan_run("failed", vec![assignment("merge_staged", None)]),
+                plan_run(
+                    PlanRunState::Finished,
+                    vec![assignment("merge_staged", None)],
+                ),
                 CycleOutcome::Pause(PauseReason::MergeStagedLeft),
             ),
             (
                 "mixed merged and blocked",
                 plan_run(
-                    "failed",
+                    PlanRunState::Finished,
                     vec![
                         assignment("merged", None),
                         assignment("blocked", Some(BlockReason::ReviewRetryLimitExhausted)),
@@ -337,7 +360,7 @@ mod tests {
             (
                 "mixed merged and staged",
                 plan_run(
-                    "failed",
+                    PlanRunState::Finished,
                     vec![assignment("merged", None), assignment("merge_staged", None)],
                 ),
                 CycleOutcome::Pause(PauseReason::MergeStagedLeft),
@@ -350,7 +373,7 @@ mod tests {
             (
                 "push non-fast-forward",
                 plan_run(
-                    "failed",
+                    PlanRunState::Finished,
                     vec![assignment("blocked", Some(BlockReason::PushNonFastForward))],
                 ),
                 CycleOutcome::Pause(PauseReason::PushNonFastForward),

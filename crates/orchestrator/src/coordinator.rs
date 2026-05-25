@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use agentic_afk_contracts::{
-    IssueAssignmentResponse, IssueSource, PhaseOutputResponse, PlanRunResponse,
+    IssueAssignmentResponse, IssueSource, PhaseOutputResponse, PlanRunResponse, PlanRunState,
     ProjectExecutionConfigResponse, ProjectResponse, SourceIssueSnapshot,
 };
 use agentic_afk_persistence::{self as persistence, Db, PersistenceError};
@@ -33,7 +33,6 @@ use crate::plan_run::{
     UnimplementedMergePhaseRunner, UnimplementedPlanningPhaseRunner,
     UnimplementedReviewPhaseRunner, UnimplementedWorktreeProvisioner,
 };
-use crate::plan_run_finalize::{PlanRunFinalize, decide_plan_run_terminal};
 use crate::plan_run_status::{AssignmentStatus, transition_assignment};
 use crate::planning_phase::{PlannedClaim, render_planning_prompt, validate_planner_selection};
 use crate::production::{
@@ -290,7 +289,8 @@ impl CoordinatorError {
             }
             PersistenceError::InvalidAutoReplanState { .. }
             | PersistenceError::InvalidPauseReason { .. }
-            | PersistenceError::InvalidAutoReplanTransition(_) => {
+            | PersistenceError::InvalidAutoReplanTransition(_)
+            | PersistenceError::InvalidPlanRunState { .. } => {
                 (500, "urn:agentic-afk:auto-replan-persistence-error")
             }
         };
@@ -425,7 +425,9 @@ pub async fn run_plan_run(
         Ok(stdout) => stdout,
         Err(error) => {
             let _ = phase_handle.fail(&error).await;
-            if let Ok(run) = persistence::finish_plan_run(db, &plan_run.id, "failed").await {
+            if let Ok(run) =
+                persistence::finish_plan_run(db, &plan_run.id, PlanRunState::Finished).await
+            {
                 events.plan_run_completed(project_id, run);
             }
             return Err(CoordinatorError::new(
@@ -440,7 +442,9 @@ pub async fn run_plan_run(
         Ok(parsed) => parsed,
         Err(error) => {
             let _ = phase_handle.fail(&error).await;
-            if let Ok(run) = persistence::finish_plan_run(db, &plan_run.id, "failed").await {
+            if let Ok(run) =
+                persistence::finish_plan_run(db, &plan_run.id, PlanRunState::Finished).await
+            {
                 events.plan_run_completed(project_id, run);
             }
             return Err(CoordinatorError::new(
@@ -491,7 +495,7 @@ async fn finalize_empty_planning(
         .await
         .map_err(CoordinatorError::from_persistence)?;
     events.plan_run_phase_completed(project_id, plan_run_id, phase_output);
-    let finished = persistence::finish_plan_run(db, plan_run_id, "succeeded_empty")
+    let finished = persistence::finish_plan_run(db, plan_run_id, PlanRunState::Finished)
         .await
         .map_err(CoordinatorError::from_persistence)?;
     events.plan_run_completed(project_id, finished.clone());
@@ -732,7 +736,9 @@ async fn finalize_selection_planning(
             // Finish the Plan Run as `failed` so the Dashboard records
             // the terminal state alongside the per-assignment phase
             // failure already persisted by `fail_assignment_phase`.
-            if let Ok(run) = persistence::finish_plan_run(db, &plan_run.id, "failed").await {
+            if let Ok(run) =
+                persistence::finish_plan_run(db, &plan_run.id, PlanRunState::Finished).await
+            {
                 events.plan_run_completed(project_id, run);
             }
             return Err(error);
@@ -1529,26 +1535,11 @@ async fn finalize_parallel_plan_run(
         }
     }
 
-    // Plan Run terminal state via the pure `decide_plan_run_terminal`
-    // decision. Empty-planning selections never reach this function (the
-    // empty-planning path returns earlier in `finalize_empty_planning`),
-    // so `planning_was_empty` is always `false` here.
-    //
-    // ADR-0037: a push failure leaves staged assignments at `merge_staged`
-    // and the Plan Run finishes `failed` regardless of how many
-    // assignments locally integrated. The pure decision treats any
-    // `Merged` outcome as `Succeeded`, so we override on push failure.
-    let terminal = if push_failed {
-        crate::plan_run_finalize::PlanRunTerminal::Failed
-    } else {
-        decide_plan_run_terminal(&PlanRunFinalize {
-            planning_was_empty: false,
-            outcomes: merge_outcomes,
-        })
-    };
-    // Suppress unused warning when push_failed shortcut is taken.
-    let _ = &staged_assignments;
-    let finished = persistence::finish_plan_run(db, &plan_run.id, terminal.as_str())
+    // ADR-0043: Plan Run state is lifecycle-only. Empty planning, merged
+    // work, push failures, and blocked assignments are derived from the
+    // recorded child facts rather than duplicated into `plan_runs.state`.
+    let _ = (push_failed, staged_assignments, merge_outcomes);
+    let finished = persistence::finish_plan_run(db, &plan_run.id, PlanRunState::Finished)
         .await
         .map_err(CoordinatorError::from_persistence)?;
     events.plan_run_completed(project_id, finished);
@@ -1624,7 +1615,7 @@ async fn fail_planning_phase(
     // bypass, and the audit log carries the typed Failed body with the
     // error string the operator sees in the RFC-7807 response.
     let _ = phase_handle.fail(error).await;
-    if let Ok(run) = persistence::finish_plan_run(db, plan_run_id, "failed").await {
+    if let Ok(run) = persistence::finish_plan_run(db, plan_run_id, PlanRunState::Finished).await {
         events.plan_run_completed(project_id, run);
     }
     CoordinatorError::new(500, problem_type, error)
@@ -2202,7 +2193,7 @@ mod tests {
             project_id: project.id.clone(),
             integration_branch: "main".to_string(),
             baseline_commit: "deadbeef".to_string(),
-            state: "running".to_string(),
+            state: agentic_afk_contracts::PlanRunState::Running,
             started_at: "2026-05-24T00:00:00Z".to_string(),
             finished_at: None,
             phase_outputs: Vec::new(),

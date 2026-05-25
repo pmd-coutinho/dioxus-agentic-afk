@@ -276,7 +276,7 @@ async fn planning_phase_exceeding_max_parallel_tasks_fails_plan_run() {
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
     drop(fixture.project_dir);
 }
 
@@ -312,7 +312,11 @@ async fn two_eligible_assignments_merge_together_inside_one_plan_run() {
         .unwrap();
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
-    assert_eq!(run.state, "succeeded", "two merged → succeeded");
+    assert_eq!(
+        run.state,
+        agentic_afk_contracts::PlanRunState::Finished,
+        "two merged → finished"
+    );
     assert_eq!(run.assignments.len(), 2);
 
     // Deterministic claim order matches the planner selection order so
@@ -389,7 +393,7 @@ async fn partial_success_merges_reviewed_work_and_keeps_blocked_assignment_block
     let run = &runs[0];
     // Partial-success Plan Runs finish as `succeeded` once any reviewed
     // work merges; the blocked assignment stays outside the merge.
-    assert_eq!(run.state, "succeeded");
+    assert_eq!(run.state, agentic_afk_contracts::PlanRunState::Finished);
     assert_eq!(run.assignments.len(), 2);
 
     let a42 = run
@@ -459,7 +463,7 @@ async fn all_blocked_plan_run_finishes_as_failed_without_pushing() {
     let runs = persistence::list_recent_plan_runs(&fixture.db, &pid, 10)
         .await
         .unwrap();
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
     assert!(runs[0].assignments.iter().all(|a| a.status == "blocked"));
 
     // No merge attempts and no Integration Branch push when nothing was
@@ -510,7 +514,7 @@ async fn snapshot_route_exposes_parallel_assignments_with_phase_outputs() {
     // for the same Plan Run.
     assert!(body.contains("\"status\":\"merged\""), "{body}");
     assert!(body.contains("\"status\":\"blocked\""), "{body}");
-    assert!(body.contains("\"state\":\"succeeded\""), "{body}");
+    assert!(body.contains("\"state\":\"finished\""), "{body}");
     // Durable Phase Outputs preserved after cleanup.
     assert!(body.contains("\"phase\":\"merge\""), "{body}");
     assert!(body.contains("\"phase\":\"review\""), "{body}");

@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn assignment_attempt_added_updates_latest_attempt_in_active_plan_run() {
         let mut state = ProjectStoreState::new();
-        let mut plan_run = plan_run_response("pr1", "running");
+        let mut plan_run = plan_run_response("pr1", agentic_afk_contracts::PlanRunState::Running);
         plan_run.assignments = vec![assignment("assn-1", "implementing")];
         state.active_plan_run = Some(plan_run);
 
@@ -928,13 +928,16 @@ mod tests {
 
     // --- Plan Run store behavior (issue #41) ---
 
-    fn plan_run_response(id: &str, state: &str) -> agentic_afk_contracts::PlanRunResponse {
+    fn plan_run_response(
+        id: &str,
+        state: agentic_afk_contracts::PlanRunState,
+    ) -> agentic_afk_contracts::PlanRunResponse {
         agentic_afk_contracts::PlanRunResponse {
             id: id.to_string(),
             project_id: ProjectId("p".to_string()),
             integration_branch: "main".to_string(),
             baseline_commit: "abc".to_string(),
-            state: state.to_string(),
+            state,
             started_at: "0".to_string(),
             finished_at: None,
             phase_outputs: vec![],
@@ -965,8 +968,14 @@ mod tests {
         let mut state = ProjectStoreState::new();
         let mut snapshot = snapshot_with_activity(vec![]);
         snapshot.execution_config = Some(execution_config());
-        snapshot.active_plan_run = Some(plan_run_response("pr1", "running"));
-        snapshot.recent_plan_runs = vec![plan_run_response("pr0", "succeeded_empty")];
+        snapshot.active_plan_run = Some(plan_run_response(
+            "pr1",
+            agentic_afk_contracts::PlanRunState::Running,
+        ));
+        snapshot.recent_plan_runs = vec![plan_run_response(
+            "pr0",
+            agentic_afk_contracts::PlanRunState::Finished,
+        )];
         state.hydrate(snapshot, 5);
         assert!(state.execution_config.is_some());
         assert_eq!(state.active_plan_run.as_ref().unwrap().id, "pr1");
@@ -980,7 +989,10 @@ mod tests {
         state.hydrate(snapshot_with_activity(vec![]), 0);
         let outcome = state.apply_event(
             1,
-            ProjectEvent::PlanRunStarted(plan_run_response("pr1", "running")),
+            ProjectEvent::PlanRunStarted(plan_run_response(
+                "pr1",
+                agentic_afk_contracts::PlanRunState::Running,
+            )),
         );
         assert_eq!(outcome, ApplyOutcome::Merged);
         assert_eq!(state.active_plan_run.as_ref().unwrap().id, "pr1");
@@ -992,7 +1004,10 @@ mod tests {
         state.hydrate(snapshot_with_activity(vec![]), 0);
         state.apply_event(
             1,
-            ProjectEvent::PlanRunStarted(plan_run_response("pr1", "running")),
+            ProjectEvent::PlanRunStarted(plan_run_response(
+                "pr1",
+                agentic_afk_contracts::PlanRunState::Running,
+            )),
         );
         let outcome = state.apply_event(
             2,
@@ -1013,14 +1028,20 @@ mod tests {
         state.hydrate(snapshot_with_activity(vec![]), 0);
         state.apply_event(
             1,
-            ProjectEvent::PlanRunStarted(plan_run_response("pr1", "running")),
+            ProjectEvent::PlanRunStarted(plan_run_response(
+                "pr1",
+                agentic_afk_contracts::PlanRunState::Running,
+            )),
         );
-        let mut completed = plan_run_response("pr1", "succeeded_empty");
+        let mut completed = plan_run_response("pr1", agentic_afk_contracts::PlanRunState::Finished);
         completed.finished_at = Some("1".to_string());
         state.apply_event(2, ProjectEvent::PlanRunCompleted(completed));
         assert!(state.active_plan_run.is_none());
         assert_eq!(state.recent_plan_runs.len(), 1);
-        assert_eq!(state.recent_plan_runs[0].state, "succeeded_empty");
+        assert_eq!(
+            state.recent_plan_runs[0].state,
+            agentic_afk_contracts::PlanRunState::Finished
+        );
     }
 
     #[test]
@@ -1029,7 +1050,10 @@ mod tests {
         state.hydrate(snapshot_with_activity(vec![]), 0);
         state.apply_event(
             1,
-            ProjectEvent::PlanRunStarted(plan_run_response("pr1", "running")),
+            ProjectEvent::PlanRunStarted(plan_run_response(
+                "pr1",
+                agentic_afk_contracts::PlanRunState::Running,
+            )),
         );
         let mut assignment = assignment("a1", "claimed");
         assignment.plan_run_id = Some("pr1".to_string());
@@ -1051,7 +1075,10 @@ mod tests {
         state.hydrate(snapshot_with_activity(vec![]), 0);
         state.apply_event(
             1,
-            ProjectEvent::PlanRunStarted(plan_run_response("pr1", "running")),
+            ProjectEvent::PlanRunStarted(plan_run_response(
+                "pr1",
+                agentic_afk_contracts::PlanRunState::Running,
+            )),
         );
         let mut created = assignment("a1", "claimed");
         created.plan_run_id = Some("pr1".to_string());

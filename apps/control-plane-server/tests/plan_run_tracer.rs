@@ -128,7 +128,10 @@ async fn empty_plan_run_succeeds_and_appears_in_snapshot() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     let plan_run: PlanRunResponse = read_json(response).await;
-    assert_eq!(plan_run.state, "succeeded_empty");
+    assert_eq!(
+        plan_run.state,
+        agentic_afk_contracts::PlanRunState::Finished
+    );
     assert_eq!(plan_run.integration_branch, "main");
     assert_eq!(plan_run.baseline_commit, "abc1234");
     assert_eq!(plan_run.finished_at.is_some(), true);
@@ -166,7 +169,7 @@ async fn empty_plan_run_succeeds_and_appears_in_snapshot() {
     assert_eq!(snapshot.snapshot.recent_plan_runs[0].id, plan_run.id);
     assert_eq!(
         snapshot.snapshot.recent_plan_runs[0].state,
-        "succeeded_empty"
+        agentic_afk_contracts::PlanRunState::Finished
     );
     let cfg = snapshot.snapshot.execution_config.as_ref().unwrap();
     assert_eq!(cfg.integration_branch, "main");

@@ -338,7 +338,7 @@ async fn unparseable_implementation_output_blocks_the_assignment() {
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
     assert_eq!(runs[0].assignments.len(), 1);
     assert_eq!(runs[0].assignments[0].status, "blocked");
 }
@@ -363,7 +363,7 @@ async fn rejected_review_with_exhausted_retry_limit_blocks_assignment_and_fails_
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].state, "failed");
+    assert_eq!(runs[0].state, agentic_afk_contracts::PlanRunState::Finished);
     assert_eq!(runs[0].assignments[0].status, "blocked");
     assert_eq!(runs[0].assignments[0].review_rejection_count, 1);
     assert!(runs[0].assignments[0].block_reason.is_some());
