@@ -725,6 +725,7 @@ fn router_from_state(state: Arc<AppState>) -> Router {
 }
 
 pub async fn serve(config: ControlPlaneConfig) -> anyhow::Result<()> {
+    set_block_on_plan_run(false);
     let db = persistence::connect(&config.database_url).await?;
     persistence::migrate(&db).await?;
 
@@ -2346,7 +2347,22 @@ async fn list_plan_runs(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     }
 }
 
+static BLOCK_ON_PLAN_RUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_block_on_plan_run(block: bool) {
+    BLOCK_ON_PLAN_RUN.store(block, std::sync::atomic::Ordering::Relaxed);
+}
+
 async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let block = BLOCK_ON_PLAN_RUN.load(std::sync::atomic::Ordering::Relaxed);
+    start_plan_run_inner(state, id, block).await
+}
+
+pub(crate) async fn start_plan_run_inner(
+    state: Arc<AppState>,
+    id: String,
+    block: bool,
+) -> Response {
     let project = match persistence::get_project(&state.db, &id).await {
         Ok(project) => project,
         Err(error) => return persistence_error_to_response(error),
@@ -2358,26 +2374,31 @@ async fn start_plan_run(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     // resource", axum drops the handler future, and `run_plan_run` is
     // cancelled mid-flight — leaking the in-flight row and any orphan
     // Codex container. Spawning detaches execution from the request
-    // future so client disconnect does not cancel it; awaiting the
-    // `JoinHandle` keeps the connected-client response semantics intact
-    // (still returns the terminal `PlanRunResponse`), but if the await
-    // itself is dropped the spawned task keeps running to completion and
-    // writes its terminal state + SSE events from there.
+    // future so client disconnect does not cancel it. In production we
+    // return 202 Accepted immediately after spawning so the Dashboard
+    // never waits long enough to time out; tests opt into the blocking
+    // path so they can assert on terminal state synchronously.
     let prepared = match prepare_plan_run(&state, &id, project).await {
         Ok(prepared) => prepared,
         Err(error) => return error.response,
     };
     let db = state.db.clone();
+    let plan_run = prepared.plan_run.clone();
     let join = tokio::spawn(execute_prepared_plan_run(db, prepared));
-    match join.await {
-        Ok(Ok(finished)) => (StatusCode::CREATED, Json(finished)).into_response(),
-        Ok(Err(error)) => error.response,
-        Err(join_error) => sync_problem_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "urn:agentic-afk:plan-run-task-panicked",
-            "Internal Server Error",
-            format!("Plan Run background task failed: {join_error}"),
-        ),
+    if block {
+        match join.await {
+            Ok(Ok(finished)) => (StatusCode::CREATED, Json(finished)).into_response(),
+            Ok(Err(error)) => error.response,
+            Err(join_error) => sync_problem_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "urn:agentic-afk:plan-run-task-panicked",
+                "Internal Server Error",
+                format!("Plan Run background task failed: {join_error}"),
+            ),
+        }
+    } else {
+        drop(join);
+        (StatusCode::ACCEPTED, Json(plan_run)).into_response()
     }
 }
 
@@ -2961,5 +2982,162 @@ mod tests {
                 value, expected
             );
         }
+    }
+
+    // --- Regression tests for the dashboard NetworkError bug ---
+
+    struct SlowPlanner(u64);
+
+    impl agentic_afk_orchestrator::PlanningPhaseRunner for SlowPlanner {
+        fn run(
+            &self,
+            _prompt: &str,
+            _context: &agentic_afk_orchestrator::plan_run::PlanningContext<'_>,
+        ) -> Result<String, agentic_afk_orchestrator::PlanRunPhaseError> {
+            std::thread::sleep(std::time::Duration::from_millis(self.0));
+            Ok(r#"<plan>{"issues":[],"summary":"none"}</plan>"#.to_string())
+        }
+    }
+
+    #[test]
+    fn start_plan_run_inner_blocks_when_awaiting_join_handle() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let db = persistence::connect_in_memory().await.unwrap();
+            persistence::migrate(&db).await.unwrap();
+            let config = ControlPlaneConfig {
+                bind_address: "127.0.0.1:0".parse().unwrap(),
+                dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
+                database_url: "sqlite::memory:".into(),
+                gh_binary_path: "gh".into(),
+                worktrunk_binary_path: "wt".into(),
+                codex_binary_path: "codex".into(),
+                docker_binary_path: "docker".into(),
+                codex_auth_path: "/dev/null".into(),
+            };
+            let state = build_app_state(
+                config,
+                db,
+                event_bus::EventBus::new(),
+                PlanRunDeps {
+                    refresher: Arc::new(StaticIntegrationBranchRefresher::new(RefreshedBaseline {
+                        commit_sha: "deadbeef".into(),
+                    })),
+                    planner: Arc::new(SlowPlanner(200)),
+                    ..default_test_deps()
+                },
+                Arc::new(agentic_afk_orchestrator::AlwaysOkSandboxPreflight),
+            );
+
+            let project_path = std::env::temp_dir()
+                .join(format!("agentic-afk-blocking-test-{}", std::process::id()));
+            std::fs::create_dir_all(&project_path).unwrap();
+            let project = persistence::create_project(
+                &state.db,
+                &CreateProjectRequest {
+                    path: project_path.to_string_lossy().into_owned(),
+                },
+            )
+            .await
+            .unwrap();
+            persistence::trust_project(&state.db, &project.id.0).await.unwrap();
+            persistence::set_project_execution_config(
+                &state.db,
+                &project.id.0,
+                &SetProjectExecutionConfigRequest {
+                    integration_branch: "main".into(),
+                    max_parallel_tasks: 1,
+                    review_retry_limit: 1,
+                },
+            )
+            .await
+            .unwrap();
+
+            let start = std::time::Instant::now();
+            let resp = start_plan_run_inner(state, project.id.0, true).await;
+            let elapsed = start.elapsed();
+
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            assert!(
+                elapsed >= std::time::Duration::from_millis(200),
+                "handler returned too quickly: {elapsed:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn start_plan_run_inner_returns_before_orchestration_completes() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let db = persistence::connect_in_memory().await.unwrap();
+            persistence::migrate(&db).await.unwrap();
+            let config = ControlPlaneConfig {
+                bind_address: "127.0.0.1:0".parse().unwrap(),
+                dashboard_asset_dir: "target/dx/agentic-afk-dashboard/release/web/public".into(),
+                database_url: "sqlite::memory:".into(),
+                gh_binary_path: "gh".into(),
+                worktrunk_binary_path: "wt".into(),
+                codex_binary_path: "codex".into(),
+                docker_binary_path: "docker".into(),
+                codex_auth_path: "/dev/null".into(),
+            };
+            let state = build_app_state(
+                config,
+                db,
+                event_bus::EventBus::new(),
+                PlanRunDeps {
+                    refresher: Arc::new(StaticIntegrationBranchRefresher::new(RefreshedBaseline {
+                        commit_sha: "deadbeef".into(),
+                    })),
+                    planner: Arc::new(SlowPlanner(10_000)), // would block for 10s if awaited
+                    ..default_test_deps()
+                },
+                Arc::new(agentic_afk_orchestrator::AlwaysOkSandboxPreflight),
+            );
+
+            let project_path = std::env::temp_dir()
+                .join(format!("agentic-afk-async-test-{}", std::process::id()));
+            std::fs::create_dir_all(&project_path).unwrap();
+            let project = persistence::create_project(
+                &state.db,
+                &CreateProjectRequest {
+                    path: project_path.to_string_lossy().into_owned(),
+                },
+            )
+            .await
+            .unwrap();
+            persistence::trust_project(&state.db, &project.id.0).await.unwrap();
+            persistence::set_project_execution_config(
+                &state.db,
+                &project.id.0,
+                &SetProjectExecutionConfigRequest {
+                    integration_branch: "main".into(),
+                    max_parallel_tasks: 1,
+                    review_retry_limit: 1,
+                },
+            )
+            .await
+            .unwrap();
+
+            let start = std::time::Instant::now();
+            let resp = start_plan_run_inner(state, project.id.0, false).await;
+            let elapsed = start.elapsed();
+
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            assert!(
+                elapsed < std::time::Duration::from_millis(100),
+                "handler blocked for {elapsed:?}"
+            );
+        });
+
+        rt.shutdown_background();
     }
 }
