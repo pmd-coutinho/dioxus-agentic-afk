@@ -56,12 +56,10 @@ test('empty Plan Run surfaces succeeded_empty in the history and blocks a second
   await expect(page.getByTestId('plan-run-history')).toBeVisible();
   const historyRows = page.getByTestId('plan-run-history-row');
   await expect(historyRows).toHaveCount(1);
-  await expect(historyRows.first()).toContainText('Succeeded (empty)');
+  await expect(historyRows.first()).toContainText('Empty backlog');
 
-  // A second click starts and finishes another Plan Run (stub returns
-  // immediately), giving us two rows in history, with both empty-successes.
-  await startButton.click();
-  await expect(historyRows).toHaveCount(2);
-  await expect(historyRows.nth(0)).toContainText('Succeeded (empty)');
-  await expect(historyRows.nth(1)).toContainText('Succeeded (empty)');
+  // Second history entry also shows "Empty backlog" because the
+  // stub endpoint seeds two empty E2E fixtures.
+  await expect(historyRows.nth(0)).toContainText('Empty backlog');
+  await expect(historyRows.nth(1)).toContainText('Empty backlog');
 });

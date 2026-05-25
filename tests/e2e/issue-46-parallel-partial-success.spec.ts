@@ -169,10 +169,11 @@ test('parallel partial-success Plan Run shows merged + blocked assignments toget
       finished_at: 'unix:5',
       phase_outputs: [],
       assignments: [],
+      outcome: 'merged_work',
     },
   });
 
   await expect(page.getByTestId('plan-run-history')).toBeVisible();
   const historyRow = page.getByTestId('plan-run-history-row').first();
-  await expect(historyRow).toContainText('Succeeded');
+  await expect(historyRow).toContainText('Merged work');
 });

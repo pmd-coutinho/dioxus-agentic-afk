@@ -1402,15 +1402,13 @@ fn derive_plan_run_history_pill(plan_run: &PlanRunResponse) -> (PillTone, &'stat
     if plan_run.state == agentic_afk_contracts::PlanRunState::Running {
         return (PillTone::Pending, "Running");
     }
-    match PlanRunResponse::classify_outcome(plan_run) {
-        Some(PlanRunOutcome::EmptyBacklog) => (PillTone::Verified, "Succeeded (empty)"),
-        Some(PlanRunOutcome::MergedWork) => (PillTone::Verified, "Finished"),
-        Some(
-            PlanRunOutcome::PlanningFailed
-            | PlanRunOutcome::AssignmentBlocked
-            | PlanRunOutcome::PushNonFastForward
-            | PlanRunOutcome::MergeStagedLeft,
-        ) => (PillTone::Failed, "Finished"),
+    match plan_run.outcome {
+        Some(PlanRunOutcome::MergedWork) => (PillTone::Verified, "Merged work"),
+        Some(PlanRunOutcome::EmptyBacklog) => (PillTone::Verified, "Empty backlog"),
+        Some(PlanRunOutcome::PlanningFailed) => (PillTone::Failed, "Planning failed"),
+        Some(PlanRunOutcome::AssignmentBlocked) => (PillTone::Failed, "Assignment blocked"),
+        Some(PlanRunOutcome::PushNonFastForward) => (PillTone::Failed, "Push failed"),
+        Some(PlanRunOutcome::MergeStagedLeft) => (PillTone::Failed, "Merge staged"),
         None => (PillTone::Verified, "Finished"),
     }
 }
@@ -2744,6 +2742,83 @@ mod tests {
         let (tone, label) = derive_plan_run_stage_pill(None);
         assert_eq!(tone, PillTone::Running);
         assert_eq!(label, "Running");
+    }
+
+    // --- Plan Run Outcome pill (issue #83) ---
+
+    fn finished_plan_run(
+        outcome: Option<PlanRunOutcome>,
+    ) -> PlanRunResponse {
+        let mut pr = plan_run_response("pr1");
+        pr.state = agentic_afk_contracts::PlanRunState::Finished;
+        pr.finished_at = Some("1".to_string());
+        pr.outcome = outcome;
+        pr
+    }
+
+    fn plan_run_response(id: &str) -> PlanRunResponse {
+        PlanRunResponse {
+            id: id.to_string(),
+            project_id: ProjectId("p".to_string()),
+            integration_branch: "main".to_string(),
+            baseline_commit: "abc".to_string(),
+            state: agentic_afk_contracts::PlanRunState::Running,
+            started_at: "0".to_string(),
+            finished_at: None,
+            phase_outputs: vec![],
+            assignments: vec![],
+            stage: None,
+            outcome: None,
+        }
+    }
+
+    #[test]
+    fn history_pill_merged_work_maps_to_verified_pill() {
+        let (tone, label) = derive_plan_run_history_pill(&finished_plan_run(Some(PlanRunOutcome::MergedWork)));
+        assert_eq!(tone, PillTone::Verified);
+        assert_eq!(label, "Merged work");
+    }
+
+    #[test]
+    fn history_pill_empty_backlog_maps_to_verified_pill() {
+        let (tone, label) = derive_plan_run_history_pill(&finished_plan_run(Some(PlanRunOutcome::EmptyBacklog)));
+        assert_eq!(tone, PillTone::Verified);
+        assert_eq!(label, "Empty backlog");
+    }
+
+    #[test]
+    fn history_pill_planning_failed_maps_to_failed_pill() {
+        let (tone, label) = derive_plan_run_history_pill(&finished_plan_run(Some(PlanRunOutcome::PlanningFailed)));
+        assert_eq!(tone, PillTone::Failed);
+        assert_eq!(label, "Planning failed");
+    }
+
+    #[test]
+    fn history_pill_assignment_blocked_maps_to_failed_pill() {
+        let (tone, label) = derive_plan_run_history_pill(&finished_plan_run(Some(PlanRunOutcome::AssignmentBlocked)));
+        assert_eq!(tone, PillTone::Failed);
+        assert_eq!(label, "Assignment blocked");
+    }
+
+    #[test]
+    fn history_pill_push_non_fast_forward_maps_to_failed_pill() {
+        let (tone, label) = derive_plan_run_history_pill(&finished_plan_run(Some(PlanRunOutcome::PushNonFastForward)));
+        assert_eq!(tone, PillTone::Failed);
+        assert_eq!(label, "Push failed");
+    }
+
+    #[test]
+    fn history_pill_merge_staged_left_maps_to_failed_pill() {
+        let (tone, label) = derive_plan_run_history_pill(&finished_plan_run(Some(PlanRunOutcome::MergeStagedLeft)));
+        assert_eq!(tone, PillTone::Failed);
+        assert_eq!(label, "Merge staged");
+    }
+
+    #[test]
+    fn history_pill_no_outcome_falls_back_to_finished() {
+        let (tone, label) = derive_plan_run_history_pill(&finished_plan_run(None));
+        assert_eq!(tone, PillTone::Verified);
+        assert_eq!(label, "Finished");
     }
 
     #[test]

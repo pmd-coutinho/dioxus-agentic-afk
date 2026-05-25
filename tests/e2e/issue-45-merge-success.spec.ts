@@ -124,6 +124,7 @@ test('successful merge surfaces merged assignment, merge phase output, and succe
     finished_at: 'unix:5',
     phase_outputs: [],
     assignments: [],
+    outcome: 'merged_work',
   };
   await request.post(`/api/_test/projects/${project.id}/project-event`, {
     data: succeededPlanRun,
@@ -131,5 +132,5 @@ test('successful merge surfaces merged assignment, merge phase output, and succe
 
   await expect(page.getByTestId('plan-run-history')).toBeVisible();
   const historyRow = page.getByTestId('plan-run-history-row').first();
-  await expect(historyRow).toContainText('Succeeded');
+  await expect(historyRow).toContainText('Merged work');
 });
